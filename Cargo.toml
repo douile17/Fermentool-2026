@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Andrew Zicler <andrew.zicler@googlemail.com>"]
+repository = ""
+
+# Shared dependency versions are added here as later milestones introduce them
+# (tokio, axum, tokio-serial, tokio-modbus, rusqlite, tracing, jiff, ...).
+# See docs/IMPLEMENTATION_PLAN.md §4.1.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }

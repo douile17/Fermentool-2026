@@ -1,0 +1,26 @@
+# Copy to `config.toml` (git-ignored) and edit for this machine.
+# Consumed from milestone 7 onward — see docs/IMPLEMENTATION_PLAN.md §4.9.
+
+port = 8730                     # local web UI / API (bound to 127.0.0.1 only)
+
+[serial]
+path = "COM4"                   # Windows: "COM4"  ·  Linux: "/dev/ttyUSB0"  ·  macOS: "/dev/tty.usbserial-XXXX"
+baud = 9600                     # 1200 | 2400 | 4800 | 9600
+# Frame is fixed at 8E1 (8 data bits, even parity, 1 stop) as required by the LabQ pump.
+
+[pump]
+address = 1                     # MODBUS slave address, 1..247
+default_head = "KT15"
+default_tubing = "16"           # only used for ml/min runs
+
+[resume]
+prompt = true                   # ask before resuming an interrupted run
+grace_minutes = 5               # still "resumable" this long past the planned end
+
+[storage]
+dir = ""                        # empty = OS default data dir
+
+[log]
+dir = ""                        # empty = <storage>/logs
+level = "info"                  # error | warn | info | debug | trace
+retain_days = 30

@@ -1,0 +1,19 @@
+[package]
+name = "fermentool-core"
+description = "Fermentool control daemon: curve engine, MODBUS link, journal, and embedded web UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+default-run = "fermentool-core"
+
+[[bin]]
+name = "fermentool-core"
+path = "src/main.rs"
+
+[dependencies]
+fermentool-curves = { path = "../fermentool-curves" }
+fermentool-modbus = { path = "../fermentool-modbus" }
+# Later milestones add: tokio, axum, tower-http, tokio-serial, tokio-modbus,
+# rusqlite, refinery, serde/serde_json, toml, tracing(+appender), jiff, anyhow,
+# thiserror, rust-embed, clap. See docs/IMPLEMENTATION_PLAN.md §4.1.

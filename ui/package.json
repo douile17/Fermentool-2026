@@ -1,0 +1,20 @@
+{
+  "name": "fermentool-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Fermentool web UI — built to static assets and embedded in the daemon binary",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.1.2",
+    "svelte": "^5.1.9",
+    "vite": "^5.4.10"
+  },
+  "dependencies": {
+    "uplot": "^1.6.31"
+  }
+}
