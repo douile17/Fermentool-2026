@@ -1,13 +1,12 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
-  import { num, RPM_LIMITS } from '../lib/fmt.js';
+  import { num, unitFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
-
-  const unit = 'rpm';
 
   let f = $state({
     name: '',
+    control_var: 'rpm',
     direction: 'cw',
     duration_h: 24,
     kind: 'linear',
@@ -17,8 +16,6 @@
     value: 10, // constant
     mu_per_hour: 0.15,
     steepness: 8,
-    clamp_min: null,
-    clamp_max: null,
   });
 
   let pumpAddr = $state(1);
@@ -28,6 +25,8 @@
       .catch(() => {});
   });
 
+  const unit = $derived(unitFor(f.control_var));
+  const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS);
   const durationS = $derived(Math.round(f.duration_h * 3600));
 
   function curveSpec() {
@@ -45,8 +44,9 @@
       start,
       end,
       duration: durationS,
-      clamp_min: f.clamp_min != null && f.clamp_min !== '' ? Number(f.clamp_min) : RPM_LIMITS.min,
-      clamp_max: f.clamp_max != null && f.clamp_max !== '' ? Number(f.clamp_max) : RPM_LIMITS.max,
+      // Safety clamp = the pump's own limits. The engine re-applies this anyway.
+      clamp_min: lim.min,
+      clamp_max: lim.max,
       params,
     };
   }
@@ -79,7 +79,7 @@
     try {
       await post('/api/runs', {
         name: f.name.trim() || 'run',
-        control_var: 'rpm',
+        control_var: f.control_var,
         direction: f.direction,
         pump_addr: pumpAddr,
         curve: curveSpec(),
@@ -104,8 +104,9 @@
   {/if}
 
   <p class="lede">
-    The pump is driven directly in <b>rpm</b>. Convert to ml/min with a
-    Fermentool calibration (coming soon).
+    <b>rpm</b> drives the motor directly (deterministic). <b>ml/min</b> lets the pump do
+    the conversion using its own head / tubing setting — configure and calibrate that on
+    the pump; Fermentool never changes it.
   </p>
 
   <div class="grid">
@@ -116,6 +117,13 @@
     <label class="field"><span>Duration (hours)</span>
       <input type="number" min="0.1" step="0.5" bind:value={f.duration_h} />
     </label>
+
+    <div class="field"><span>Control</span>
+      <div class="seg">
+        <button class:on={f.control_var === 'rpm'} onclick={() => (f.control_var = 'rpm')}>rpm</button>
+        <button class:on={f.control_var === 'ml_min'} onclick={() => (f.control_var = 'ml_min')}>ml/min</button>
+      </div>
+    </div>
 
     <div class="field"><span>Direction</span>
       <div class="seg">
@@ -167,14 +175,11 @@
         <input type="number" step="1" min="1" bind:value={f.steepness} />
       </label>
     {/if}
-
-    <label class="field"><span>Clamp min ({unit})</span>
-      <input type="number" step="0.1" bind:value={f.clamp_min} placeholder={String(RPM_LIMITS.min)} />
-    </label>
-    <label class="field"><span>Clamp max ({unit})</span>
-      <input type="number" step="0.1" bind:value={f.clamp_max} placeholder={String(RPM_LIMITS.max)} />
-    </label>
   </div>
+
+  <p class="hint mono">
+    setpoint clamped to the pump range {lim.min}–{lim.max} {unit}
+  </p>
 
   <div class="preview">
     <div class="eyebrow" style="margin-bottom:8px">Preview</div>
@@ -213,6 +218,7 @@
     border-top: 1px solid var(--line-soft);
   }
   .pv-cap { font-size: 12px; color: var(--muted); margin-top: var(--s-2); }
+  .hint { font-size: 12px; color: var(--muted); margin: var(--s-4) 0 0; }
   .muted { color: var(--muted); }
   .foot { margin-top: var(--s-6); }
 </style>
