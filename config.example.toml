@@ -12,8 +12,8 @@ baud = 9600                    # 1200 | 2400 | 4800 | 9600
 
 [pump]
 address = 1                     # MODBUS slave address, 1..247
-default_head = "KT15"
-default_tubing = "16"           # only used for ml/min runs
+# Fermentool never writes the pump's head-type / tubing-size registers: control
+# is by rpm, with a Fermentool-side calibration on top of it.
 
 [resume]
 prompt = true                   # ask before resuming an interrupted run

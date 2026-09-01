@@ -1,12 +1,13 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
-  import { num, unitFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
+  import { num, RPM_LIMITS } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
+
+  const unit = 'rpm';
 
   let f = $state({
     name: '',
-    control_var: 'rpm',
     direction: 'cw',
     duration_h: 24,
     tick_interval_s: 10,
@@ -17,8 +18,6 @@
     value: 10, // constant
     mu_per_hour: 0.15,
     steepness: 8,
-    pump_head: null,
-    tubing: null,
     clamp_min: null,
     clamp_max: null,
   });
@@ -26,16 +25,10 @@
   let pumpAddr = $state(1);
   $effect(() => {
     get('/api/config')
-      .then((c) => {
-        pumpAddr = c.pump.address;
-        if (c.pump.default_head != null) f.pump_head = c.pump.default_head;
-        if (c.pump.default_tubing != null) f.tubing = c.pump.default_tubing;
-      })
+      .then((c) => (pumpAddr = c.pump.address))
       .catch(() => {});
   });
 
-  const unit = $derived(unitFor(f.control_var));
-  const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS);
   const durationS = $derived(Math.round(f.duration_h * 3600));
 
   function curveSpec() {
@@ -53,8 +46,8 @@
       start,
       end,
       duration: durationS,
-      clamp_min: f.clamp_min != null && f.clamp_min !== '' ? Number(f.clamp_min) : lim.min,
-      clamp_max: f.clamp_max != null && f.clamp_max !== '' ? Number(f.clamp_max) : lim.max,
+      clamp_min: f.clamp_min != null && f.clamp_min !== '' ? Number(f.clamp_min) : RPM_LIMITS.min,
+      clamp_max: f.clamp_max != null && f.clamp_max !== '' ? Number(f.clamp_max) : RPM_LIMITS.max,
       params,
     };
   }
@@ -87,12 +80,10 @@
     try {
       await post('/api/runs', {
         name: f.name.trim() || 'run',
-        control_var: f.control_var,
+        control_var: 'rpm',
         direction: f.direction,
         tick_interval_s: Number(f.tick_interval_s),
         pump_addr: pumpAddr,
-        pump_head: f.control_var === 'ml_min' && f.pump_head != null ? Number(f.pump_head) : null,
-        tubing: f.control_var === 'ml_min' && f.tubing != null ? Number(f.tubing) : null,
         curve: curveSpec(),
       });
       app.route = 'overview';
@@ -114,6 +105,11 @@
     <div class="err" style="margin-bottom:16px">A run is already active — stop it from Overview first.</div>
   {/if}
 
+  <p class="lede">
+    The pump is driven directly in <b>rpm</b>. Convert to ml/min with a
+    Fermentool calibration (coming soon).
+  </p>
+
   <div class="grid">
     <label class="field"><span>Run name</span>
       <input type="text" bind:value={f.name} placeholder="ferment-A2" />
@@ -122,13 +118,6 @@
     <label class="field"><span>Duration (hours)</span>
       <input type="number" min="0.1" step="0.5" bind:value={f.duration_h} />
     </label>
-
-    <div class="field"><span>Control</span>
-      <div class="seg">
-        <button class:on={f.control_var === 'rpm'} onclick={() => (f.control_var = 'rpm')}>rpm</button>
-        <button class:on={f.control_var === 'ml_min'} onclick={() => (f.control_var = 'ml_min')}>ml/min</button>
-      </div>
-    </div>
 
     <div class="field"><span>Direction</span>
       <div class="seg">
@@ -151,7 +140,7 @@
     </label>
 
     {#if f.kind === 'constant'}
-      <label class="field"><span>Value ({unit})</span>
+      <label class="field"><span>Speed ({unit})</span>
         <input type="number" step="0.1" bind:value={f.value} />
       </label>
     {:else}
@@ -185,20 +174,11 @@
       </label>
     {/if}
 
-    {#if f.control_var === 'ml_min'}
-      <label class="field"><span>Pump-head code</span>
-        <input type="number" bind:value={f.pump_head} placeholder="0" />
-      </label>
-      <label class="field"><span>Tubing code</span>
-        <input type="number" bind:value={f.tubing} placeholder="16" />
-      </label>
-    {/if}
-
     <label class="field"><span>Clamp min ({unit})</span>
-      <input type="number" step="0.1" bind:value={f.clamp_min} placeholder={String(lim.min)} />
+      <input type="number" step="0.1" bind:value={f.clamp_min} placeholder={String(RPM_LIMITS.min)} />
     </label>
     <label class="field"><span>Clamp max ({unit})</span>
-      <input type="number" step="0.1" bind:value={f.clamp_max} placeholder={String(lim.max)} />
+      <input type="number" step="0.1" bind:value={f.clamp_max} placeholder={String(RPM_LIMITS.max)} />
     </label>
   </div>
 
@@ -226,6 +206,8 @@
 </section>
 
 <style>
+  .lede { color: var(--muted); margin: 0 0 var(--s-5); max-width: 60ch; }
+  .lede b { color: var(--ink); }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

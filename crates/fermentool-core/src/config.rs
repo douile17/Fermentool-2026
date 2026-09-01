@@ -64,10 +64,8 @@ pub struct SerialConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PumpConfig {
+    /// MODBUS slave address, 1..247.
     pub address: u8,
-    /// Pump-head code for `ml_min` runs (numeric, per Chart 1).
-    pub default_head: Option<u16>,
-    pub default_tubing: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,11 +118,7 @@ impl Default for SerialConfig {
 
 impl Default for PumpConfig {
     fn default() -> Self {
-        Self {
-            address: 1,
-            default_head: None,
-            default_tubing: None,
-        }
+        Self { address: 1 }
     }
 }
 

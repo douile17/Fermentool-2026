@@ -70,10 +70,6 @@ pub struct RunConfig {
     pub direction: Direction,
     pub tick_interval_s: u32,
     pub pump_addr: u8,
-    /// Pump-head code, required for `ml_min` runs.
-    pub pump_head: Option<u16>,
-    /// Tubing-size code, required for `ml_min` runs.
-    pub tubing: Option<u16>,
     pub curve: CurveSpec,
 }
 
@@ -210,16 +206,10 @@ impl<T: Transport> Engine<T> {
         let duration_s = spec.duration.as_secs() as i64;
         let first = spec.value_at(Duration::ZERO);
 
-        // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3).
+        // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
+        // head-type / tubing-size registers are deliberately left untouched — see
+        // the note in migrations/0001_init.sql.
         self.pump.set_direction(cfg.direction == Direction::Cw)?;
-        if cfg.control_var == ControlVar::MlMin {
-            if let Some(code) = cfg.pump_head {
-                self.pump.set_head_type(code)?;
-            }
-            if let Some(code) = cfg.tubing {
-                self.pump.set_tubing_size(code)?;
-            }
-        }
         write_setpoint(&mut self.pump, cfg.control_var, first)?;
         self.pump.start()?;
 
@@ -230,8 +220,6 @@ impl<T: Transport> Engine<T> {
             direction: cfg.direction,
             tick_interval_s: i64::from(cfg.tick_interval_s),
             pump_addr: cfg.pump_addr,
-            pump_head: cfg.pump_head.map(|c| c.to_string()),
-            tubing: cfg.tubing.map(|c| c.to_string()),
             app_version: self.app_version.clone(),
             curve: spec.clone(),
         })?;
@@ -396,14 +384,6 @@ impl<T: Transport> Engine<T> {
         self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
 
         self.pump.set_direction(run.direction == Direction::Cw)?;
-        if run.control_var == ControlVar::MlMin {
-            if let Some(code) = run.pump_head.as_deref().and_then(|s| s.parse::<u16>().ok()) {
-                self.pump.set_head_type(code)?;
-            }
-            if let Some(code) = run.tubing.as_deref().and_then(|s| s.parse::<u16>().ok()) {
-                self.pump.set_tubing_size(code)?;
-            }
-        }
         write_setpoint(&mut self.pump, run.control_var, target)?;
         self.pump.start()?;
 
@@ -553,8 +533,6 @@ mod tests {
             direction: Direction::Cw,
             tick_interval_s: 10,
             pump_addr: 1,
-            pump_head: None,
-            tubing: None,
             curve: CurveSpec::linear(0.0, 100.0, Duration::from_secs(3600)),
         }
     }
@@ -690,18 +668,18 @@ mod tests {
     }
 
     #[test]
-    fn ml_min_run_sets_head_and_tubing() {
+    fn ml_min_run_writes_the_flow_register_only() {
         let mut e = engine();
         let cfg = RunConfig {
             control_var: ControlVar::MlMin,
-            pump_head: Some(0),
-            tubing: Some(16),
             curve: CurveSpec::linear(10.0, 40.0, Duration::from_secs(3600)),
             ..linear_cfg()
         };
         e.start_run(cfg, t0()).unwrap();
         assert!(e.pump.transport().running());
-        assert_eq!(e.pump.transport().tubing_code(), 16);
+        // head / tubing registers are never touched
+        assert_eq!(e.pump.transport().head_code(), 0);
+        assert_eq!(e.pump.transport().tubing_code(), 0);
         assert!((e.pump.transport().flow_ml_min() - 10.0).abs() < 1e-3);
     }
 

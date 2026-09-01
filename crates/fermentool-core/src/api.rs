@@ -509,7 +509,7 @@ mod tests {
             "/api/runs",
             json!({
                 "name": "t", "control_var": "rpm", "direction": "cw",
-                "tick_interval_s": 1, "pump_addr": 1, "pump_head": null, "tubing": null,
+                "tick_interval_s": 1, "pump_addr": 1,
                 "curve": linear_curve()
             }),
         );
@@ -526,7 +526,7 @@ mod tests {
             "/api/runs",
             json!({
                 "name": "t2", "control_var": "rpm", "direction": "cw",
-                "tick_interval_s": 1, "pump_addr": 1, "pump_head": null, "tubing": null,
+                "tick_interval_s": 1, "pump_addr": 1,
                 "curve": linear_curve()
             }),
         );

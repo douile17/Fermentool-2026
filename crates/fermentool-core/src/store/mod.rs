@@ -143,8 +143,6 @@ pub struct NewRun {
     pub direction: Direction,
     pub tick_interval_s: i64,
     pub pump_addr: u8,
-    pub pump_head: Option<String>,
-    pub tubing: Option<String>,
     pub app_version: String,
     pub curve: CurveSpec,
 }
@@ -162,8 +160,6 @@ pub struct RunRow {
     pub duration_s: i64,
     pub tick_interval_s: i64,
     pub pump_addr: u8,
-    pub pump_head: Option<String>,
-    pub tubing: Option<String>,
     pub app_version: String,
     pub curve: CurveSpec,
 }
@@ -222,7 +218,7 @@ pub struct Store {
 }
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
-     direction, duration_s, tick_interval_s, curve_params, pump_addr, pump_head, tubing, app_version";
+     direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version";
 
 const TICK_COLS: &str = "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note";
 
@@ -294,9 +290,9 @@ impl Store {
             "INSERT INTO runs
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
-                pump_addr, pump_head, tubing, app_version)
+                pump_addr, app_version)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 r.name,
                 created,
@@ -309,8 +305,6 @@ impl Store {
                 r.curve.mode.as_str(),
                 curve_json,
                 r.pump_addr as i64,
-                r.pump_head,
-                r.tubing,
                 r.app_version,
             ],
         )?;
@@ -509,9 +503,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         tick_interval_s: row.get(9)?,
         curve: parse_curve(row.get(10)?)?,
         pump_addr: row.get::<_, i64>(11)? as u8,
-        pump_head: row.get(12)?,
-        tubing: row.get(13)?,
-        app_version: row.get(14)?,
+        app_version: row.get(12)?,
     })
 }
 
@@ -557,8 +549,6 @@ mod tests {
             direction: Direction::Cw,
             tick_interval_s: 10,
             pump_addr: 1,
-            pump_head: None,
-            tubing: None,
             app_version: "0.1.0".into(),
             curve: CurveSpec::exponential_physio(2.0, 0.15, Duration::from_secs(100 * 3600))
                 .with_clamp(0.1, 350.0),

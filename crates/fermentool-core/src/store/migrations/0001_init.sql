@@ -15,10 +15,11 @@ CREATE TABLE runs (
     curve_mode      TEXT    NOT NULL,
     curve_params    TEXT    NOT NULL,                 -- full CurveSpec as JSON
     pump_addr       INTEGER NOT NULL,
-    pump_head       TEXT,
-    tubing          TEXT,
     app_version     TEXT    NOT NULL
 );
+-- Fermentool never writes the pump's head-type / tubing-size registers: those
+-- feed the pump's built-in ml/min table, which we don't use. Control is by rpm,
+-- with a Fermentool-side calibration on top. So there is nothing to record here.
 
 -- At most one run may be 'running' at a time.
 CREATE UNIQUE INDEX ix_runs_one_running ON runs(status) WHERE status = 'running';
