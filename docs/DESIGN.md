@@ -47,9 +47,23 @@ Dark mode: same brand hues, teal lifted for contrast; `--bg #0E1719`, surfaces
 
 ## Layout
 
-- Single centred column (~820 px) for the scaffold; the running app grows to a
-  two-pane layout (nav rail + content) at milestone 8.
-- The big current setpoint is the largest thing on the Active-run view —
-  readable from a distance.
+Reference the user likes: a modern dashboard — left icon **nav rail** (logo top,
+nav middle, status bottom), a top bar (page title · search · meta), and a
+**grid of rounded cards** with soft depth: one hero card with a smooth area
+chart, plus smaller cards for a progress ring, a radar/'spider', a timeline.
+We take that *structure* but render it **light**, in this palette — not the dark
+neon look of the reference.
 
-Tokens live in [`ui/src/app.css`](../ui/src/app.css).
+- Two-pane: 208 px nav rail + fluid content. Collapses to a top strip under 720 px.
+- Cards: `--radius-card` (12 px), 1 px `--line` border, `--shadow-sm`, white surface
+  on the faint `--bg` tint. Generous padding (`--s-5`).
+- Hero area chart: `--teal-700` stroke over a top-down `--lime-300` gradient fill
+  (55% → 0% opacity). Actual-value trace overlaid in `--green-500`.
+- Progress ring: `conic-gradient(--green-500 …, --surface-sunken …)` with a
+  radial-gradient hole — no SVG, no library.
+- The big current setpoint is the largest thing on the Active-run view — readable
+  from across the bench.
+- Active nav item: `color-mix(--teal-700 12%, surface)` tint, teal text.
+
+Tokens live in [`ui/src/app.css`](../ui/src/app.css); the scaffold shell in
+[`ui/src/App.svelte`](../ui/src/App.svelte) already shows the rail + card grid.
