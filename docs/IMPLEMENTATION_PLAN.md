@@ -425,7 +425,11 @@ restart loses nothing.
 4. **`store/`** — SQLite (rusqlite bundled, WAL + synchronous=FULL), hand-rolled
    `user_version` migrations, `Store` with run/tick/event/app_state repos, one-running-run
    partial unique index, `integrity_check`. Timestamps via `jiff`. ✅
-5. **`engine/`** — run lifecycle, tick loop, start/stop sequences, server-side clamps.
+5. **`engine/`** — `Engine<T: Transport>`: `start_run` (clamp∩pump-limits, validate,
+   pump start sequence, insert run), `tick(now)` (wall-clock elapsed → `value_at` → pump
+   write → `append_tick`; write failure journalled, run continues; auto-finish at
+   duration), `stop_run` / `abort_run`, `status()`. Time injected → 100 h run tested in
+   ms. `run_blocking` real-time runner (supervised wrapper is m7). ✅
 6. **Recovery** — startup scan, resume decision, re-init on resume, kill/restart tests.
 7. **API + config** — axum REST + WS, `config.toml`, single-instance lock, logging.
 8. **UI** — new-run + preview, active-run + live chart, history + CSV, resume modal,

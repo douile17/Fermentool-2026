@@ -1,19 +1,21 @@
 //! Fermentool control daemon (binary shell over the `fermentool_core` library).
 //!
-//! Milestone 4 (this file): resolve the data dir, run a self-test that exercises
-//! the curve engine, the pump simulator, and the SQLite store.
+//! Milestone 5 (this file): resolve the data dir, then run a self-test that
+//! drives the whole engine — curve, pump simulator, SQLite journal — across a
+//! synthetic 100 h run.
 //!
 //! Still to come (see `docs/IMPLEMENTATION_PLAN.md` §8):
-//!   5. tick engine (`engine/`)          7. HTTP API + config (`api/`, `config.rs`)
-//!   6. crash recovery / resume          8. embedded Svelte UI
+//!   6. crash recovery / resume          7. HTTP API + config (`api/`, `config.rs`)
+//!   8. embedded Svelte UI               9. per-OS single-binary packaging
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use fermentool_core::store::{ControlVar, Direction, NewRun, Store};
+use fermentool_core::engine::{Engine, RunConfig, TickOutcome};
+use fermentool_core::store::{ControlVar, Direction, Store};
 use fermentool_curves::CurveSpec;
-use fermentool_modbus::{Pump, PumpTransport, SimPump};
-use jiff::Timestamp;
+use fermentool_modbus::{Pump, SimPump};
+use jiff::{SignedDuration, Timestamp};
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -36,38 +38,42 @@ fn data_dir() -> PathBuf {
 fn main() {
     println!("{NAME} {VERSION}");
     println!("data dir : {}", data_dir().display());
-    println!("status   : scaffold (milestone 4) — control engine not yet wired");
+    println!("status   : scaffold (milestone 5) — engine loop ready, daemon wiring next");
 
-    // Curve -> pump self-test.
-    let curve =
-        CurveSpec::linear(5.0, 50.0, Duration::from_secs(100 * 3600)).with_clamp(0.1, 350.0);
-    let at_50h = curve.value_at(Duration::from_secs(50 * 3600));
-    let mut pump = Pump::new(SimPump::new(1), 1);
-    pump.set_direction(true).ok();
-    pump.set_speed_rpm(at_50h as f32).ok();
-    pump.start().ok();
-    let readback = pump.read_speed_rpm().unwrap_or(f32::NAN);
-
-    // Store self-test (in-memory).
-    let store = Store::open_in_memory().expect("open store");
-    let run_id = store
-        .insert_run(&NewRun {
-            name: "self-test".into(),
-            started_at: Timestamp::now(),
-            control_var: ControlVar::Rpm,
-            direction: Direction::Cw,
-            tick_interval_s: 10,
-            pump_addr: 1,
-            pump_head: None,
-            tubing: None,
-            app_version: VERSION.into(),
-            curve,
-        })
-        .expect("insert run");
-    store.integrity_check().expect("integrity");
-
-    println!(
-        "self-test: midpoint {at_50h:.1} rpm, sim running={} readback={readback:.1}, run #{run_id} stored ok",
-        pump.transport().running()
+    let mut engine = Engine::new(
+        Pump::new(SimPump::new(1), 1),
+        Store::open_in_memory().expect("store"),
+        VERSION,
     );
+
+    let start = Timestamp::now();
+    let run_id = engine
+        .start_run(
+            RunConfig {
+                name: "self-test".into(),
+                control_var: ControlVar::Rpm,
+                direction: Direction::Cw,
+                tick_interval_s: 10,
+                pump_addr: 1,
+                pump_head: None,
+                tubing: None,
+                curve: CurveSpec::linear(5.0, 50.0, Duration::from_secs(100 * 3600))
+                    .with_clamp(0.1, 350.0),
+            },
+            start,
+        )
+        .expect("start run");
+
+    // Synthetic ticks across the whole 100 h run.
+    let mut last = 0.0;
+    for h in 0i64..=100 {
+        if let Ok(TickOutcome::Applied { target, .. } | TickOutcome::Finished { target, .. }) =
+            engine.tick(start + SignedDuration::from_secs(h * 3600))
+        {
+            last = target;
+        }
+    }
+
+    let ticks = engine.store().tick_count(run_id).unwrap_or(0);
+    println!("self-test: run #{run_id}, {ticks} ticks journalled, final setpoint {last:.1} rpm");
 }

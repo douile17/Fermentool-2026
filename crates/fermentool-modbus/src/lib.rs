@@ -479,6 +479,16 @@ impl SimPump {
         Self::idx(reg).map(|i| self.regs[i]).unwrap_or(0)
     }
 
+    /// Pump-head code currently set (register 1000).
+    pub fn head_code(&self) -> u16 {
+        self.regs[0]
+    }
+
+    /// Tubing-size code currently set (register 1001).
+    pub fn tubing_code(&self) -> u16 {
+        self.regs[1]
+    }
+
     /// Current commanded motor speed (rpm), as the pump would report it.
     pub fn speed_rpm(&self) -> f32 {
         f32_from_words(self.regs[2], self.regs[3])
