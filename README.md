@@ -6,12 +6,11 @@ exponential fed-batch, sigmoid, step, constant or custom — over runs that aver
 ~100 h, with **crash-safe journalling** and **time-correct resume** after any
 interruption.
 
-> Status: **milestone 3**. `fermentool-curves` complete (six shapes, both parameter
-> modes, `preview()`, `validate()`). `fermentool-modbus` complete: CRC + `f32` +
-> register map + frame builders/parsers + `Pump`/`PumpTransport` over a blocking
-> `Transport`, a fault-injecting `SimPump`, and `SerialTransport` + `available_ports()`
-> behind the `serial` feature — all with byte-exact vendor-frame tests. Next: the
-> SQLite journal, control engine, HTTP API and web UI.
+> Status: **milestone 4**. `fermentool-curves` and `fermentool-modbus` complete (see
+> below). `fermentool-core` now has `store/`: SQLite (bundled, WAL + `synchronous=FULL`),
+> `user_version` migrations, and a `Store` with run / tick / event / app_state repos,
+> a one-running-run guard, and `integrity_check`; timestamps via `jiff`. 39 tests green.
+> Next: the tick engine, then crash recovery, HTTP API and web UI.
 > Full design: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) ·
 > visual language: [`docs/DESIGN.md`](docs/DESIGN.md).
 

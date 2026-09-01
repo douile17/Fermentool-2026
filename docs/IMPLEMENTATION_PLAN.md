@@ -268,7 +268,9 @@ CREATE TABLE events (
 CREATE TABLE app_state (key TEXT PRIMARY KEY, value TEXT);  -- schema_version, ...
 ```
 
-Migrations: `refinery` (embedded, versioned).
+Migrations: hand-rolled — a `&[Migration { version, sql }]` slice (SQL via
+`include_str!`), applied in one transaction to any migration whose version exceeds
+`PRAGMA user_version`, then `user_version` is bumped. No migration-framework dependency.
 
 ### 4.7 Crash recovery / resume logic
 
@@ -420,7 +422,9 @@ restart loses nothing.
 3. **`fermentool-modbus`** — CRC + `f32` encoding + register map + `frame` builders/
    parsers + `Transport`/`PumpTransport`/`Pump` + `SimPump` (fault injection) +
    `serial::SerialTransport` & `available_ports()`. ✅
-4. **`store/`** — SQLite schema, migrations, run/tick/event repos, `integrity_check`.
+4. **`store/`** — SQLite (rusqlite bundled, WAL + synchronous=FULL), hand-rolled
+   `user_version` migrations, `Store` with run/tick/event/app_state repos, one-running-run
+   partial unique index, `integrity_check`. Timestamps via `jiff`. ✅
 5. **`engine/`** — run lifecycle, tick loop, start/stop sequences, server-side clamps.
 6. **Recovery** — startup scan, resume decision, re-init on resume, kill/restart tests.
 7. **API + config** — axum REST + WS, `config.toml`, single-instance lock, logging.

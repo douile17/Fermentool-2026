@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 fermentool-curves = { path = "../fermentool-curves" }
 fermentool-modbus = { path = "../fermentool-modbus" }
-# Later milestones add: tokio, axum, tower-http, tokio-serial, tokio-modbus,
-# rusqlite, refinery, serde/serde_json, toml, tracing(+appender), jiff, anyhow,
-# thiserror, rust-embed, clap. See docs/IMPLEMENTATION_PLAN.md §4.1.
+rusqlite = { version = "0.32", features = ["bundled"] }
+jiff = "0.2"
+serde.workspace = true
+serde_json = "1"
+# Later milestones add: tokio, axum, tower-http, toml, tracing(+appender),
+# anyhow, thiserror, rust-embed, clap. See docs/IMPLEMENTATION_PLAN.md §4.1.

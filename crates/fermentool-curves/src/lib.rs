@@ -35,6 +35,20 @@ pub enum CurveKind {
     Custom,
 }
 
+impl CurveKind {
+    /// The `snake_case` token used in storage and the API (matches the serde name).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CurveKind::Linear => "linear",
+            CurveKind::Exponential => "exponential",
+            CurveKind::Sigmoid => "sigmoid",
+            CurveKind::Step => "step",
+            CurveKind::Constant => "constant",
+            CurveKind::Custom => "custom",
+        }
+    }
+}
+
 /// How the shape constant of a non-trivial curve is supplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +57,16 @@ pub enum ParamMode {
     Endpoints,
     /// A physiological rate is given; the end value is derived from it.
     Physio,
+}
+
+impl ParamMode {
+    /// The `snake_case` token used in storage and the API.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ParamMode::Endpoints => "endpoints",
+            ParamMode::Physio => "physio",
+        }
+    }
 }
 
 /// Interpolation between [`CustomPoint`]s.
