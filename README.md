@@ -6,13 +6,14 @@ exponential fed-batch, sigmoid, step, constant or custom — over runs that aver
 ~100 h, with **crash-safe journalling** and **time-correct resume** after any
 interruption.
 
-> Status: **milestone 6**. Curve engine, MODBUS/pump, SQLite journal, and the control
-> `Engine<T>` all done. Crash recovery landed: `pending_recovery(now, grace)` finds a
-> run left `running` by an unclean stop and reports the elapsed time and the setpoint a
-> resume would apply; `resume` re-runs the full pump start sequence at `value_at(elapsed)`
-> and continues ticking with `started_at` unchanged; `discard_recovery` finishes/aborts
-> it instead. 56 tests green.
-> Next: the HTTP API + config, then the web UI.
+> Status: **milestone 7 — the daemon runs.** `fermentool-core` now loads `config.toml`,
+> opens the journal, builds the engine (real serial port or a built-in simulator), runs
+> it on a dedicated control thread, and serves a REST API on `127.0.0.1:8730`:
+> status · config · preview · runs (create/list/get/ticks/events/stop/abort) · recovery
+> (get/resume/discard) · serial ports · shutdown. Rolling-file logging; graceful
+> shutdown on ctrl-c or `POST /api/shutdown`; port-in-use is the single-instance guard.
+> 66 tests green + a full manual API smoke.
+> Next: the web UI (Svelte) served by the daemon, with a WebSocket for live updates.
 > Full design: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) ·
 > visual language: [`docs/DESIGN.md`](docs/DESIGN.md).
 
@@ -35,7 +36,7 @@ control path.)
 |---|---|
 | `crates/fermentool-curves` | Pure time-profile math (`CurveSpec`), no I/O. Fully unit-tested. |
 | `crates/fermentool-modbus`  | MODBUS-RTU CRC/framing + LabQ register map & limits. Byte-exact tests vs. the vendor doc. |
-| `crates/fermentool-core`    | The daemon: engine, store, serial, HTTP API, embedded UI. |
+| `crates/fermentool-core`    | The daemon — `config` · `store` (SQLite journal) · `engine` (curve engine + crash recovery) · `control` (engine on its own thread) · `api` (axum REST) · embedded UI (m8). |
 | `ui/`                       | Svelte 5 + Vite front-end; built to `ui/dist/`, embedded by the daemon at milestone 8. |
 | `docs/`                     | Implementation plan, design language, wiring, service install. |
 | `LabQ Series MODBUS protocol.{md,pdf}` | Vendor protocol reference. |
@@ -47,7 +48,13 @@ Prerequisites: [Rust (stable, via rustup)](https://rustup.rs) and Node.js ≥ 18
 ```sh
 # Rust crates + tests
 cargo test
+
+# Run the daemon. With no config it writes <data-dir>/config.toml and uses the
+# pump SIMULATOR (serial.path = "sim"). API on http://127.0.0.1:8730.
 cargo run -p fermentool-core
+#   curl http://127.0.0.1:8730/api/status
+#   curl -XPOST http://127.0.0.1:8730/api/shutdown
+
 # pure logic only, no serial backend (hosts without libudev/pkg-config):
 cargo test -p fermentool-modbus --no-default-features
 

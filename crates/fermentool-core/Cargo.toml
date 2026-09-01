@@ -1,6 +1,6 @@
 [package]
 name = "fermentool-core"
-description = "Fermentool control daemon: curve engine, MODBUS link, journal, and embedded web UI"
+description = "Fermentool control daemon: curve engine, MODBUS link, journal, HTTP API, and embedded web UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,8 +15,17 @@ path = "src/main.rs"
 fermentool-curves = { path = "../fermentool-curves" }
 fermentool-modbus = { path = "../fermentool-modbus" }
 rusqlite = { version = "0.32", features = ["bundled"] }
-jiff = "0.2"
+jiff = { version = "0.2", features = ["serde"] }
 serde.workspace = true
 serde_json = "1"
-# Later milestones add: tokio, axum, tower-http, toml, tracing(+appender),
-# anyhow, thiserror, rust-embed, clap. See docs/IMPLEMENTATION_PLAN.md §4.1.
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "time"] }
+axum = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+anyhow = "1"
+# Later milestones add: tower-http (static serving), rust-embed (embed ui/dist).
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

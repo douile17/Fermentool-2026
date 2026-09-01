@@ -1,28 +1,40 @@
-//! Fermentool control daemon (binary shell over the `fermentool_core` library).
+//! Fermentool control daemon.
 //!
-//! Milestone 5 (this file): resolve the data dir, then run a self-test that
-//! drives the whole engine — curve, pump simulator, SQLite journal — across a
-//! synthetic 100 h run.
+//! Milestone 7 (this file): load `config.toml`, start file logging, open the
+//! journal, build the engine (real serial port or the simulator), run it on the
+//! control thread, and serve the REST API on `127.0.0.1:<port>`.
 //!
 //! Still to come (see `docs/IMPLEMENTATION_PLAN.md` §8):
-//!   6. crash recovery / resume          7. HTTP API + config (`api/`, `config.rs`)
-//!   8. embedded Svelte UI               9. per-OS single-binary packaging
+//!   8. embedded Svelte UI + WebSocket push
+//!   9. per-OS single-binary packaging + service files
 
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use fermentool_core::engine::{Engine, RunConfig, TickOutcome};
-use fermentool_core::store::{ControlVar, Direction, Store};
-use fermentool_curves::CurveSpec;
-use fermentool_modbus::{Pump, SimPump};
-use jiff::{SignedDuration, Timestamp};
+use anyhow::Context;
+use tokio::sync::{Notify, RwLock};
+use tracing_appender::non_blocking::WorkerGuard;
 
-const NAME: &str = env!("CARGO_PKG_NAME");
+use fermentool_core::api::{self, AppState};
+use fermentool_core::config::Config;
+use fermentool_core::control;
+use fermentool_core::engine::Engine;
+use fermentool_core::store::Store;
+use fermentool_modbus::serial::SerialTransport;
+use fermentool_modbus::{Pump, SimPump, Transport};
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Default runtime data directory (DB, logs, config). Milestone 7 replaces this
-/// with a config-driven path.
-fn data_dir() -> PathBuf {
+struct Paths {
+    data_dir: PathBuf,
+    config: PathBuf,
+    db: PathBuf,
+    log_dir: PathBuf,
+}
+
+fn default_data_dir() -> PathBuf {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
 
@@ -35,47 +47,137 @@ fn data_dir() -> PathBuf {
         .join("Fermentool")
 }
 
-fn main() {
-    println!("{NAME} {VERSION}");
-    println!("data dir : {}", data_dir().display());
-    println!(
-        "status   : scaffold (milestone 6) — engine + crash recovery ready, daemon wiring next"
-    );
-
-    let mut engine = Engine::new(
-        Pump::new(SimPump::new(1), 1),
-        Store::open_in_memory().expect("store"),
-        VERSION,
-    );
-
-    let start = Timestamp::now();
-    let run_id = engine
-        .start_run(
-            RunConfig {
-                name: "self-test".into(),
-                control_var: ControlVar::Rpm,
-                direction: Direction::Cw,
-                tick_interval_s: 10,
-                pump_addr: 1,
-                pump_head: None,
-                tubing: None,
-                curve: CurveSpec::linear(5.0, 50.0, Duration::from_secs(100 * 3600))
-                    .with_clamp(0.1, 350.0),
-            },
-            start,
-        )
-        .expect("start run");
-
-    // Synthetic ticks across the whole 100 h run.
-    let mut last = 0.0;
-    for h in 0i64..=100 {
-        if let Ok(TickOutcome::Applied { target, .. } | TickOutcome::Finished { target, .. }) =
-            engine.tick(start + SignedDuration::from_secs(h * 3600))
-        {
-            last = target;
-        }
+fn resolve_paths(config_dir_override: Option<&str>) -> Paths {
+    let data_dir = match config_dir_override {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => default_data_dir(),
+    };
+    Paths {
+        config: data_dir.join("config.toml"),
+        db: data_dir.join("fermentool.sqlite"),
+        log_dir: data_dir.join("logs"),
+        data_dir,
     }
+}
 
-    let ticks = engine.store().tick_count(run_id).unwrap_or(0);
-    println!("self-test: run #{run_id}, {ticks} ticks journalled, final setpoint {last:.1} rpm");
+fn init_tracing(level: &str, log_dir: &Path) -> anyhow::Result<WorkerGuard> {
+    use tracing_subscriber::prelude::*;
+
+    std::fs::create_dir_all(log_dir).context("create log dir")?;
+    let file = tracing_appender::rolling::daily(log_dir, "fermentool.log");
+    let (file_writer, guard) = tracing_appender::non_blocking(file);
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer),
+        )
+        .init();
+
+    Ok(guard)
+}
+
+fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<Box<dyn Transport + Send>>> {
+    let store = Store::open(db).context("open journal")?;
+
+    let transport: Box<dyn Transport + Send> = if cfg.use_simulator() {
+        tracing::warn!(
+            "serial.path = \"{}\": using the pump SIMULATOR",
+            cfg.serial.path
+        );
+        Box::new(SimPump::new(cfg.pump.address))
+    } else {
+        match SerialTransport::open(
+            &cfg.serial.path,
+            cfg.serial.baud,
+            Duration::from_millis(1500),
+        ) {
+            Ok(t) => {
+                tracing::info!(port = %cfg.serial.path, baud = cfg.serial.baud, "serial port open");
+                Box::new(t)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "cannot open {} ({e}); falling back to the SIMULATOR",
+                    cfg.serial.path
+                );
+                Box::new(SimPump::new(cfg.pump.address))
+            }
+        }
+    };
+
+    Ok(Engine::new(
+        Pump::new(transport, cfg.pump.address),
+        store,
+        VERSION,
+    ))
+}
+
+async fn shutdown_signal(via_api: Arc<Notify>) {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => tracing::info!("ctrl-c received"),
+        _ = via_api.notified() => {}
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // First pass with defaults so we can find config.toml; then re-resolve using
+    // any storage.dir it sets.
+    let bootstrap = resolve_paths(None);
+    let config = Config::load_or_create(&bootstrap.config)
+        .with_context(|| format!("load {}", bootstrap.config.display()))?;
+    let paths = resolve_paths(Some(&config.storage.dir));
+    let config = Config::load_or_create(&paths.config)?;
+
+    let log_dir = if config.log.dir.is_empty() {
+        paths.log_dir.clone()
+    } else {
+        PathBuf::from(&config.log.dir)
+    };
+    let _log_guard = init_tracing(&config.log.level, &log_dir)?;
+
+    tracing::info!("fermentool-core {VERSION} starting");
+    tracing::info!(data_dir = %paths.data_dir.display(), "paths resolved");
+
+    let engine = build_engine(&config, &paths.db)?;
+    let control = Arc::new(control::spawn(engine, config.grace()));
+    let shutdown = Arc::new(Notify::new());
+
+    let state = AppState {
+        control: Arc::clone(&control),
+        config: Arc::new(RwLock::new(config.clone())),
+        config_path: Arc::new(paths.config.clone()),
+        shutdown: Arc::clone(&shutdown),
+    };
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            anyhow::bail!(
+                "port {} is already in use — another Fermentool instance may be running, \
+                 or change `port` in {}",
+                config.port,
+                paths.config.display()
+            );
+        }
+        Err(e) => return Err(e).context("bind listener"),
+    };
+    tracing::info!("API listening on http://{addr}");
+
+    axum::serve(listener, api::router(state))
+        .with_graceful_shutdown(shutdown_signal(shutdown))
+        .await
+        .context("http server")?;
+
+    control.shutdown();
+    tracing::info!("stopped cleanly");
+    Ok(())
 }

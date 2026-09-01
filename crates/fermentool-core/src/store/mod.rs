@@ -72,13 +72,36 @@ macro_rules! str_enum {
         pub enum $name { $($variant),+ }
 
         impl $name {
-            /// The token stored in the database.
+            /// The token stored in the database / used on the wire.
             pub fn as_str(self) -> &'static str {
                 match self { $(Self::$variant => $s),+ }
             }
-            /// Parse the token stored in the database.
+            /// Parse that token.
             pub fn from_token(s: &str) -> Option<Self> {
                 match s { $($s => Some(Self::$variant),)+ _ => None }
+            }
+        }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                s: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                d: D,
+            ) -> ::core::result::Result<Self, D::Error> {
+                let raw = <String as serde::Deserialize>::deserialize(d)?;
+                Self::from_token(&raw).ok_or_else(|| {
+                    <D::Error as serde::de::Error>::custom(format!(
+                        "invalid {} {raw:?}",
+                        stringify!($name)
+                    ))
+                })
             }
         }
     };
@@ -126,7 +149,7 @@ pub struct NewRun {
     pub curve: CurveSpec,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RunRow {
     pub id: i64,
     pub name: String,
@@ -157,7 +180,7 @@ pub struct NewTick {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TickRow {
     pub id: i64,
     pub run_id: i64,
@@ -179,7 +202,7 @@ pub struct NewEvent {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EventRow {
     pub id: i64,
     pub run_id: Option<i64>,

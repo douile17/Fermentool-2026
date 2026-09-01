@@ -337,6 +337,14 @@ pub trait Transport {
     fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError>;
 }
 
+/// Lets the daemon pick the real serial backend or the simulator at runtime and
+/// still hold one concrete `Pump<Box<dyn Transport + Send>>`.
+impl Transport for Box<dyn Transport + Send> {
+    fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+        (**self).transaction(request)
+    }
+}
+
 /// Pump-level operations over any [`Transport`].
 pub trait PumpTransport {
     fn set_direction(&mut self, clockwise: bool) -> Result<(), PumpError>;

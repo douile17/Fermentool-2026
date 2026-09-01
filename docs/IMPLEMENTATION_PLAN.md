@@ -436,7 +436,15 @@ restart loses nothing.
    continues ticking from `last_seq+1`; `started_at` unchanged; refused past
    `duration+grace`), `discard_recovery(now, terminal_status)`. `crash_detected` +
    `resume` events. Tested via a real tempfile DB across dropped `Engine`s. ✅
-7. **API + config** — axum REST + WS, `config.toml`, single-instance lock, logging.
+7. **API + config** — `config.rs` (defaulted `config.toml`, load-or-create). `control.rs`:
+   the `Engine` lives on one dedicated OS thread; the async side sends `Command`s over a
+   channel and awaits `oneshot` replies; `recv_timeout(next_tick)` keeps ticks on cadence;
+   every command/tick runs in `catch_unwind`. `api.rs`: axum REST on `127.0.0.1` —
+   status / config (GET+PUT) / preview / runs (list, create=start, get, ticks, events,
+   stop, abort) / recovery (get, resume, discard) / serial ports / shutdown. Simulator
+   fallback (`serial.path = "sim"` or open failure). Rolling-file `tracing`. Port-in-use =
+   single-instance guard. Graceful shutdown on ctrl-c or `POST /api/shutdown`. WS push +
+   static-UI serving deferred to m8. ✅
 8. **UI** — new-run + preview, active-run + live chart, history + CSV, resume modal,
    settings.
 9. **Package** — embed UI, per-OS binaries, service docs.

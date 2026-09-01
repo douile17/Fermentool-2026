@@ -12,6 +12,7 @@ use std::time::Duration;
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::{limits, Pump, PumpError, PumpTransport, Transport};
 use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
 
 use crate::store::{
     ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunStatus, Store, StoreError,
@@ -61,8 +62,8 @@ impl From<StoreError> for EngineError {
 
 type Result<T> = std::result::Result<T, EngineError>;
 
-/// What the caller supplies to start a run.
-#[derive(Debug, Clone)]
+/// What the caller supplies to start a run (also the `POST /api/runs` body).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     pub name: String,
     pub control_var: ControlVar,
@@ -78,7 +79,7 @@ pub struct RunConfig {
 
 /// What [`Engine::pending_recovery`] found: a run that was `running` when the
 /// process last stopped, i.e. it did not end cleanly.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RecoveryInfo {
     pub run_id: i64,
     pub name: String,
@@ -99,7 +100,8 @@ pub struct RecoveryInfo {
 }
 
 /// Result of a single [`Engine::tick`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum TickOutcome {
     /// No run is active.
     Idle,
@@ -113,12 +115,12 @@ pub enum TickOutcome {
     Finished { seq: i64, target: f64 },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {
     pub active: Option<ActiveStatus>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ActiveStatus {
     pub run_id: i64,
     pub started_at: Timestamp,
