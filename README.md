@@ -6,14 +6,13 @@ exponential fed-batch, sigmoid, step, constant or custom — over runs that aver
 ~100 h, with **crash-safe journalling** and **time-correct resume** after any
 interruption.
 
-> Status: **milestone 7 — the daemon runs.** `fermentool-core` now loads `config.toml`,
-> opens the journal, builds the engine (real serial port or a built-in simulator), runs
-> it on a dedicated control thread, and serves a REST API on `127.0.0.1:8730`:
-> status · config · preview · runs (create/list/get/ticks/events/stop/abort) · recovery
-> (get/resume/discard) · serial ports · shutdown. Rolling-file logging; graceful
-> shutdown on ctrl-c or `POST /api/shutdown`; port-in-use is the single-instance guard.
-> 66 tests green + a full manual API smoke.
-> Next: the web UI (Svelte) served by the daemon, with a WebSocket for live updates.
+> Status: **milestone 8 — it's an app.** `cargo run -p fermentool-core` starts the
+> daemon and serves the Svelte UI at **http://127.0.0.1:8730** (simulator by default).
+> The daemon: `config.toml`, SQLite journal, curve engine + crash recovery on a control
+> thread, REST API + a `/api/ws` status stream, graceful shutdown. The UI: Overview
+> (Start → Now → Target band, live progress, planned-vs-actual chart, journal, Stop),
+> New run (curve builder + live preview), History (+ CSV), Settings. 66 tests green.
+> Next: per-OS release binaries + service files, then real-pump bring-up.
 > Full design: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) ·
 > visual language: [`docs/DESIGN.md`](docs/DESIGN.md).
 

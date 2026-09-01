@@ -445,9 +445,14 @@ restart loses nothing.
    fallback (`serial.path = "sim"` or open failure). Rolling-file `tracing`. Port-in-use =
    single-instance guard. Graceful shutdown on ctrl-c or `POST /api/shutdown`. WS push +
    static-UI serving deferred to m8. ✅
-8. **UI** — new-run + preview, active-run + live chart, history + CSV, resume modal,
-   settings.
-9. **Package** — embed UI, per-OS binaries, service docs.
+8. **UI** — (a) daemon side: `GET /api/ws` broadcasts `DaemonStatus` on every state
+   change; `rust-embed` bakes `ui/dist/` in, router fallback serves it (SPA). (b) Svelte
+   app: nav rail + Overview (idle empty-state / active hero with Start→Now→Target band,
+   live progress, planned-vs-actual chart, journal, Stop), New run (curve builder +
+   debounced preview), History (list + detail + CSV), Settings (config form + shutdown),
+   ResumeModal. Hand-rolled SVG `Chart`. White-dominant per `docs/DESIGN.md`. ✅
+9. **Package** — `ui/dist` committed so the crate builds without Node; still to do:
+   per-OS release binaries, service files.
 10. **Soak + field test** — 100 h sim, then real pump bring-up.
 11. **Docs** — README, `wiring.md`, `service-install.md`.
 
