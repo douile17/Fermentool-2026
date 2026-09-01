@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{broadcast, Notify, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use fermentool_core::api::{self, AppState};
@@ -147,7 +147,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(data_dir = %paths.data_dir.display(), "paths resolved");
 
     let engine = build_engine(&config, &paths.db)?;
-    let control = Arc::new(control::spawn(engine, config.grace()));
+    let (events, _) = broadcast::channel(64);
+    let control = Arc::new(control::spawn(engine, config.grace(), events.clone()));
     let shutdown = Arc::new(Notify::new());
 
     let state = AppState {
@@ -155,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(RwLock::new(config.clone())),
         config_path: Arc::new(paths.config.clone()),
         shutdown: Arc::clone(&shutdown),
+        events,
     };
 
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));

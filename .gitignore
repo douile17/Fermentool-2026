@@ -5,7 +5,9 @@
 
 # Node / web UI
 node_modules/
-ui/dist/
+# ui/dist/ IS committed — rust-embed bakes it into the daemon binary, so the
+# crate must always build. Rebuild it with `npm run build` and commit alongside
+# UI source changes.
 
 # Local runtime data, logs, and machine-specific config
 /data/

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use serde::Serialize;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::Transport;
@@ -99,15 +99,33 @@ impl ControlHandle {
     }
 }
 
-/// Move `engine` onto its own thread and return the handle.
-pub fn spawn<T>(mut engine: Engine<T>, grace: Duration) -> ControlHandle
+/// The current daemon status (cheap; called every tick and on demand).
+pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> DaemonStatus {
+    DaemonStatus {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        active: engine.status().active,
+        has_pending_recovery: engine
+            .pending_recovery(Timestamp::now(), grace)
+            .map(|r| r.is_some())
+            .unwrap_or(false),
+    }
+}
+
+/// Move `engine` onto its own thread and return the handle. `events` receives a
+/// [`DaemonStatus`] after every applied tick and every state-changing command
+/// (fan-out to the WebSocket).
+pub fn spawn<T>(
+    mut engine: Engine<T>,
+    grace: Duration,
+    events: broadcast::Sender<DaemonStatus>,
+) -> ControlHandle
 where
     T: Transport + Send + 'static,
 {
     let (tx, rx) = mpsc::channel::<Command>();
     let join = std::thread::Builder::new()
         .name("fermentool-control".into())
-        .spawn(move || control_loop(&mut engine, &rx, grace))
+        .spawn(move || control_loop(&mut engine, &rx, grace, &events))
         .expect("spawn control thread");
 
     ControlHandle {
@@ -120,6 +138,7 @@ fn control_loop<T: Transport>(
     engine: &mut Engine<T>,
     rx: &mpsc::Receiver<Command>,
     grace: Duration,
+    events: &broadcast::Sender<DaemonStatus>,
 ) {
     tracing::info!("control loop started");
     loop {
@@ -130,8 +149,12 @@ fn control_loop<T: Transport>(
                 let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     handle(engine, cmd, grace)
                 }));
-                if done.is_err() {
-                    tracing::error!("panic while handling a command; loop continues");
+                match done {
+                    Ok(true) => {
+                        let _ = events.send(current_status(engine, grace));
+                    }
+                    Ok(false) => {}
+                    Err(_) => tracing::error!("panic while handling a command; loop continues"),
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -140,12 +163,21 @@ fn control_loop<T: Transport>(
                 {
                     Ok(TickOutcome::Finished { seq, target }) => {
                         tracing::info!(seq, target, "run finished");
+                        true
                     }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("tick error: {e}"),
+                    Ok(TickOutcome::Applied { .. }) => true,
+                    Ok(TickOutcome::Idle) => false,
+                    Err(e) => {
+                        tracing::warn!("tick error: {e}");
+                        false
+                    }
                 }));
-                if done.is_err() {
-                    tracing::error!("panic in tick; loop continues");
+                match done {
+                    Ok(true) => {
+                        let _ = events.send(current_status(engine, grace));
+                    }
+                    Ok(false) => {}
+                    Err(_) => tracing::error!("panic in tick; loop continues"),
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -154,29 +186,26 @@ fn control_loop<T: Transport>(
     tracing::info!("control loop stopped");
 }
 
-fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) {
+/// Returns `true` when the run state may have changed and a status broadcast is warranted.
+fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) -> bool {
     let now = Timestamp::now();
     match cmd {
-        Command::Shutdown => {}
+        Command::Shutdown => false,
         Command::Status(reply) => {
-            let has_pending_recovery = engine
-                .pending_recovery(now, grace)
-                .map(|r| r.is_some())
-                .unwrap_or(false);
-            let _ = reply.send(DaemonStatus {
-                app_version: env!("CARGO_PKG_VERSION").to_string(),
-                active: engine.status().active,
-                has_pending_recovery,
-            });
+            let _ = reply.send(current_status(engine, grace));
+            false
         }
         Command::StartRun(cfg, reply) => {
             let _ = reply.send(engine.start_run(cfg, now).map_err(|e| e.to_string()));
+            true
         }
         Command::StopRun(reply) => {
             let _ = reply.send(engine.stop_run(now).map_err(|e| e.to_string()));
+            true
         }
         Command::AbortRun(reply) => {
             let _ = reply.send(engine.abort_run(now).map_err(|e| e.to_string()));
+            true
         }
         Command::Recovery(reply) => {
             let _ = reply.send(
@@ -184,9 +213,11 @@ fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) {
                     .pending_recovery(now, grace)
                     .map_err(|e| e.to_string()),
             );
+            false
         }
         Command::Resume(reply) => {
             let _ = reply.send(engine.resume(now, grace).map_err(|e| e.to_string()));
+            true
         }
         Command::DiscardRecovery(status, reply) => {
             let _ = reply.send(
@@ -194,12 +225,15 @@ fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) {
                     .discard_recovery(now, status)
                     .map_err(|e| e.to_string()),
             );
+            true
         }
         Command::GetRun(id, reply) => {
             let _ = reply.send(engine.store().run(id).map_err(|e| e.to_string()));
+            false
         }
         Command::ListRuns(limit, reply) => {
             let _ = reply.send(engine.store().list_runs(limit).map_err(|e| e.to_string()));
+            false
         }
         Command::GetTicks {
             run_id,
@@ -213,6 +247,7 @@ fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) {
                     .ticks(run_id, from, to)
                     .map_err(|e| e.to_string()),
             );
+            false
         }
         Command::GetEvents {
             run_id,
@@ -225,6 +260,7 @@ fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) {
                     .events(Some(run_id), limit)
                     .map_err(|e| e.to_string()),
             );
+            false
         }
         Command::Preview(spec, samples, reply) => {
             let series = spec
@@ -233,6 +269,7 @@ fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) {
                 .map(|(t, v)| [t, v])
                 .collect();
             let _ = reply.send(series);
+            false
         }
     }
 }

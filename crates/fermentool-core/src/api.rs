@@ -8,22 +8,29 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{broadcast, Notify, RwLock};
 
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::serial::available_ports;
 
 use crate::config::Config;
-use crate::control::{Command, ControlHandle};
+use crate::control::{Command, ControlHandle, DaemonStatus};
 use crate::engine::RunConfig;
 use crate::store::RunStatus;
+
+/// The built Svelte UI (`ui/dist/`), baked into the binary. The folder path is
+/// resolved relative to this crate's `Cargo.toml`.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../ui/dist"]
+struct Assets;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -32,6 +39,8 @@ pub struct AppState {
     pub config_path: Arc<PathBuf>,
     /// Notified by `POST /api/shutdown` to stop the server gracefully.
     pub shutdown: Arc<Notify>,
+    /// Status fan-out to `/api/ws` subscribers.
+    pub events: broadcast::Sender<DaemonStatus>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -50,6 +59,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/recovery/discard", post(discard))
         .route("/api/serial/ports", get(serial_ports))
         .route("/api/shutdown", post(shutdown))
+        .route("/api/ws", get(ws_upgrade))
+        .fallback(static_handler)
         .with_state(state)
 }
 
@@ -284,6 +295,96 @@ async fn shutdown(State(s): State<AppState>) -> Response {
     Json(json!({ "stopping": true })).into_response()
 }
 
+// ---------------------------------------------------------------------------
+// WebSocket: push a DaemonStatus on connect and on every state change
+// ---------------------------------------------------------------------------
+
+async fn ws_upgrade(State(s): State<AppState>, up: WebSocketUpgrade) -> Response {
+    up.on_upgrade(move |socket| ws_loop(socket, s))
+}
+
+async fn ws_loop(mut socket: WebSocket, s: AppState) {
+    let mut rx = s.events.subscribe();
+
+    // initial snapshot
+    if let Ok(st) = s.control.call(Command::Status).await {
+        if send_status(&mut socket, &st).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            update = rx.recv() => match update {
+                Ok(st) => {
+                    if send_status(&mut socket, &st).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {}
+                Some(Err(_)) => break,
+            },
+        }
+    }
+}
+
+async fn send_status(socket: &mut WebSocket, st: &DaemonStatus) -> Result<(), axum::Error> {
+    let text = serde_json::to_string(st).unwrap_or_else(|_| "{}".into());
+    socket.send(Message::Text(text.into())).await
+}
+
+// ---------------------------------------------------------------------------
+// static UI (SPA)
+// ---------------------------------------------------------------------------
+
+fn mime_for(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "map" => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn static_handler(uri: Uri) -> Response {
+    let raw = uri.path().trim_start_matches('/');
+    let path = if raw.is_empty() { "index.html" } else { raw };
+
+    if let Some(file) = Assets::get(path) {
+        return (
+            [(header::CONTENT_TYPE, mime_for(path))],
+            file.data.into_owned(),
+        )
+            .into_response();
+    }
+    // SPA fallback: unknown non-asset path -> index.html
+    match Assets::get("index.html") {
+        Some(index) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            index.data.into_owned(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "UI not built — run `npm run build` in ui/",
+        )
+            .into_response(),
+    }
+}
+
 async fn serial_ports() -> ApiResult<Response> {
     let ports = available_ports().map_err(|e| ApiError::Conflict(e.to_string()))?;
     let out: Vec<_> = ports
@@ -320,11 +421,17 @@ mod tests {
             Store::open_in_memory().unwrap(),
             "test",
         );
+        let (events, _) = broadcast::channel(16);
         AppState {
-            control: Arc::new(crate::control::spawn(engine, Duration::from_secs(300))),
+            control: Arc::new(crate::control::spawn(
+                engine,
+                Duration::from_secs(300),
+                events.clone(),
+            )),
             config: Arc::new(RwLock::new(Config::default())),
             config_path: Arc::new(std::env::temp_dir().join("ft-api-test.toml")),
             shutdown: Arc::new(Notify::new()),
+            events,
         }
     }
 
