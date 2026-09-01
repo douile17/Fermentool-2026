@@ -18,9 +18,14 @@ use crate::store::{
     ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunStatus, Store, StoreError,
 };
 
-/// Smallest / largest allowed tick interval.
-pub const MIN_TICK_INTERVAL_S: u32 = 1;
-pub const MAX_TICK_INTERVAL_S: u32 = 300;
+/// Fixed setpoint cadence — not user-tunable.
+///
+/// 1 s is far finer than anything the run needs (a 100 h feed profile moves the
+/// setpoint by a tiny fraction per second) and far coarser than one MODBUS
+/// transaction (~tens of ms), so there is ~10x headroom and no risk of the
+/// "slave busy" exception. Faster would only bloat the journal and the bus for
+/// no physical gain; the pump's own 0.1 rpm step and internal ramp dominate.
+pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -68,7 +73,6 @@ pub struct RunConfig {
     pub name: String,
     pub control_var: ControlVar,
     pub direction: Direction,
-    pub tick_interval_s: u32,
     pub pump_addr: u8,
     pub curve: CurveSpec,
 }
@@ -122,6 +126,7 @@ pub struct ActiveStatus {
     pub started_at: Timestamp,
     pub duration_s: i64,
     pub control_var: ControlVar,
+    /// Always [`TICK_INTERVAL`] in seconds — kept in the payload for display.
     pub tick_interval_s: u32,
     pub last_seq: Option<i64>,
     pub last_target: Option<f64>,
@@ -134,8 +139,6 @@ struct ActiveRun {
     spec: CurveSpec,
     control_var: ControlVar,
     duration_s: i64,
-    tick_interval: Duration,
-    tick_interval_s: u32,
     next_seq: i64,
     last_target: Option<f64>,
 }
@@ -170,16 +173,17 @@ impl<T: Transport> Engine<T> {
                 started_at: a.started_at,
                 duration_s: a.duration_s,
                 control_var: a.control_var,
-                tick_interval_s: a.tick_interval_s,
+                tick_interval_s: TICK_INTERVAL.as_secs() as u32,
                 last_seq: (a.next_seq > 0).then_some(a.next_seq - 1),
                 last_target: a.last_target,
             }),
         }
     }
 
-    /// The active run's tick cadence, if a run is running.
+    /// [`TICK_INTERVAL`] while a run is active, so the control loop knows how
+    /// long to wait between ticks.
     pub fn tick_interval(&self) -> Option<Duration> {
-        self.active.as_ref().map(|a| a.tick_interval)
+        self.active.as_ref().map(|_| TICK_INTERVAL)
     }
 
     /// Start a run at `now`: intersect the curve clamps with the pump limits,
@@ -187,11 +191,6 @@ impl<T: Transport> Engine<T> {
     pub fn start_run(&mut self, cfg: RunConfig, now: Timestamp) -> Result<i64> {
         if self.active.is_some() {
             return Err(EngineError::Busy);
-        }
-        if !(MIN_TICK_INTERVAL_S..=MAX_TICK_INTERVAL_S).contains(&cfg.tick_interval_s) {
-            return Err(EngineError::Config(format!(
-                "tick interval must be {MIN_TICK_INTERVAL_S}..={MAX_TICK_INTERVAL_S} s"
-            )));
         }
 
         let (lo, hi) = match cfg.control_var {
@@ -218,7 +217,7 @@ impl<T: Transport> Engine<T> {
             started_at: now,
             control_var: cfg.control_var,
             direction: cfg.direction,
-            tick_interval_s: i64::from(cfg.tick_interval_s),
+            tick_interval_s: TICK_INTERVAL.as_secs() as i64,
             pump_addr: cfg.pump_addr,
             app_version: self.app_version.clone(),
             curve: spec.clone(),
@@ -237,8 +236,6 @@ impl<T: Transport> Engine<T> {
             spec,
             control_var: cfg.control_var,
             duration_s,
-            tick_interval: Duration::from_secs(u64::from(cfg.tick_interval_s)),
-            tick_interval_s: cfg.tick_interval_s,
             next_seq: 0,
             last_target: Some(first),
         });
@@ -398,15 +395,12 @@ impl<T: Transport> Engine<T> {
             )),
         })?;
 
-        let interval = run.tick_interval_s.max(1) as u64;
         self.active = Some(ActiveRun {
             id: run.id,
             started_at: run.started_at,
             spec: run.curve,
             control_var: run.control_var,
             duration_s: run.duration_s,
-            tick_interval: Duration::from_secs(interval),
-            tick_interval_s: interval as u32,
             next_seq,
             last_target: Some(target),
         });
@@ -486,10 +480,7 @@ pub fn run_blocking<T: Transport>(engine: &mut Engine<T>, stop: &AtomicBool) -> 
             TickOutcome::Idle | TickOutcome::Finished { .. } => break,
             TickOutcome::Applied { .. } => {}
         }
-        let interval = engine
-            .tick_interval()
-            .unwrap_or_else(|| Duration::from_secs(10));
-        sleep_interruptible(interval, stop);
+        sleep_interruptible(engine.tick_interval().unwrap_or(TICK_INTERVAL), stop);
     }
     Ok(())
 }
@@ -531,7 +522,6 @@ mod tests {
             name: "r".into(),
             control_var: ControlVar::Rpm,
             direction: Direction::Cw,
-            tick_interval_s: 10,
             pump_addr: 1,
             curve: CurveSpec::linear(0.0, 100.0, Duration::from_secs(3600)),
         }
@@ -559,17 +549,6 @@ mod tests {
         assert!(matches!(
             e.start_run(linear_cfg(), t0()),
             Err(EngineError::Busy)
-        ));
-    }
-
-    #[test]
-    fn bad_tick_interval_is_rejected() {
-        let mut e = engine();
-        let mut cfg = linear_cfg();
-        cfg.tick_interval_s = 0;
-        assert!(matches!(
-            e.start_run(cfg, t0()),
-            Err(EngineError::Config(_))
         ));
     }
 

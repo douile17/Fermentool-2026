@@ -10,7 +10,6 @@
     name: '',
     direction: 'cw',
     duration_h: 24,
-    tick_interval_s: 10,
     kind: 'linear',
     mode: 'endpoints',
     start: 5,
@@ -82,7 +81,6 @@
         name: f.name.trim() || 'run',
         control_var: 'rpm',
         direction: f.direction,
-        tick_interval_s: Number(f.tick_interval_s),
         pump_addr: pumpAddr,
         curve: curveSpec(),
       });
@@ -133,10 +131,6 @@
         <option value="sigmoid">Sigmoid (logistic)</option>
         <option value="constant">Constant</option>
       </select>
-    </label>
-
-    <label class="field"><span>Tick every (seconds)</span>
-      <input type="number" min="1" max="300" bind:value={f.tick_interval_s} />
     </label>
 
     {#if f.kind === 'constant'}

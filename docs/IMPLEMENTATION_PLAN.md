@@ -209,11 +209,14 @@ loop {
     store.append_tick(run.id, seq, now_wall, elapsed, target, ok, readback);
     broadcast(Status { .. });
     if elapsed >= run.duration { finish(run); break; }
-    sleep_until(next_tick);                            // fixed cadence, default 10 s
+    sleep_until(next_tick);                            // fixed 1 s cadence
 }
 ```
 
-- `tick_interval` configurable per run (default 10 s; min 1 s, max 300 s).
+- `TICK_INTERVAL` = **1 s, fixed** (not user-tunable). Far finer than any run needs
+  (a 100 h profile moves the setpoint a tiny fraction per second) and far coarser than
+  one MODBUS transaction (~tens of ms) — ~10x headroom, no "slave busy" risk. Faster
+  would only bloat the journal/bus with no physical gain. Journal ≈ 360 k rows / 100 h.
 - Wall-clock elapsed (not an accumulator) so a paused/late/frozen process still computes
   the *correct* setpoint for real time — this is what makes resume trivially correct.
 - A missed/failed write is logged (`written_ok = 0`) and simply retried next tick; the
