@@ -29,7 +29,8 @@ fn data_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
 
-    base.unwrap_or_else(|| PathBuf::from(".")).join("Fermentool")
+    base.unwrap_or_else(|| PathBuf::from("."))
+        .join("Fermentool")
 }
 
 fn main() {

@@ -114,9 +114,14 @@ pub enum CurveParams {
     Linear(LinearParams),
     Exponential(ExponentialParams),
     Sigmoid(SigmoidParams),
-    Step { segments: Vec<StepSegment> },
+    Step {
+        segments: Vec<StepSegment>,
+    },
     Constant,
-    Custom { points: Vec<CustomPoint>, interp: Interp },
+    Custom {
+        points: Vec<CustomPoint>,
+        interp: Interp,
+    },
 }
 
 impl CurveParams {
@@ -153,7 +158,13 @@ pub struct CurveSpec {
 }
 
 impl CurveSpec {
-    fn base(mode: ParamMode, start: f64, end: f64, duration: Duration, params: CurveParams) -> Self {
+    fn base(
+        mode: ParamMode,
+        start: f64,
+        end: f64,
+        duration: Duration,
+        params: CurveParams,
+    ) -> Self {
         Self {
             mode,
             start,
@@ -409,14 +420,7 @@ fn logistic(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }
 
-fn sigmoid_value(
-    s: f64,
-    e: f64,
-    p: f64,
-    t_hours: f64,
-    mode: ParamMode,
-    sp: &SigmoidParams,
-) -> f64 {
+fn sigmoid_value(s: f64, e: f64, p: f64, t_hours: f64, mode: ParamMode, sp: &SigmoidParams) -> f64 {
     match mode {
         ParamMode::Physio => s + (e - s) * logistic(sp.k_per_hour * (t_hours - sp.midpoint_hours)),
         ParamMode::Endpoints => {
@@ -620,8 +624,14 @@ mod tests {
             clamp_max: f64::MAX,
             params: CurveParams::Step {
                 segments: vec![
-                    StepSegment { at_seconds: 7200.0, value: 30.0 },
-                    StepSegment { at_seconds: 3600.0, value: 20.0 },
+                    StepSegment {
+                        at_seconds: 7200.0,
+                        value: 30.0,
+                    },
+                    StepSegment {
+                        at_seconds: 3600.0,
+                        value: 20.0,
+                    },
                 ],
             },
         };
@@ -635,9 +645,18 @@ mod tests {
     #[test]
     fn custom_linear_and_hold_interpolation() {
         let pts = vec![
-            CustomPoint { at_seconds: 0.0, value: 10.0 },
-            CustomPoint { at_seconds: 100.0, value: 20.0 },
-            CustomPoint { at_seconds: 200.0, value: 20.0 },
+            CustomPoint {
+                at_seconds: 0.0,
+                value: 10.0,
+            },
+            CustomPoint {
+                at_seconds: 100.0,
+                value: 20.0,
+            },
+            CustomPoint {
+                at_seconds: 200.0,
+                value: 20.0,
+            },
         ];
         let lin = CurveSpec {
             mode: ParamMode::Endpoints,
@@ -646,14 +665,20 @@ mod tests {
             duration: Duration::from_secs(200),
             clamp_min: 0.0,
             clamp_max: f64::MAX,
-            params: CurveParams::Custom { points: pts.clone(), interp: Interp::Linear },
+            params: CurveParams::Custom {
+                points: pts.clone(),
+                interp: Interp::Linear,
+            },
         };
         assert!(close(lin.value_at(Duration::from_secs(50)), 15.0));
         assert!(close(lin.value_at(Duration::from_secs(150)), 20.0));
         assert!(close(lin.value_at(Duration::from_secs(200)), 20.0));
 
         let hold = CurveSpec {
-            params: CurveParams::Custom { points: pts, interp: Interp::Hold },
+            params: CurveParams::Custom {
+                points: pts,
+                interp: Interp::Hold,
+            },
             ..lin
         };
         assert!(close(hold.value_at(Duration::from_secs(50)), 10.0));
@@ -695,10 +720,16 @@ mod tests {
     #[test]
     fn validate_accepts_good_specs_and_rejects_bad_ones() {
         assert!(CurveSpec::linear(1.0, 10.0, hours(1)).validate().is_ok());
-        assert!(CurveSpec::exponential_endpoints(1.0, 10.0, hours(1)).validate().is_ok());
+        assert!(CurveSpec::exponential_endpoints(1.0, 10.0, hours(1))
+            .validate()
+            .is_ok());
 
-        assert!(CurveSpec::linear(1.0, 10.0, Duration::ZERO).validate().is_err());
-        assert!(CurveSpec::exponential_endpoints(0.0, 10.0, hours(1)).validate().is_err());
+        assert!(CurveSpec::linear(1.0, 10.0, Duration::ZERO)
+            .validate()
+            .is_err());
+        assert!(CurveSpec::exponential_endpoints(0.0, 10.0, hours(1))
+            .validate()
+            .is_err());
 
         let empty_step = CurveSpec {
             params: CurveParams::Step { segments: vec![] },
@@ -710,8 +741,14 @@ mod tests {
             duration: Duration::from_secs(100),
             params: CurveParams::Custom {
                 points: vec![
-                    CustomPoint { at_seconds: 50.0, value: 1.0 },
-                    CustomPoint { at_seconds: 50.0, value: 2.0 },
+                    CustomPoint {
+                        at_seconds: 50.0,
+                        value: 1.0,
+                    },
+                    CustomPoint {
+                        at_seconds: 50.0,
+                        value: 2.0,
+                    },
                 ],
                 interp: Interp::Linear,
             },
@@ -729,15 +766,24 @@ mod tests {
             CurveSpec::constant(3.0, hours(1)),
             CurveSpec {
                 params: CurveParams::Step {
-                    segments: vec![StepSegment { at_seconds: 0.0, value: 1.0 }],
+                    segments: vec![StepSegment {
+                        at_seconds: 0.0,
+                        value: 1.0,
+                    }],
                 },
                 ..CurveSpec::constant(1.0, hours(1))
             },
             CurveSpec {
                 params: CurveParams::Custom {
                     points: vec![
-                        CustomPoint { at_seconds: 0.0, value: 1.0 },
-                        CustomPoint { at_seconds: 3600.0, value: 2.0 },
+                        CustomPoint {
+                            at_seconds: 0.0,
+                            value: 1.0,
+                        },
+                        CustomPoint {
+                            at_seconds: 3600.0,
+                            value: 2.0,
+                        },
                     ],
                     interp: Interp::Hold,
                 },

@@ -35,7 +35,7 @@ control path.)
 | `crates/fermentool-curves` | Pure time-profile math (`CurveSpec`), no I/O. Fully unit-tested. |
 | `crates/fermentool-modbus`  | MODBUS-RTU CRC/framing + LabQ register map & limits. Byte-exact tests vs. the vendor doc. |
 | `crates/fermentool-core`    | The daemon: engine, store, serial, HTTP API, embedded UI. |
-| `ui/`                       | Svelte 5 + Vite front-end; built into `crates/fermentool-core/assets/`. |
+| `ui/`                       | Svelte 5 + Vite front-end; built to `ui/dist/`, embedded by the daemon at milestone 8. |
 | `docs/`                     | Implementation plan, design language, wiring, service install. |
 | `LabQ Series MODBUS protocol.{md,pdf}` | Vendor protocol reference. |
 
@@ -50,7 +50,7 @@ cargo run -p fermentool-core
 # pure logic only, no serial backend (hosts without libudev/pkg-config):
 cargo test -p fermentool-modbus --no-default-features
 
-# Web UI (built output goes into the core crate's assets/)
+# Web UI (built output goes to ui/dist/)
 cd ui
 npm install
 npm run dev      # dev server on :5173, proxies /api to the daemon on :8730

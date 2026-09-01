@@ -89,7 +89,10 @@ pub fn f32_from_be(bytes: [u8; 4]) -> f32 {
 /// Split an `f32` into two big-endian holding-register words `(high, low)`.
 pub fn f32_to_words(value: f32) -> (u16, u16) {
     let b = value.to_be_bytes();
-    (u16::from_be_bytes([b[0], b[1]]), u16::from_be_bytes([b[2], b[3]]))
+    (
+        u16::from_be_bytes([b[0], b[1]]),
+        u16::from_be_bytes([b[2], b[3]]),
+    )
 }
 
 /// Reassemble an `f32` from two big-endian holding-register words.
@@ -280,12 +283,7 @@ pub mod frame {
         if body.len() != 6 {
             return Err(PduError::MalformedResponse);
         }
-        let echo = [
-            (reg >> 8) as u8,
-            reg as u8,
-            (value >> 8) as u8,
-            value as u8,
-        ];
+        let echo = [(reg >> 8) as u8, reg as u8, (value >> 8) as u8, value as u8];
         if body[2..6] != echo {
             return Err(PduError::MalformedResponse);
         }
@@ -658,7 +656,12 @@ pub mod serial {
             Ok(Self { port, timeout })
         }
 
-        fn read_until(&mut self, buf: &mut Vec<u8>, target: usize, deadline: Instant) -> Result<(), TransportError> {
+        fn read_until(
+            &mut self,
+            buf: &mut Vec<u8>,
+            target: usize,
+            deadline: Instant,
+        ) -> Result<(), TransportError> {
             let mut chunk = [0u8; 64];
             while buf.len() < target {
                 if Instant::now() >= deadline {

@@ -49,12 +49,12 @@ Fermentool/
 │  │  │  ├─ api/                  # axum router: REST + WS
 │  │  │  ├─ engine/               # run lifecycle, tick loop, resume logic
 │  │  │  ├─ store/                # SQLite (schema, migrations, repos)
-│  │  │  ├─ pump/                 # PumpTransport trait, real + simulator
+│  │  │  ├─ pump/                 # wiring: pick Pump<SerialTransport> | Pump<SimPump>
 │  │  │  └─ telemetry.rs          # tracing + rolling file logger
-│  │  └─ assets/                  # embedded UI dist (rust-embed), built from ../../ui
-│  ├─ fermentool-modbus/          # MODBUS-RTU framing/CRC + LabQ register map
+│  ├─ fermentool-modbus/          # RTU framing/CRC + register map + Pump/SimPump/serial
 │  └─ fermentool-curves/          # pure curve math, no I/O
-├─ ui/                            # Svelte 5 + Vite; `npm run build` → dist/
+├─ ui/                            # Svelte 5 + Vite; `npm run build` → ui/dist/
+│                                 #   embedded by fermentool-core via rust-embed (m8)
 ├─ docs/
 │  ├─ IMPLEMENTATION_PLAN.md      # this file
 │  ├─ wiring.md
