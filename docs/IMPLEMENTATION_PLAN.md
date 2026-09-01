@@ -146,18 +146,25 @@ speed, with configurable induced comms drops and latency) — used by all engine
 
 ```rust
 struct CurveSpec {
-    kind: CurveKind,
     mode: ParamMode,          // Endpoints | Physio
     start: f64,               // setpoint at t = 0
-    end: f64,                 // setpoint at t = duration (Endpoints mode)
+    end: f64,                 // setpoint at t = duration (derived in Physio for linear/exp)
     duration: Duration,
-    params: CurveParams,      // kind-specific
     clamp_min: f64,
     clamp_max: f64,
+    params: CurveParams,      // kind-specific; params.kind() -> CurveKind (the `runs.curve_kind` column)
 }
 
-trait Curve { fn value_at(&self, elapsed: Duration) -> f64; }   // result already clamped
+impl CurveSpec {
+    fn value_at(&self, elapsed: Duration) -> f64;   // result already clamped
+    fn effective_end(&self) -> f64;                 // resolves Physio linear/exp
+    fn preview(&self, samples: usize) -> Vec<(f64, f64)>;
+    fn validate(&self) -> Result<(), String>;
+}
 ```
+
+Implemented in milestone 2. `kind` is not a stored field — it is derived from
+`params` so the two can never disagree.
 
 Let `p = clamp(elapsed / duration, 0.0, 1.0)`, `S = start`, `E = end`, `D = duration` (hours).
 
@@ -394,10 +401,11 @@ restart loses nothing.
 
 ## 8. Milestones (build order)
 
-1. **Scaffold** — workspace, three crates, `ui/` Vite app, CI, this doc wired to README.
-2. **`fermentool-curves`** — all kinds + both modes + tests + `preview()`.
-3. **`fermentool-modbus`** — frames, CRC, RTU client, `PumpTransport` + `SimPump`,
-   byte-exact tests.
+1. **Scaffold** — workspace, three crates, `ui/` Vite app, CI, this doc wired to README. ✅
+2. **`fermentool-curves`** — all kinds + both modes + tests + `preview()` + `validate()`. ✅
+   (Design language captured in `docs/DESIGN.md` alongside this milestone.)
+3. **`fermentool-modbus`** — CRC + `f32` encoding + register map ✅; still to add: full
+   frame builders/parsers, async RTU client, `PumpTransport` + `SimPump`.
 4. **`store/`** — SQLite schema, migrations, run/tick/event repos, `integrity_check`.
 5. **`engine/`** — run lifecycle, tick loop, start/stop sequences, server-side clamps.
 6. **Recovery** — startup scan, resume decision, re-init on resume, kill/restart tests.

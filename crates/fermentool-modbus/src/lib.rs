@@ -27,6 +27,18 @@ pub mod reg {
     pub const BACK_SUCTION_ANGLE: u16 = 1009;
 }
 
+/// LabQ setpoint limits, for the engine to intersect with a run's own clamps.
+pub mod limits {
+    /// Minimum settable motor speed (rpm).
+    pub const RPM_MIN: f64 = 0.1;
+    /// Maximum settable motor speed (rpm).
+    pub const RPM_MAX: f64 = 350.0;
+    /// Minimum settable flow rate (ml/min).
+    pub const FLOW_MIN: f64 = 0.0;
+    /// Maximum settable flow rate (ml/min).
+    pub const FLOW_MAX: f64 = 99_999.0;
+}
+
 /// MODBUS CRC-16 (polynomial `0xA001`, initial value `0xFFFF`).
 ///
 /// The returned word is transmitted **low byte first, then high byte**

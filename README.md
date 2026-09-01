@@ -6,10 +6,12 @@ exponential fed-batch, sigmoid, step, constant or custom — over runs that aver
 ~100 h, with **crash-safe journalling** and **time-correct resume** after any
 interruption.
 
-> Status: **scaffold (milestone 1)**. The curve math and MODBUS framing crates
-> have their real cores + tests; the control engine, SQLite journal, serial link,
-> HTTP API and web UI are the next milestones. Full design:
-> [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
+> Status: **milestone 2**. `fermentool-curves` is complete (all six shapes, both
+> parameter modes, `preview()`, `validate()`, full test suite); `fermentool-modbus`
+> has CRC + `f32` encoding + register map with byte-exact vendor-frame tests. Next:
+> the async RTU client, then the SQLite journal, control engine, HTTP API and web UI.
+> Full design: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) ·
+> visual language: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Architecture
 
@@ -28,11 +30,11 @@ control path.)
 
 | Path | What |
 |---|---|
-| `crates/fermentool-curves` | Pure time-profile math, no I/O. Fully unit-tested. |
-| `crates/fermentool-modbus`  | MODBUS-RTU CRC/framing + LabQ register map. Byte-exact tests vs. the vendor doc. |
+| `crates/fermentool-curves` | Pure time-profile math (`CurveSpec`), no I/O. Fully unit-tested. |
+| `crates/fermentool-modbus`  | MODBUS-RTU CRC/framing + LabQ register map & limits. Byte-exact tests vs. the vendor doc. |
 | `crates/fermentool-core`    | The daemon: engine, store, serial, HTTP API, embedded UI. |
 | `ui/`                       | Svelte 5 + Vite front-end; built into `crates/fermentool-core/assets/`. |
-| `docs/`                     | Implementation plan, wiring, service install. |
+| `docs/`                     | Implementation plan, design language, wiring, service install. |
 | `LabQ Series MODBUS protocol.{md,pdf}` | Vendor protocol reference. |
 
 ## Build

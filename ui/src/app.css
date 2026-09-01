@@ -1,28 +1,171 @@
+/* Fermentool design tokens — see docs/DESIGN.md.
+   Palette: #00707F deep teal · #5FA4B0 soft teal · white · #B9CD76 lime · #7DB928 green.
+   #D64545 (danger) is the single deliberate out-of-palette functional colour. */
+
 :root {
-  color-scheme: dark;
-  --bg: #0f1115;
-  --panel: #1a1d24;
-  --text: #e7e9ee;
-  --muted: #9aa3b2;
-  --accent: #4fd1c5;
-  --ok: #4ade80;
-  --err: #f87171;
+  color-scheme: light;
+
+  /* Brand */
+  --teal-700: #00707f;
+  --teal-600: #0a8090;
+  --teal-400: #5fa4b0;
+  --lime-300: #b9cd76;
+  --green-500: #7db928;
+  --green-600: #6ba622;
+
+  /* Neutrals */
+  --white: #ffffff;
+  --bg: #f4f7f7;
+  --surface: #ffffff;
+  --surface-sunken: #eef3f3;
+  --line: #e1eae9;
+  --ink: #0e2a2f;
+  --muted: #5c7378;
+
+  /* Functional */
+  --danger: #d64545;
+  --danger-bg: #fbecec;
+  --live: var(--green-500);
+
+  /* Semantic roles */
+  --accent: var(--teal-700);
+  --accent-weak: var(--teal-400);
+  --focus: var(--teal-400);
+
+  /* Shape & depth */
+  --radius-card: 12px;
+  --radius-control: 8px;
+  --shadow-sm: 0 1px 2px rgba(14, 42, 47, 0.06), 0 1px 3px rgba(14, 42, 47, 0.08);
+  --shadow-md: 0 4px 12px rgba(14, 42, 47, 0.1);
+
+  /* Spacing scale */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* Type */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --white: #ffffff;
+    --bg: #0e1719;
+    --surface: #16211f;
+    --surface-sunken: #101a18;
+    --line: #21302d;
+    --ink: #e6efec;
+    --muted: #8ba3a4;
+    --teal-700: #3fb0bf;
+    --teal-600: #57bccb;
+    --danger: #f4756f;
+    --danger-bg: #35201f;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+  }
 }
 
 * {
   box-sizing: border-box;
 }
 
-body {
-  margin: 0;
-  font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  background: var(--bg);
-  color: var(--text);
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  line-height: 1.2;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+h2 {
+  font-size: 1.05rem;
+}
+
+a {
+  color: var(--teal-700);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  padding: var(--s-2) var(--s-4);
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.btn-primary {
+  background: var(--teal-700);
+  color: var(--white);
+}
+.btn-primary:hover {
+  background: var(--teal-600);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--ink);
+}
+.btn-ghost:hover {
+  background: var(--surface-sunken);
+}
+.btn-danger {
+  background: var(--danger);
+  color: var(--white);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-sm);
+  padding: var(--s-5);
+}
+
+pre,
+code {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
 pre {
-  background: var(--panel);
-  padding: 1rem;
-  border-radius: 8px;
+  background: var(--surface-sunken);
+  padding: var(--s-4);
+  border-radius: var(--radius-control);
   overflow-x: auto;
 }
