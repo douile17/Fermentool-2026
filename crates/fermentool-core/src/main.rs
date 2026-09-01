@@ -38,7 +38,9 @@ fn data_dir() -> PathBuf {
 fn main() {
     println!("{NAME} {VERSION}");
     println!("data dir : {}", data_dir().display());
-    println!("status   : scaffold (milestone 5) — engine loop ready, daemon wiring next");
+    println!(
+        "status   : scaffold (milestone 6) — engine + crash recovery ready, daemon wiring next"
+    );
 
     let mut engine = Engine::new(
         Pump::new(SimPump::new(1), 1),

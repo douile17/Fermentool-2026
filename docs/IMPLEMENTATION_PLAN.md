@@ -430,7 +430,12 @@ restart loses nothing.
    write → `append_tick`; write failure journalled, run continues; auto-finish at
    duration), `stop_run` / `abort_run`, `status()`. Time injected → 100 h run tested in
    ms. `run_blocking` real-time runner (supervised wrapper is m7). ✅
-6. **Recovery** — startup scan, resume decision, re-init on resume, kill/restart tests.
+6. **Recovery** — `Engine::pending_recovery(now, grace)` (read-only: finds a `running`
+   run left by an unclean stop, computes elapsed + `resume_target` + `past_end`),
+   `resume(now, grace)` (re-runs the full pump start sequence at `value_at(elapsed)`,
+   continues ticking from `last_seq+1`; `started_at` unchanged; refused past
+   `duration+grace`), `discard_recovery(now, terminal_status)`. `crash_detected` +
+   `resume` events. Tested via a real tempfile DB across dropped `Engine`s. ✅
 7. **API + config** — axum REST + WS, `config.toml`, single-instance lock, logging.
 8. **UI** — new-run + preview, active-run + live chart, history + CSV, resume modal,
    settings.

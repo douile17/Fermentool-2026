@@ -76,6 +76,28 @@ pub struct RunConfig {
     pub curve: CurveSpec,
 }
 
+/// What [`Engine::pending_recovery`] found: a run that was `running` when the
+/// process last stopped, i.e. it did not end cleanly.
+#[derive(Debug, Clone)]
+pub struct RecoveryInfo {
+    pub run_id: i64,
+    pub name: String,
+    pub started_at: Timestamp,
+    pub now: Timestamp,
+    /// Real time elapsed since `started_at`.
+    pub elapsed_s: f64,
+    pub duration_s: i64,
+    pub control_var: ControlVar,
+    /// The setpoint the curve prescribes for `elapsed_s` right now — where a
+    /// resume would put the pump.
+    pub resume_target: f64,
+    /// `elapsed` is past `duration + grace`: the curve finished while offline,
+    /// so the daemon should offer *finish* / *abort*, not *resume*.
+    pub past_end: bool,
+    /// `seq` of the last journalled tick before the interruption.
+    pub last_seq: Option<i64>,
+}
+
 /// Result of a single [`Engine::tick`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TickOutcome {
@@ -315,6 +337,152 @@ impl<T: Transport> Engine<T> {
         })?;
         Ok(())
     }
+
+    // ---- crash recovery (docs/IMPLEMENTATION_PLAN.md §4.7) ----
+
+    /// Inspect the journal for a run that was `running` when the process last
+    /// stopped. Read-only — safe to call repeatedly (e.g. from a polling UI).
+    /// Returns `None` if nothing needs recovering, or if this process is already
+    /// running the run.
+    pub fn pending_recovery(
+        &self,
+        now: Timestamp,
+        grace: Duration,
+    ) -> Result<Option<RecoveryInfo>> {
+        if self.active.is_some() {
+            return Ok(None);
+        }
+        let Some(run) = self.store.running_run()? else {
+            return Ok(None);
+        };
+        let elapsed_s = now.duration_since(run.started_at).as_secs_f64().max(0.0);
+        let resume_target = run.curve.value_at(Duration::from_secs_f64(elapsed_s));
+        let last_seq = self.store.last_tick(run.id)?.map(|t| t.seq);
+        Ok(Some(RecoveryInfo {
+            run_id: run.id,
+            name: run.name,
+            started_at: run.started_at,
+            now,
+            elapsed_s,
+            duration_s: run.duration_s,
+            control_var: run.control_var,
+            resume_target,
+            past_end: elapsed_s > run.duration_s as f64 + grace.as_secs_f64(),
+            last_seq,
+        }))
+    }
+
+    /// Resume the interrupted run: re-run the **full** pump start sequence (the
+    /// pump may have been power-cycled) at the setpoint the curve prescribes for
+    /// the real elapsed time, then continue ticking. `started_at` is unchanged,
+    /// so timing stays absolute.
+    pub fn resume(&mut self, now: Timestamp, grace: Duration) -> Result<i64> {
+        if self.active.is_some() {
+            return Err(EngineError::Busy);
+        }
+        let Some(run) = self.store.running_run()? else {
+            return Err(EngineError::Idle);
+        };
+        let elapsed_s = now.duration_since(run.started_at).as_secs_f64().max(0.0);
+        if elapsed_s > run.duration_s as f64 + grace.as_secs_f64() {
+            return Err(EngineError::Config(
+                "run is past its end plus grace; finish or abort instead".into(),
+            ));
+        }
+        let target = run.curve.value_at(Duration::from_secs_f64(elapsed_s));
+
+        self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
+
+        self.pump.set_direction(run.direction == Direction::Cw)?;
+        if run.control_var == ControlVar::MlMin {
+            if let Some(code) = run.pump_head.as_deref().and_then(|s| s.parse::<u16>().ok()) {
+                self.pump.set_head_type(code)?;
+            }
+            if let Some(code) = run.tubing.as_deref().and_then(|s| s.parse::<u16>().ok()) {
+                self.pump.set_tubing_size(code)?;
+            }
+        }
+        write_setpoint(&mut self.pump, run.control_var, target)?;
+        self.pump.start()?;
+
+        let next_seq = self.store.last_tick(run.id)?.map_or(0, |t| t.seq + 1);
+        self.store.log_event(&NewEvent {
+            run_id: Some(run.id),
+            wall_time: now,
+            level: EventLevel::Info,
+            kind: "resume".into(),
+            detail: Some(format!(
+                "elapsed {elapsed_s:.0}s, setpoint {target:.3}, seq from {next_seq}"
+            )),
+        })?;
+
+        let interval = run.tick_interval_s.max(1) as u64;
+        self.active = Some(ActiveRun {
+            id: run.id,
+            started_at: run.started_at,
+            spec: run.curve,
+            control_var: run.control_var,
+            duration_s: run.duration_s,
+            tick_interval: Duration::from_secs(interval),
+            tick_interval_s: interval as u32,
+            next_seq,
+            last_target: Some(target),
+        });
+        Ok(run.id)
+    }
+
+    /// End the interrupted run without resuming it: stop the pump and mark it
+    /// `status` (must be terminal). Used for the *finish* / *abort* choices.
+    pub fn discard_recovery(&mut self, now: Timestamp, status: RunStatus) -> Result<()> {
+        if self.active.is_some() {
+            return Err(EngineError::Busy);
+        }
+        if status == RunStatus::Running {
+            return Err(EngineError::Config(
+                "discard status must be terminal".into(),
+            ));
+        }
+        let Some(run) = self.store.running_run()? else {
+            return Err(EngineError::Idle);
+        };
+        let elapsed_s = now.duration_since(run.started_at).as_secs_f64().max(0.0);
+        self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
+        let _ = self.pump.stop();
+        self.store.finish_run(run.id, status, now)?;
+        let kind = match status {
+            RunStatus::Aborted => "abort",
+            RunStatus::Stopped => "stop",
+            RunStatus::Completed => "curve_done",
+            RunStatus::Running => unreachable!("guarded above"),
+        };
+        self.store.log_event(&NewEvent {
+            run_id: Some(run.id),
+            wall_time: now,
+            level: EventLevel::Info,
+            kind: kind.into(),
+            detail: Some("resolved without resuming".into()),
+        })?;
+        Ok(())
+    }
+
+    fn log_crash_detected(
+        &self,
+        run_id: i64,
+        now: Timestamp,
+        elapsed_s: f64,
+        duration_s: i64,
+    ) -> Result<()> {
+        self.store.log_event(&NewEvent {
+            run_id: Some(run_id),
+            wall_time: now,
+            level: EventLevel::Warn,
+            kind: "crash_detected".into(),
+            detail: Some(format!(
+                "unclean shutdown; elapsed {elapsed_s:.0}s of {duration_s}s at restart"
+            )),
+        })?;
+        Ok(())
+    }
 }
 
 fn write_setpoint<T: Transport>(
@@ -539,5 +707,189 @@ mod tests {
     fn tick_with_no_run_is_idle() {
         let mut e = engine();
         assert!(matches!(e.tick(t0()).unwrap(), TickOutcome::Idle));
+    }
+
+    // ---- crash recovery ----
+
+    use std::sync::atomic::AtomicU64;
+
+    /// A throwaway on-disk database so a run survives dropping the `Engine`
+    /// (an in-memory DB dies with its connection).
+    struct TempDb(std::path::PathBuf);
+
+    impl TempDb {
+        fn new() -> Self {
+            static CTR: AtomicU64 = AtomicU64::new(0);
+            let n = CTR.fetch_add(1, Ordering::Relaxed);
+            let p = std::env::temp_dir()
+                .join(format!("fermentool-rec-{}-{n}.sqlite", std::process::id()));
+            let _ = std::fs::remove_file(&p);
+            TempDb(p)
+        }
+        fn store(&self) -> Store {
+            Store::open(&self.0).unwrap()
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for ext in ["sqlite", "sqlite-wal", "sqlite-shm"] {
+                let _ = std::fs::remove_file(self.0.with_extension(ext));
+            }
+        }
+    }
+
+    fn grace() -> Duration {
+        Duration::from_secs(300)
+    }
+
+    #[test]
+    fn resumes_a_running_run_after_a_simulated_crash() {
+        let db = TempDb::new();
+        let id = {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let id = a.start_run(linear_cfg(), t0()).unwrap();
+            a.tick(at(600)).unwrap();
+            a.tick(at(1200)).unwrap();
+            id // drop engine A -> "crash"
+        };
+
+        // Fresh engine + fresh pump (regs zeroed = power-cycled).
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        assert!(!b.pump.transport().running());
+
+        let info = b.pending_recovery(at(1800), grace()).unwrap().unwrap();
+        assert_eq!(info.run_id, id);
+        assert!((info.elapsed_s - 1800.0).abs() < 1.0);
+        assert!((info.resume_target - 50.0).abs() < 0.5);
+        assert!(!info.past_end);
+        assert_eq!(info.last_seq, Some(1));
+
+        assert_eq!(b.resume(at(1800), grace()).unwrap(), id);
+        assert!(b.pump.transport().running());
+        assert!(b.pump.transport().direction_cw());
+        assert!((b.pump.transport().speed_rpm() - 50.0).abs() < 0.5);
+
+        // ticking continues from the next seq, timing still absolute
+        assert!(matches!(
+            b.tick(at(1810)).unwrap(),
+            TickOutcome::Applied { seq: 2, .. }
+        ));
+        assert!(matches!(
+            b.tick(at(3600)).unwrap(),
+            TickOutcome::Finished { .. }
+        ));
+        assert_eq!(
+            b.store().run(id).unwrap().unwrap().status,
+            RunStatus::Completed
+        );
+
+        let kinds: Vec<_> = b
+            .store()
+            .events(Some(id), 50)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(kinds.contains(&"crash_detected".to_string()));
+        assert!(kinds.contains(&"resume".to_string()));
+    }
+
+    #[test]
+    fn no_recovery_without_an_unclean_running_run() {
+        let db = TempDb::new();
+        // nothing yet
+        {
+            let b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            assert!(b.pending_recovery(t0(), grace()).unwrap().is_none());
+        }
+        // a cleanly stopped run does not count
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.start_run(linear_cfg(), t0()).unwrap();
+            a.stop_run(at(60)).unwrap();
+        }
+        let b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        assert!(b.pending_recovery(at(120), grace()).unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_recovery_is_none_while_this_process_owns_the_run() {
+        let db = TempDb::new();
+        let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        a.start_run(linear_cfg(), t0()).unwrap();
+        assert!(a.pending_recovery(at(100), grace()).unwrap().is_none());
+    }
+
+    #[test]
+    fn discard_recovery_ends_the_orphan_run() {
+        let db = TempDb::new();
+        let id = {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let id = a.start_run(linear_cfg(), t0()).unwrap();
+            a.tick(at(300)).unwrap();
+            id
+        };
+
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        assert!(matches!(
+            b.discard_recovery(at(600), RunStatus::Running),
+            Err(EngineError::Config(_))
+        ));
+        b.discard_recovery(at(600), RunStatus::Aborted).unwrap();
+        assert!(b.store().running_run().unwrap().is_none());
+        assert_eq!(
+            b.store().run(id).unwrap().unwrap().status,
+            RunStatus::Aborted
+        );
+        assert!(!b.pump.transport().running());
+    }
+
+    #[test]
+    fn resume_is_refused_past_the_grace_window() {
+        let db = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let mut cfg = linear_cfg();
+            cfg.curve = CurveSpec::linear(1.0, 9.0, Duration::from_secs(100));
+            a.start_run(cfg, t0()).unwrap();
+            a.tick(at(10)).unwrap();
+        }
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        let g = Duration::from_secs(60);
+        let info = b.pending_recovery(at(1000), g).unwrap().unwrap();
+        assert!(info.past_end);
+        assert!(matches!(b.resume(at(1000), g), Err(EngineError::Config(_))));
+        b.discard_recovery(at(1000), RunStatus::Completed).unwrap();
+        assert_eq!(b.store().running_run().unwrap().map(|r| r.status), None);
+    }
+
+    #[test]
+    fn resume_within_grace_applies_the_end_value_and_completes() {
+        let db = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let mut cfg = linear_cfg();
+            cfg.curve = CurveSpec::linear(1.0, 9.0, Duration::from_secs(100));
+            a.start_run(cfg, t0()).unwrap();
+            a.tick(at(10)).unwrap();
+        }
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        let g = Duration::from_secs(60);
+        let info = b.pending_recovery(at(130), g).unwrap().unwrap();
+        assert!(!info.past_end);
+        assert!((info.resume_target - 9.0).abs() < 1e-6);
+        b.resume(at(130), g).unwrap();
+        assert!(matches!(
+            b.tick(at(140)).unwrap(),
+            TickOutcome::Finished { .. }
+        ));
+    }
+
+    #[test]
+    fn resume_is_busy_when_a_run_is_active() {
+        let mut e = engine();
+        e.start_run(linear_cfg(), t0()).unwrap();
+        assert!(matches!(e.resume(t0(), grace()), Err(EngineError::Busy)));
     }
 }

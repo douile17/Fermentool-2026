@@ -6,13 +6,13 @@ exponential fed-batch, sigmoid, step, constant or custom — over runs that aver
 ~100 h, with **crash-safe journalling** and **time-correct resume** after any
 interruption.
 
-> Status: **milestone 5**. `fermentool-curves`, `fermentool-modbus`, and
-> `fermentool-core::store` complete. `fermentool-core::engine` now has `Engine<T>`:
-> `start_run` (clamps ∩ pump limits, validate, pump start sequence), `tick(now)`
-> (wall-clock elapsed → setpoint → pump write → journal; write failures are logged and
-> the run continues; auto-finish at the curve's end), `stop_run` / `abort_run`. Time is
-> injected, so a 100 h run is tested in milliseconds. 49 tests green.
-> Next: crash recovery / resume, then the HTTP API and web UI.
+> Status: **milestone 6**. Curve engine, MODBUS/pump, SQLite journal, and the control
+> `Engine<T>` all done. Crash recovery landed: `pending_recovery(now, grace)` finds a
+> run left `running` by an unclean stop and reports the elapsed time and the setpoint a
+> resume would apply; `resume` re-runs the full pump start sequence at `value_at(elapsed)`
+> and continues ticking with `started_at` unchanged; `discard_recovery` finishes/aborts
+> it instead. 56 tests green.
+> Next: the HTTP API + config, then the web UI.
 > Full design: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) ·
 > visual language: [`docs/DESIGN.md`](docs/DESIGN.md).
 
