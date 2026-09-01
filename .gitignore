@@ -11,6 +11,8 @@ node_modules/
 
 # Local runtime data, logs, and machine-specific config
 /data/
+/.localrun/
+/.localrun.log
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
