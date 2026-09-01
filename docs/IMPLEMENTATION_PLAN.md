@@ -104,8 +104,8 @@ Register map (decimal address; source = `LabQ Series MODBUS protocol.md`):
 | 1009 | Back-suction angle | u16 (06H) | 0–360° |
 
 Float encoding: IEEE-754, **big-endian word order** (`8.9 → 41 0E 66 66`). CRC-16
-`poly 0xA001, init 0xFFFF`, low byte then high byte (tokio-modbus does this; we keep a
-standalone impl for tests).
+`poly 0xA001, init 0xFFFF`, low byte then high byte — own implementation
+(`fermentool_modbus::crc16`), no external MODBUS crate.
 
 **Byte-exact test vectors** (must match the doc):
 - set 58.8 rpm → `01 10 03 EA 00 02 04 42 6B 33 33 58 29`
@@ -124,23 +124,36 @@ standalone impl for tests).
 
 **Stop:** `06H` 1006 ← 0.
 
-`PumpTransport` trait:
+**Synchronous** design (not async): one transaction every few seconds on a
+dedicated thread is simpler and steadier for a 100 h job. Layers:
 
 ```rust
-#[async_trait]
+// blocking request -> framed response
+trait Transport { fn transaction(&mut self, req: &[u8]) -> Result<Vec<u8>, TransportError>; }
+
+// pump-level ops over any Transport
 trait PumpTransport {
-    async fn set_direction(&mut self, cw: bool) -> Result<()>;
-    async fn set_head_tubing(&mut self, head: u16, tubing: u16) -> Result<()>;
-    async fn set_speed_rpm(&mut self, rpm: f32) -> Result<()>;
-    async fn set_flow_ml_min(&mut self, ml_min: f32) -> Result<()>;
-    async fn start(&mut self) -> Result<()>;
-    async fn stop(&mut self) -> Result<()>;
-    async fn read_speed_rpm(&mut self) -> Result<f32>;
+    fn set_direction(&mut self, cw: bool) -> Result<(), PumpError>;
+    fn set_head_type(&mut self, code: u16) -> Result<(), PumpError>;
+    fn set_tubing_size(&mut self, code: u16) -> Result<(), PumpError>;
+    fn set_speed_rpm(&mut self, rpm: f32) -> Result<(), PumpError>;   // range-checked
+    fn set_flow_ml_min(&mut self, ml_min: f32) -> Result<(), PumpError>;
+    fn start(&mut self) -> Result<(), PumpError>;
+    fn stop(&mut self) -> Result<(), PumpError>;
+    fn read_speed_rpm(&mut self) -> Result<f32, PumpError>;
 }
+struct Pump<T: Transport> { transport: T, address: u8 }   // impls PumpTransport
 ```
 
-Implementations: `RtuPump` (real) and `SimPump` (models a pump that holds its last
-speed, with configurable induced comms drops and latency) — used by all engine tests.
+`Transport` implementations:
+- `SimPump` — a real register-level model (regs 1000–1009) driven by real request
+  frames, with fault injection (`drop_next`, `next_exception`). Used by every engine
+  test. Holds its last speed, exactly like the real pump on comms loss.
+- `serial::SerialTransport` (cargo feature `serial`, default on) — blocking
+  `serialport` at fixed 8E1; `serial::available_ports()` enumerates ports (name, USB
+  VID:PID, manufacturer/product) for the `/api/serial/ports` picker and the
+  Settings "choose port & Connect" flow. `--no-default-features` builds the pure
+  framing + simulator only (hosts without libudev).
 
 ### 4.4 Curve engine (`fermentool-curves`)
 
@@ -404,8 +417,9 @@ restart loses nothing.
 1. **Scaffold** — workspace, three crates, `ui/` Vite app, CI, this doc wired to README. ✅
 2. **`fermentool-curves`** — all kinds + both modes + tests + `preview()` + `validate()`. ✅
    (Design language captured in `docs/DESIGN.md` alongside this milestone.)
-3. **`fermentool-modbus`** — CRC + `f32` encoding + register map ✅; still to add: full
-   frame builders/parsers, async RTU client, `PumpTransport` + `SimPump`.
+3. **`fermentool-modbus`** — CRC + `f32` encoding + register map + `frame` builders/
+   parsers + `Transport`/`PumpTransport`/`Pump` + `SimPump` (fault injection) +
+   `serial::SerialTransport` & `available_ports()`. ✅
 4. **`store/`** — SQLite schema, migrations, run/tick/event repos, `integrity_check`.
 5. **`engine/`** — run lifecycle, tick loop, start/stop sequences, server-side clamps.
 6. **Recovery** — startup scan, resume decision, re-init on resume, kill/restart tests.

@@ -6,10 +6,12 @@ exponential fed-batch, sigmoid, step, constant or custom — over runs that aver
 ~100 h, with **crash-safe journalling** and **time-correct resume** after any
 interruption.
 
-> Status: **milestone 2**. `fermentool-curves` is complete (all six shapes, both
-> parameter modes, `preview()`, `validate()`, full test suite); `fermentool-modbus`
-> has CRC + `f32` encoding + register map with byte-exact vendor-frame tests. Next:
-> the async RTU client, then the SQLite journal, control engine, HTTP API and web UI.
+> Status: **milestone 3**. `fermentool-curves` complete (six shapes, both parameter
+> modes, `preview()`, `validate()`). `fermentool-modbus` complete: CRC + `f32` +
+> register map + frame builders/parsers + `Pump`/`PumpTransport` over a blocking
+> `Transport`, a fault-injecting `SimPump`, and `SerialTransport` + `available_ports()`
+> behind the `serial` feature — all with byte-exact vendor-frame tests. Next: the
+> SQLite journal, control engine, HTTP API and web UI.
 > Full design: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) ·
 > visual language: [`docs/DESIGN.md`](docs/DESIGN.md).
 
@@ -45,6 +47,8 @@ Prerequisites: [Rust (stable, via rustup)](https://rustup.rs) and Node.js ≥ 18
 # Rust crates + tests
 cargo test
 cargo run -p fermentool-core
+# pure logic only, no serial backend (hosts without libudev/pkg-config):
+cargo test -p fermentool-modbus --no-default-features
 
 # Web UI (built output goes into the core crate's assets/)
 cd ui

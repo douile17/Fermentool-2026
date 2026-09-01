@@ -1,9 +1,17 @@
 [package]
 name = "fermentool-modbus"
-description = "MODBUS-RTU framing helpers and register map for the LabQ peristaltic pump"
+description = "MODBUS-RTU framing helpers, register map and pump transport for the LabQ peristaltic pump"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = ["serial"]
+# `serial` pulls in the blocking `serialport` backend (SerialTransport). Disable
+# with --no-default-features to build/test the pure framing + simulator only
+# (useful on hosts without libudev / pkg-config).
+serial = ["dep:serialport"]
+
 [dependencies]
+serialport = { version = "4", optional = true }

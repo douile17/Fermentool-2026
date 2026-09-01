@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use fermentool_curves::CurveSpec;
+use fermentool_modbus::{Pump, PumpTransport, SimPump};
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -39,6 +40,15 @@ fn main() {
     // Smoke-check the workspace wiring.
     let demo = CurveSpec::linear(5.0, 50.0, Duration::from_secs(100 * 3600)).with_clamp(0.1, 350.0);
     let at_50h = demo.value_at(Duration::from_secs(50 * 3600));
-    let start_frame = fermentool_modbus::with_crc(vec![0x01, 0x06, 0x03, 0xEE, 0x00, 0x01]);
-    println!("self-test: linear midpoint = {at_50h:.1} rpm, start frame = {start_frame:02X?}");
+
+    let mut pump = Pump::new(SimPump::new(1), 1);
+    pump.set_direction(true).ok();
+    pump.set_speed_rpm(at_50h as f32).ok();
+    pump.start().ok();
+    let readback = pump.read_speed_rpm().unwrap_or(f32::NAN);
+
+    println!(
+        "self-test: linear midpoint = {at_50h:.1} rpm, sim pump running={} readback={readback:.1}",
+        pump.transport().running()
+    );
 }
