@@ -1,2 +1,2 @@
 node_modules/
-dist/
+# dist/ is committed — the daemon embeds it. Rebuild with `npm run build`.
