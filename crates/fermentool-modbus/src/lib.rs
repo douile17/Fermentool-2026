@@ -658,6 +658,26 @@ pub mod serial {
     pub struct SerialTransport {
         port: Box<dyn SerialPort>,
         timeout: Duration,
+        /// Minimum silence between the end of one transaction and the start of
+        /// the next. The LabQ pump silently drops a request that lands too soon
+        /// after its previous reply, so we hold this gap ourselves — otherwise
+        /// the daemon fires the start sequence (direction, speed, start)
+        /// back-to-back and the pump answers only the first frame, failing the
+        /// run with "serial transaction timed out". Bench-measured on an FTDI
+        /// RS-485 adapter: ~25 ms is not enough, 100 ms is reliable.
+        min_gap: Duration,
+        /// When the previous transaction finished, for the `min_gap` guard.
+        last_end: Option<Instant>,
+    }
+
+    /// The [`SerialTransport::min_gap`] for a baud: the MODBUS-RTU t3.5 silence
+    /// (3.5 character times, 11 bits each), floored at 100 ms because the LabQ
+    /// pump needs far more slack than the standard. Effectively always the 100 ms
+    /// floor at the pump's ≤ 9600 baud. Cheap: the daemon only chains frames
+    /// during the start / stop / resume sequences; ticks are a second apart.
+    fn inter_frame_gap(baud: u32) -> Duration {
+        let t35 = Duration::from_micros(3_500_000 * 11 / u64::from(baud.max(1)));
+        t35.max(Duration::from_millis(100))
     }
 
     impl SerialTransport {
@@ -671,7 +691,12 @@ pub mod serial {
                 .timeout(Duration::from_millis(200))
                 .open()
                 .map_err(|e| TransportError::Io(e.to_string()))?;
-            Ok(Self { port, timeout })
+            Ok(Self {
+                port,
+                timeout,
+                min_gap: inter_frame_gap(baud),
+                last_end: None,
+            })
         }
 
         fn read_until(
@@ -696,11 +721,13 @@ pub mod serial {
             }
             Ok(())
         }
-    }
 
-    impl Transport for SerialTransport {
-        fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
-            let deadline = Instant::now() + self.timeout;
+        /// One framed request/response, without the inter-frame gap bookkeeping.
+        fn exchange(
+            &mut self,
+            request: &[u8],
+            deadline: Instant,
+        ) -> Result<Vec<u8>, TransportError> {
             self.port
                 .clear(ClearBuffer::Input)
                 .map_err(|e| TransportError::Io(e.to_string()))?;
@@ -724,6 +751,21 @@ pub mod serial {
             };
             self.read_until(&mut buf, total, deadline)?;
             Ok(buf)
+        }
+    }
+
+    impl Transport for SerialTransport {
+        fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+            if let Some(end) = self.last_end {
+                let idle = end.elapsed();
+                if idle < self.min_gap {
+                    std::thread::sleep(self.min_gap - idle);
+                }
+            }
+            let deadline = Instant::now() + self.timeout;
+            let out = self.exchange(request, deadline);
+            self.last_end = Some(Instant::now());
+            out
         }
     }
 }
