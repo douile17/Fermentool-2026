@@ -1,17 +1,43 @@
 <script>
   import { get, put, post } from '../lib/api.js';
+  import { app } from '../lib/state.svelte.js';
 
   let cfg = $state(null);
   let ports = $state([]);
+  let portErr = $state(null);
   let err = $state(null);
   let msg = $state(null);
   let saving = $state(false);
+  let reconnecting = $state(false);
   let stopped = $state(false);
 
   $effect(() => {
     get('/api/config').then((c) => (cfg = c)).catch((e) => (err = e.message));
-    get('/api/serial/ports').then((r) => (ports = r.ports ?? [])).catch(() => {});
+    rescan();
   });
+
+  function rescan() {
+    portErr = null;
+    get('/api/serial/ports')
+      .then((r) => (ports = r.ports ?? []))
+      .catch((e) => (portErr = e.message));
+  }
+
+  async function reconnect() {
+    reconnecting = true;
+    err = null;
+    msg = null;
+    try {
+      const r = await post('/api/serial/reconnect', {
+        path: cfg.serial.path,
+        baud: cfg.serial.baud,
+      });
+      msg = r.connected ? `Connected — ${r.connected}` : 'Reconnected.';
+    } catch (e) {
+      err = e.message;
+    }
+    reconnecting = false;
+  }
 
   async function save() {
     saving = true;
@@ -56,6 +82,14 @@
           {#each ports as p}<option value={p.name}>{p.name} — {p.product ?? p.kind}</option>{/each}
           <option value="sim">sim</option>
         </datalist>
+        <div class="port-row">
+          <button type="button" class="btn-ghost" onclick={rescan}>Rescan</button>
+          <button type="button" class="btn-ghost" disabled={reconnecting} onclick={reconnect}>
+            {reconnecting ? 'Connecting…' : 'Connect now'}
+          </button>
+          <span class="port-now">Connected to: <b>{app.status?.transport ?? '—'}</b></span>
+        </div>
+        {#if portErr}<div class="err" style="margin-top:8px">{portErr}</div>{/if}
       </label>
 
       <label class="field"><span>Baud</span>
@@ -110,6 +144,14 @@
   }
   .field.check { flex-direction: row; align-items: center; gap: var(--s-2); }
   .field.check span { color: var(--ink); font-size: 13px; }
+  .port-row {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    margin-top: var(--s-2);
+    flex-wrap: wrap;
+  }
+  .port-now { color: var(--muted); font-size: 13px; }
   .foot { margin-top: var(--s-6); }
   .muted { color: var(--muted); }
   .ok {
