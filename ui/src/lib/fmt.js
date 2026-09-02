@@ -44,3 +44,7 @@ export function elapsedSeconds(startedAtIso) {
 export const RPM_LIMITS = { min: 0.1, max: 350 };
 export const FLOW_LIMITS = { min: 0, max: 99999 };
 export const unitFor = (cv) => (cv === 'ml_min' ? 'ml/min' : 'rpm');
+
+/** Display precision the pump uses for a control variable: ml/min shows 3
+ *  decimals, rpm shows 1 (its 0.1 motor step). */
+export const digitsFor = (cv) => (cv === 'ml_min' ? 3 : 1);

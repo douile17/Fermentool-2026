@@ -578,13 +578,13 @@ fn write_setpoint<T: Transport>(
 /// The pump's usable setpoint step for a control variable.
 ///
 /// `Rpm` snaps to the documented 0.1 rpm motor step. `MlMin` snaps to the pump's
-/// 4-decimal display resolution — its own firmware then collapses that onto a
+/// 3-decimal display resolution — its own firmware then collapses that onto a
 /// motor step, since Fermentool does not own the tube calibration and cannot do
 /// that conversion itself (see `docs/DESIGN.md`).
 fn setpoint_grid(control_var: ControlVar) -> f64 {
     match control_var {
         ControlVar::Rpm => 0.1,
-        ControlVar::MlMin => 1e-4,
+        ControlVar::MlMin => 1e-3,
     }
 }
 
@@ -825,9 +825,10 @@ mod tests {
     fn quantize_snaps_to_the_grid() {
         assert!((quantize(8.04, 0.1) - 8.0).abs() < 1e-9);
         assert!((quantize(8.06, 0.1) - 8.1).abs() < 1e-9);
-        assert!((quantize(10.0083333, 1e-4) - 10.0083).abs() < 1e-9);
+        assert!((quantize(10.008_333, 1e-3) - 10.008).abs() < 1e-9);
+        assert!((quantize(10.008_7, 1e-3) - 10.009).abs() < 1e-9);
         assert_eq!(setpoint_grid(ControlVar::Rpm), 0.1);
-        assert_eq!(setpoint_grid(ControlVar::MlMin), 1e-4);
+        assert_eq!(setpoint_grid(ControlVar::MlMin), 1e-3);
     }
 
     #[test]
@@ -862,18 +863,18 @@ mod tests {
         let mut e = engine();
         let cfg = RunConfig {
             control_var: ControlVar::MlMin,
-            // 10 → 46 ml/min over 1 h ⇒ 0.01 ml/min per second, so one 1e-4 grid
-            // step every 10 ms.
+            // 10 → 46 ml/min over 1 h ⇒ 0.01 ml/min per second, so one 1e-3 grid
+            // step every 100 ms.
             curve: CurveSpec::linear(10.0, 46.0, Duration::from_secs(3600)),
             ..linear_cfg()
         };
         e.start_run(cfg, t0()).unwrap();
-        // 1235 ms in: raw 10.012350, exactly between two 1e-4 grid points.
-        e.apply_setpoint(t0() + SignedDuration::from_millis(1235))
+        // 1250 ms in: raw 10.01250, exactly between two 1e-3 grid points.
+        e.apply_setpoint(t0() + SignedDuration::from_millis(1250))
             .unwrap();
         let f = e.pump.transport().flow_ml_min() as f64;
-        let on_grid = (f * 10_000.0).round() / 10_000.0;
-        assert!((f - on_grid).abs() < 1e-5, "not snapped to the 1e-4 grid: {f}");
+        let on_grid = (f * 1_000.0).round() / 1_000.0;
+        assert!((f - on_grid).abs() < 1e-5, "not snapped to the 1e-3 grid: {f}");
     }
 
     #[test]
