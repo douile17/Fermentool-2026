@@ -11,8 +11,27 @@
   let reconnecting = $state(false);
   let stopped = $state(false);
 
+  // <select> value: "sim", a detected port name, or "__custom".
+  let portSel = $state('sim');
+  let customPath = $state('');
+
+  const effectivePath = $derived(
+    portSel === '__custom' ? customPath.trim() : portSel,
+  );
+
   $effect(() => {
-    get('/api/config').then((c) => (cfg = c)).catch((e) => (err = e.message));
+    get('/api/config')
+      .then((c) => {
+        cfg = c;
+        const p = c.serial.path ?? 'sim';
+        if (p === 'sim' || p === '') {
+          portSel = 'sim';
+        } else {
+          portSel = p;
+          customPath = p;
+        }
+      })
+      .catch((e) => (err = e.message));
     rescan();
   });
 
@@ -28,10 +47,12 @@
     err = null;
     msg = null;
     try {
+      const path = effectivePath;
       const r = await post('/api/serial/reconnect', {
-        path: cfg.serial.path,
+        path,
         baud: cfg.serial.baud,
       });
+      cfg.serial.path = path;
       msg = r.connected ? `Connected — ${r.connected}` : 'Reconnected.';
     } catch (e) {
       err = e.message;
@@ -44,6 +65,7 @@
     err = null;
     msg = null;
     try {
+      cfg.serial.path = effectivePath;
       const r = await put('/api/config', cfg);
       msg = r.note ? `Saved — ${r.note}` : 'Saved.';
     } catch (e) {
@@ -76,12 +98,25 @@
         <input type="number" bind:value={cfg.port} />
       </label>
 
-      <label class="field"><span>Serial port ("sim" for the simulator)</span>
-        <input type="text" list="ports" bind:value={cfg.serial.path} />
-        <datalist id="ports">
-          {#each ports as p}<option value={p.name}>{p.name} — {p.product ?? p.kind}</option>{/each}
-          <option value="sim">sim</option>
-        </datalist>
+      <label class="field"><span>Serial port</span>
+        <select bind:value={portSel}>
+          <option value="sim">sim (simulator)</option>
+          {#each ports as p}
+            <option value={p.name}>{p.name}{p.product ? ` — ${p.product}` : ` (${p.kind})`}</option>
+          {/each}
+          {#if portSel !== 'sim' && portSel !== '__custom' && !ports.some((p) => p.name === portSel)}
+            <option value={portSel}>{portSel} (not detected)</option>
+          {/if}
+          <option value="__custom">custom path…</option>
+        </select>
+        {#if portSel === '__custom'}
+          <input
+            type="text"
+            placeholder="e.g. COM12 or /dev/ttyUSB0"
+            bind:value={customPath}
+            style="margin-top:8px"
+          />
+        {/if}
         <div class="port-row">
           <button type="button" class="btn-ghost" onclick={rescan}>Rescan</button>
           <button type="button" class="btn-ghost" disabled={reconnecting} onclick={reconnect}>
