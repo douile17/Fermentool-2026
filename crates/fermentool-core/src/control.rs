@@ -19,8 +19,10 @@ use tokio::sync::{broadcast, oneshot};
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::Transport;
 
+use crate::config::SerialConfig;
 use crate::engine::{ActiveStatus, Engine, RecoveryInfo, RunConfig, TickOutcome, TICK_INTERVAL};
 use crate::store::{EventRow, RunRow, RunStatus, TickRow};
+use crate::transport::{SwapTransport, TransportKind};
 
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
@@ -52,6 +54,12 @@ pub enum Command {
         reply: oneshot::Sender<Result<Vec<EventRow>, String>>,
     },
     Preview(CurveSpec, usize, oneshot::Sender<Vec<[f64; 2]>>),
+    /// Rebuild the pump transport from a serial config, without restarting.
+    Reconnect {
+        serial: SerialConfig,
+        pump_addr: u8,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     Shutdown,
 }
 
@@ -60,6 +68,8 @@ pub struct DaemonStatus {
     pub app_version: String,
     pub active: Option<ActiveStatus>,
     pub has_pending_recovery: bool,
+    /// `"sim"` or the open serial port name.
+    pub transport: String,
 }
 
 /// Sending / receiving on the control channel failed — the thread is gone.
@@ -106,13 +116,15 @@ impl ControlHandle {
 
 /// The current daemon status (cheap; called every tick and on demand).
 pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> DaemonStatus {
+    let st = engine.status();
     DaemonStatus {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        active: engine.status().active,
+        active: st.active,
         has_pending_recovery: engine
             .pending_recovery(Timestamp::now(), grace)
             .map(|r| r.is_some())
             .unwrap_or(false),
+        transport: st.transport,
     }
 }
 
@@ -125,7 +137,7 @@ pub fn spawn<T>(
     events: broadcast::Sender<DaemonStatus>,
 ) -> ControlHandle
 where
-    T: Transport + Send + 'static,
+    T: Transport + Send + SwapTransport + 'static,
 {
     let (tx, rx) = mpsc::channel::<Command>();
     let join = std::thread::Builder::new()
@@ -139,7 +151,7 @@ where
     }
 }
 
-fn control_loop<T: Transport>(
+fn control_loop<T: Transport + SwapTransport>(
     engine: &mut Engine<T>,
     rx: &mpsc::Receiver<Command>,
     grace: Duration,
@@ -256,7 +268,7 @@ fn advance_past(mut deadline: Instant, step: Duration) -> Instant {
 }
 
 /// Returns `true` when the run state may have changed and a status broadcast is warranted.
-fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) -> bool {
+fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) -> bool {
     let now = Timestamp::now();
     match cmd {
         Command::Shutdown => false,
@@ -339,6 +351,26 @@ fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) -
                 .collect();
             let _ = reply.send(series);
             false
+        }
+        Command::Reconnect {
+            serial,
+            pump_addr,
+            reply,
+        } => {
+            let wanted_serial = !serial.use_simulator();
+            let msg = engine
+                .swap_transport(&serial, pump_addr)
+                .map(|kind| match kind {
+                    TransportKind::Serial(name) => format!("serial port open: {name}"),
+                    TransportKind::Sim if wanted_serial => format!(
+                        "could not open {} — running on the pump simulator",
+                        serial.path
+                    ),
+                    TransportKind::Sim => "running on the pump simulator".to_string(),
+                })
+                .map_err(|e| e.to_string());
+            let _ = reply.send(msg);
+            true
         }
     }
 }
@@ -449,6 +481,68 @@ mod tests {
             matches!((a, b), (Some(x), Some(y)) if y > x + 0.05),
             "setpoint did not advance between journal ticks: {a:?} -> {b:?}"
         );
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn reconnect_when_idle_reports_the_transport() {
+        let engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        let (events, _keep_rx) = broadcast::channel(16);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        let serial = crate::config::SerialConfig {
+            path: "sim".into(),
+            baud: 9600,
+        };
+        let msg = handle
+            .call(|reply| Command::Reconnect {
+                serial,
+                pump_addr: 1,
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(msg.to_lowercase().contains("simulator"), "got: {msg}");
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn reconnect_is_refused_during_a_run() {
+        let engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        let (events, _keep_rx) = broadcast::channel(16);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        handle
+            .call(|reply| Command::StartRun(cadence_run(), reply))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let serial = crate::config::SerialConfig {
+            path: "sim".into(),
+            baud: 9600,
+        };
+        let err = handle
+            .call(|reply| Command::Reconnect {
+                serial,
+                pump_addr: 1,
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err, "a run is already active");
 
         handle.shutdown();
     }
