@@ -72,8 +72,13 @@ pub trait SwapTransport {
 
 impl SwapTransport for Box<dyn Transport + Send> {
     fn swap(&mut self, serial: &SerialConfig, pump_addr: u8) -> TransportKind {
+        // Drop the current transport *before* opening the new one: Windows
+        // refuses a second handle to a COM port that this process already holds,
+        // so reopening the same port (or any port while the old one is live)
+        // would otherwise fail and silently fall back to the simulator.
+        *self = Box::new(SimPump::new(pump_addr));
         let (new, kind) = open(serial, pump_addr);
-        *self = new; // old transport dropped here — SerialTransport's Drop closes the port
+        *self = new;
         kind
     }
 }
