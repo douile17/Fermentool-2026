@@ -16,6 +16,12 @@
     value: 10, // constant
     mu_per_hour: 0.15,
     steepness: 8,
+    // fed-batch F0 calculator
+    fb_x0: null,
+    fb_v0: null,
+    fb_yxs: null,
+    fb_sf: null,
+    fb_vmax: null,
   });
 
   let pumpAddr = $state(1);
@@ -28,6 +34,28 @@
   const unit = $derived(unitFor(f.control_var));
   const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS);
   const durationS = $derived(Math.round(f.duration_h * 3600));
+
+  // F0 = µ·X0·V0 / (Yx/s·Sf) — the feed rate that sustains growth at µ.
+  const fb = $derived.by(() => {
+    const mu = Number(f.mu_per_hour);
+    const x0 = Number(f.fb_x0);
+    const v0 = Number(f.fb_v0);
+    const y = Number(f.fb_yxs);
+    const sf = Number(f.fb_sf);
+    if (!(mu > 0 && x0 > 0 && v0 > 0 && y > 0 && sf > 0)) return null;
+    const f0_Lh = (mu * x0 * v0) / (y * sf);
+    const f0_mlmin = (f0_Lh * 1000) / 60;
+    const vmax = Number(f.fb_vmax);
+    const tmax = vmax > v0 ? (1 / mu) * Math.log(1 + (mu * (vmax - v0)) / f0_Lh) : null;
+    return { f0_Lh, f0_mlmin, tmax };
+  });
+
+  function useF0() {
+    if (!fb) return;
+    f.control_var = 'ml_min';
+    f.start = Number(fb.f0_mlmin.toFixed(3));
+    if (fb.tmax) f.duration_h = Number(fb.tmax.toFixed(1));
+  }
 
   function curveSpec() {
     const isConst = f.kind === 'constant';
@@ -177,6 +205,43 @@
     {/if}
   </div>
 
+  {#if f.kind === 'exponential' && f.mode === 'physio'}
+    <details class="fb">
+      <summary>Fed-batch F₀ from strain parameters</summary>
+      <p class="fb-eq mono">F₀ = µ · X₀ · V₀ / (Y<sub>x/s</sub> · S<sub>f</sub>)</p>
+      <div class="grid">
+        <label class="field"><span>X₀ — biomass at feed start (g/L)</span>
+          <input type="number" step="0.1" bind:value={f.fb_x0} placeholder="e.g. 2" />
+        </label>
+        <label class="field"><span>V₀ — culture volume (L)</span>
+          <input type="number" step="0.1" bind:value={f.fb_v0} placeholder="e.g. 1.0" />
+        </label>
+        <label class="field"><span>Y<sub>x/s</sub> — yield (g/g)</span>
+          <input type="number" step="0.01" bind:value={f.fb_yxs} placeholder="E. coli/glucose ≈ 0.45" />
+        </label>
+        <label class="field"><span>S<sub>f</sub> — feed substrate (g/L)</span>
+          <input type="number" step="1" bind:value={f.fb_sf} placeholder="e.g. 500" />
+        </label>
+        <label class="field"><span>V<sub>max</sub> — reactor limit (L, optional)</span>
+          <input type="number" step="0.1" bind:value={f.fb_vmax} placeholder="for the t_max hint" />
+        </label>
+      </div>
+
+      {#if fb}
+        <div class="fb-out mono">
+          F₀ = <b>{fb.f0_mlmin.toFixed(3)} ml/min</b>
+          <span class="dim">({fb.f0_Lh.toFixed(4)} L/h · µ = {f.mu_per_hour} h⁻¹)</span>
+          {#if fb.tmax}<br />reaches V<sub>max</sub> in ≈ <b>{fb.tmax.toFixed(1)} h</b>{/if}
+        </div>
+        <button class="btn-ghost" type="button" onclick={useF0}>
+          Use → Control ml/min, Start {fb.f0_mlmin.toFixed(2)}{fb.tmax ? `, Duration ${fb.tmax.toFixed(1)} h` : ''}
+        </button>
+      {:else}
+        <p class="muted">Fill µ, X₀, V₀, Y<sub>x/s</sub> and S<sub>f</sub> (all &gt; 0).</p>
+      {/if}
+    </details>
+  {/if}
+
   <p class="hint mono">
     setpoint clamped to the pump range {lim.min}–{lim.max} {unit}
   </p>
@@ -221,4 +286,23 @@
   .hint { font-size: 12px; color: var(--muted); margin: var(--s-4) 0 0; }
   .muted { color: var(--muted); }
   .foot { margin-top: var(--s-6); }
+
+  .fb {
+    margin-top: var(--s-5);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-ctl);
+    padding: var(--s-3) var(--s-4);
+    background: var(--surface-sunken);
+  }
+  .fb summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+  .fb[open] summary { margin-bottom: var(--s-4); }
+  .fb-eq { font-size: 12px; color: var(--muted); margin: 0 0 var(--s-4); }
+  .fb-out {
+    font-size: 13px;
+    margin: var(--s-4) 0;
+    padding: var(--s-3);
+    background: var(--surface);
+    border-radius: var(--radius-ctl);
+  }
+  .fb-out .dim { color: var(--muted); }
 </style>
