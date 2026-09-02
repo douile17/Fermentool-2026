@@ -8,14 +8,15 @@
    *   nowS?: number | null,
    *   durationS: number,
    *   unit?: string,
+   *   digits?: number,
    * }}
    */
-  let { planned = [], actual = [], nowS = null, durationS, unit = 'rpm' } = $props();
+  let { planned = [], actual = [], nowS = null, durationS, unit = 'rpm', digits = 1 } = $props();
 
   const W = 960;
   const H = 240;
   const padL = 8;
-  const padR = 8;
+  const padR = 16;
   const padT = 16;
   const padB = 22;
 
@@ -76,9 +77,9 @@
 
     {#if planned.length}
       <circle cx={x(planned[0][0])} cy={y(planned[0][1])} r="3.5" fill="var(--teal-700)" />
-      <text x={x(planned[0][0]) + 6} y={H - 6} class="axl">{num(planned[0][1])} {unit}</text>
+      <text x={x(planned[0][0]) + 6} y={H - 6} class="axl">{num(planned[0][1], digits)} {unit}</text>
       <circle cx={x(planned[planned.length - 1][0])} cy={y(planned[planned.length - 1][1])} r="3.5" fill="var(--teal-700)" />
-      <text x={W - padR} y="12" text-anchor="end" class="axl">{num(planned[planned.length - 1][1])} {unit}</text>
+      <text x={W - padR} y="12" text-anchor="end" class="axl">{num(planned[planned.length - 1][1], digits)} {unit}</text>
     {/if}
 
     {#each actual as p}
@@ -86,10 +87,16 @@
     {/each}
 
     {#if nowX != null}
-      <line x1={nowX} x2={nowX} y1="4" y2={H - padB} stroke="var(--teal-700)" stroke-width="1.25" stroke-dasharray="3 3" />
+      <line x1={nowX} x2={nowX} y1={padT} y2={H - padB}
+            stroke="var(--ink)" stroke-opacity="0.25" stroke-width="1" />
       {#if nowV != null}
-        <circle cx={nowX} cy={y(nowV)} r="5" fill="var(--teal-700)" />
-        <text x={nowX + 7} y={Math.max(14, y(nowV) - 8)} class="axl now">now · {num(nowV)} {unit}</text>
+        <circle cx={nowX} cy={y(nowV)} r="4" fill="var(--surface)"
+                stroke="var(--teal-700)" stroke-width="2" />
+      {/if}
+      {#if nowV != null && nowS > dspan * 0.08}
+        <text x={Math.min(nowX, W - padR)} y={H - 7}
+              text-anchor={nowX > W - 96 ? 'end' : 'middle'}
+              class="axl now">now · {num(nowV, digits)} {unit}</text>
       {/if}
     {/if}
   </svg>
