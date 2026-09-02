@@ -426,10 +426,9 @@ async fn serial_reconnect(
     if let Some(b) = req.baud {
         cfg.serial.baud = b;
     }
-    cfg.save(&s.config_path)
-        .map_err(|e| ApiError::Bad(e.to_string()))?;
-    *s.config.write().await = cfg.clone();
 
+    // Swap first — a refused reconnect (e.g. a run is active) must not touch
+    // `config.toml`, so the file always matches the live transport.
     let serial = cfg.serial.clone();
     let pump_addr = cfg.pump.address;
     let msg = s
@@ -442,6 +441,10 @@ async fn serial_reconnect(
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
+
+    cfg.save(&s.config_path)
+        .map_err(|e| ApiError::Bad(e.to_string()))?;
+    *s.config.write().await = cfg;
 
     Ok(Json(json!({ "connected": msg })).into_response())
 }
@@ -631,8 +634,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_is_conflict_during_a_run() {
-        let app = router(test_state());
+    async fn reconnect_is_conflict_during_a_run_and_leaves_config_untouched() {
+        let dir = std::env::temp_dir().join(format!("ft-reconnect-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfgp = dir.join("config.toml");
+
+        let mut st = test_state();
+        st.config_path = Arc::new(cfgp.clone());
+        let app = router(st);
 
         let start = post_json(
             "/api/runs",
@@ -647,10 +656,18 @@ mod tests {
         );
 
         let res = app
-            .oneshot(post_json("/api/serial/reconnect", json!({ "path": "sim" })))
+            .oneshot(post_json("/api/serial/reconnect", json!({ "path": "COM_NOPE" })))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CONFLICT);
+
+        // A refused reconnect must not have written the config file.
+        assert!(
+            !cfgp.exists(),
+            "config was rewritten despite the reconnect being refused"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
