@@ -101,12 +101,12 @@
   }
 </script>
 
-{#if complete && run}
+{#if complete}
   <section class="card done">
     <div class="card-head">
       <div>
-        <div class="eyebrow">Feed profile · {run.curve.params.kind}</div>
-        <h2>{run.name}</h2>
+        <div class="eyebrow">Feed profile · {run ? run.curve.params.kind : ''}</div>
+        <h2>{run?.name ?? 'Run complete'}</h2>
       </div>
       <span class="pill complete">✓&nbsp;complete</span>
     </div>
@@ -114,31 +114,33 @@
     {#if err}<div class="err" style="margin-bottom:16px">{err}</div>{/if}
 
     <FigureBand
-      start={run.curve.start}
+      start={run ? run.curve.start : null}
       now={holding.value}
-      end={run.curve.end}
+      end={run ? run.curve.end : null}
       {unit}
       {digits}
-      direction={run.direction}
+      direction={run?.direction ?? 'cw'}
       frac={pumpFrac}
     />
 
     <div class="progress">
       <div class="bar done"><span style="width:100%"></span></div>
       <div class="cap mono">
-        <span><b>completed</b> · ran {dur(run.duration_s)}</span>
+        <span><b>completed</b>{run ? ` · ran ${dur(run.duration_s)}` : ''}</span>
         <span>pump holding at <b>{num(holding.value, digits)} {unit}</b></span>
       </div>
     </div>
 
-    <Chart {planned} actual={actualSeries} nowS={run.duration_s} durationS={run.duration_s} {unit} {digits} />
+    {#if run}
+      <Chart {planned} actual={actualSeries} nowS={run.duration_s} durationS={run.duration_s} {unit} {digits} />
 
-    <div class="meta">
-      <div><div class="k">Direction</div><div class="v mono">{run.direction === 'cw' ? 'clockwise' : 'counter-cw'}</div></div>
-      <div><div class="k">Finished</div><div class="v mono">{shortTime(holding.finished_at)}</div></div>
-      <div><div class="k">Setpoint clamp</div><div class="v mono">{num(run.curve.clamp_min, digits)}–{num(run.curve.clamp_max, 0)}</div></div>
-      <div><div class="k">Started</div><div class="v mono">{shortTime(run.started_at)}</div></div>
-    </div>
+      <div class="meta">
+        <div><div class="k">Direction</div><div class="v mono">{run.direction === 'cw' ? 'clockwise' : 'counter-cw'}</div></div>
+        <div><div class="k">Finished</div><div class="v mono">{shortTime(holding.finished_at)}</div></div>
+        <div><div class="k">Setpoint clamp</div><div class="v mono">{num(run.curve.clamp_min, digits)}–{num(run.curve.clamp_max, 0)}</div></div>
+        <div><div class="k">Started</div><div class="v mono">{shortTime(run.started_at)}</div></div>
+      </div>
+    {/if}
 
     <div class="foot done-foot">
       <button class="btn-danger" disabled={stoppingPump} onclick={stopPump}>
