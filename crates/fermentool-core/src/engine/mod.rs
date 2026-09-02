@@ -14,9 +14,11 @@ use fermentool_modbus::{limits, Pump, PumpError, PumpTransport, Transport};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+use crate::config::SerialConfig;
 use crate::store::{
     ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunStatus, Store, StoreError,
 };
+use crate::transport::{SwapTransport, TransportKind};
 
 /// Fixed **journal** cadence — not user-tunable.
 ///
@@ -122,6 +124,8 @@ pub enum TickOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {
     pub active: Option<ActiveStatus>,
+    /// `"sim"` or the open serial port name.
+    pub transport: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +160,8 @@ pub struct Engine<T: Transport> {
     store: Store,
     app_version: String,
     active: Option<ActiveRun>,
+    /// Which transport the pump is currently driving — for the status frame.
+    transport: TransportKind,
 }
 
 impl<T: Transport> Engine<T> {
@@ -165,7 +171,39 @@ impl<T: Transport> Engine<T> {
             store,
             app_version: app_version.into(),
             active: None,
+            transport: TransportKind::Sim,
         }
+    }
+
+    /// Record which transport this engine is driving (called at boot once the
+    /// real port has been opened).
+    pub fn set_transport_kind(&mut self, kind: TransportKind) {
+        self.transport = kind;
+    }
+
+    /// The transport the pump is currently driving.
+    pub fn transport_kind(&self) -> &TransportKind {
+        &self.transport
+    }
+
+    /// Rebuild the pump transport in place from `serial` (simulator ⇄ real
+    /// port). Refused while a run is active — stop the run first. Returns the
+    /// transport now in use (which may be the simulator if the port failed to
+    /// open).
+    pub fn swap_transport(
+        &mut self,
+        serial: &SerialConfig,
+        pump_addr: u8,
+    ) -> Result<TransportKind>
+    where
+        T: SwapTransport,
+    {
+        if self.active.is_some() {
+            return Err(EngineError::Busy);
+        }
+        let kind = self.pump.transport_mut().swap(serial, pump_addr);
+        self.transport = kind.clone();
+        Ok(kind)
     }
 
     /// Read access to the journal (for the API / diagnostics).
@@ -184,6 +222,7 @@ impl<T: Transport> Engine<T> {
                 last_seq: (a.next_seq > 0).then_some(a.next_seq - 1),
                 last_target: a.last_target,
             }),
+            transport: self.transport.label(),
         }
     }
 
@@ -632,6 +671,38 @@ mod tests {
             e.start_run(linear_cfg(), t0()),
             Err(EngineError::Busy)
         ));
+    }
+
+    #[test]
+    fn status_reports_the_transport_and_defaults_to_sim() {
+        let e = engine();
+        assert_eq!(e.status().transport, "sim");
+        assert_eq!(e.transport_kind(), &crate::transport::TransportKind::Sim);
+    }
+
+    #[test]
+    fn swap_transport_is_refused_while_a_run_is_active() {
+        let mut e = engine();
+        e.start_run(linear_cfg(), t0()).unwrap();
+        let sc = crate::config::SerialConfig {
+            path: "sim".into(),
+            baud: 9600,
+        };
+        assert!(matches!(e.swap_transport(&sc, 1), Err(EngineError::Busy)));
+    }
+
+    #[test]
+    fn swap_transport_when_idle_updates_the_recorded_kind() {
+        let mut e = engine();
+        let sc = crate::config::SerialConfig {
+            path: "sim".into(),
+            baud: 9600,
+        };
+        assert_eq!(
+            e.swap_transport(&sc, 1).unwrap(),
+            crate::transport::TransportKind::Sim
+        );
+        assert_eq!(e.status().transport, "sim");
     }
 
     #[test]
