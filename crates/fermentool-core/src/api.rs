@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/recovery/discard", post(discard))
         .route("/api/serial/ports", get(serial_ports))
         .route("/api/serial/reconnect", post(serial_reconnect))
+        .route("/api/pump/stop", post(pump_stop))
         .route("/api/shutdown", post(shutdown))
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
@@ -251,6 +252,16 @@ async fn abort_run(State(s): State<AppState>, Path(_id): Path<i64>) -> ApiResult
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "aborted": true })).into_response())
+}
+
+/// Stop a pump that is still holding a completed run's final setpoint.
+async fn pump_stop(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::StopPump)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "stopped": true })).into_response())
 }
 
 async fn get_recovery(State(s): State<AppState>) -> ApiResult<Response> {
@@ -668,6 +679,48 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pump_stop_is_conflict_when_nothing_held() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(post_json("/api/pump/stop", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn pump_stop_releases_a_completed_run_hold() {
+        let app = router(test_state());
+
+        let start = post_json(
+            "/api/runs",
+            json!({
+                "name": "s", "control_var": "rpm", "direction": "cw", "pump_addr": 1,
+                "curve": {
+                    "mode": "endpoints", "start": 10, "end": 20, "duration": 1,
+                    "clamp_min": 0, "clamp_max": 350,
+                    "params": { "kind": "linear", "rate_per_hour": 0 }
+                }
+            }),
+        );
+        assert_eq!(
+            app.clone().oneshot(start).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let st = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
+        assert!(st["active"].is_null(), "run should have completed: {st}");
+        assert!(!st["holding"].is_null(), "expected a hold: {st}");
+
+        let res = app
+            .oneshot(post_json("/api/pump/stop", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[tokio::test]

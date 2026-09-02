@@ -126,6 +126,20 @@ pub struct EngineStatus {
     pub active: Option<ActiveStatus>,
     /// `"sim"` or the open serial port name.
     pub transport: String,
+    /// Set when a run completed and the pump is still holding its final
+    /// setpoint (it is not stopped on natural completion). Cleared by
+    /// [`Engine::stop_pump`] or by starting another run.
+    pub holding: Option<HoldingStatus>,
+}
+
+/// A completed run whose final setpoint the pump is still holding.
+#[derive(Debug, Clone, Serialize)]
+pub struct HoldingStatus {
+    pub run_id: i64,
+    pub control_var: ControlVar,
+    /// The setpoint the pump is holding (curve's final, quantised value).
+    pub value: f64,
+    pub finished_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +176,8 @@ pub struct Engine<T: Transport> {
     active: Option<ActiveRun>,
     /// Which transport the pump is currently driving — for the status frame.
     transport: TransportKind,
+    /// A completed run the pump is still holding at its final setpoint.
+    holding: Option<HoldingStatus>,
 }
 
 impl<T: Transport> Engine<T> {
@@ -172,6 +188,7 @@ impl<T: Transport> Engine<T> {
             app_version: app_version.into(),
             active: None,
             transport: TransportKind::Sim,
+            holding: None,
         }
     }
 
@@ -223,6 +240,7 @@ impl<T: Transport> Engine<T> {
                 last_target: a.last_target,
             }),
             transport: self.transport.label(),
+            holding: self.holding.clone(),
         }
     }
 
@@ -238,6 +256,8 @@ impl<T: Transport> Engine<T> {
         if self.active.is_some() {
             return Err(EngineError::Busy);
         }
+        // A new run supersedes any completed-run hold.
+        self.holding = None;
 
         let (lo, hi) = match cfg.control_var {
             ControlVar::Rpm => (limits::RPM_MIN, limits::RPM_MAX),
@@ -331,15 +351,23 @@ impl<T: Transport> Engine<T> {
         })?;
 
         if elapsed_s >= duration_s as f64 {
-            let _ = self.pump.stop();
+            // The pump is NOT stopped on natural completion — it keeps running
+            // at the curve's final setpoint (written just above) until the user
+            // stops it via `stop_pump`.
             self.store.finish_run(id, RunStatus::Completed, now)?;
             self.store.log_event(&NewEvent {
                 run_id: Some(id),
                 wall_time: now,
                 level: EventLevel::Info,
                 kind: "curve_done".into(),
-                detail: None,
+                detail: Some(format!("pump holding at {target:.3}")),
             })?;
+            self.holding = Some(HoldingStatus {
+                run_id: id,
+                control_var,
+                value: target,
+                finished_at: now,
+            });
             self.active = None;
             return Ok(TickOutcome::Finished { seq, target });
         }
@@ -408,10 +436,29 @@ impl<T: Transport> Engine<T> {
         self.end_run(now, RunStatus::Aborted, "abort")
     }
 
+    /// Stop a pump that is still holding a completed run's final setpoint.
+    /// `Err(Idle)` when nothing is being held (no run has completed, or the
+    /// hold was already released).
+    pub fn stop_pump(&mut self, now: Timestamp) -> Result<()> {
+        let Some(h) = self.holding.take() else {
+            return Err(EngineError::Idle);
+        };
+        let _ = self.pump.stop();
+        self.store.log_event(&NewEvent {
+            run_id: Some(h.run_id),
+            wall_time: now,
+            level: EventLevel::Info,
+            kind: "pump_stop".into(),
+            detail: Some("held setpoint released".into()),
+        })?;
+        Ok(())
+    }
+
     fn end_run(&mut self, now: Timestamp, status: RunStatus, kind: &str) -> Result<()> {
         let Some(active) = self.active.take() else {
             return Err(EngineError::Idle);
         };
+        self.holding = None;
         let _ = self.pump.stop();
         self.store.finish_run(active.id, status, now)?;
         self.store.log_event(&NewEvent {
@@ -469,6 +516,7 @@ impl<T: Transport> Engine<T> {
         let Some(run) = self.store.running_run()? else {
             return Err(EngineError::Idle);
         };
+        self.holding = None;
         let elapsed_s = now.duration_since(run.started_at).as_secs_f64().max(0.0);
         if elapsed_s > run.duration_s as f64 + grace.as_secs_f64() {
             return Err(EngineError::Config(
@@ -674,6 +722,57 @@ mod tests {
     }
 
     #[test]
+    fn natural_completion_keeps_the_pump_running_and_holds() {
+        let mut e = engine();
+        let id = e.start_run(linear_cfg(), t0()).unwrap();
+        let o = e.tick(at(3601)).unwrap(); // past the 3600 s duration
+        assert!(matches!(o, TickOutcome::Finished { .. }));
+
+        // pump is NOT stopped on natural completion
+        assert!(e.pump.transport().running());
+        assert!(e.status().active.is_none());
+
+        let h = e.status().holding.expect("holding set after completion");
+        assert_eq!(h.run_id, id);
+        assert_eq!(h.control_var, ControlVar::Rpm);
+        assert!((h.value - 100.0).abs() < 1e-6); // curve end, quantised
+
+        assert_eq!(
+            e.store().run(id).unwrap().unwrap().status,
+            RunStatus::Completed
+        );
+    }
+
+    #[test]
+    fn stop_pump_stops_the_pump_and_clears_the_hold() {
+        let mut e = engine();
+        e.start_run(linear_cfg(), t0()).unwrap();
+        e.tick(at(3601)).unwrap();
+        assert!(e.pump.transport().running());
+
+        e.stop_pump(at(3602)).unwrap();
+        assert!(!e.pump.transport().running());
+        assert!(e.status().holding.is_none());
+    }
+
+    #[test]
+    fn stop_pump_with_nothing_held_is_idle() {
+        let mut e = engine();
+        assert!(matches!(e.stop_pump(t0()), Err(EngineError::Idle)));
+    }
+
+    #[test]
+    fn starting_a_run_clears_a_completed_run_hold() {
+        let mut e = engine();
+        e.start_run(linear_cfg(), t0()).unwrap();
+        e.tick(at(3601)).unwrap();
+        assert!(e.status().holding.is_some());
+
+        e.start_run(linear_cfg(), at(3602)).unwrap();
+        assert!(e.status().holding.is_none());
+    }
+
+    #[test]
     fn status_reports_the_transport_and_defaults_to_sim() {
         let e = engine();
         assert_eq!(e.status().transport, "sim");
@@ -726,7 +825,9 @@ mod tests {
 
         let o = e.tick(at(3600)).unwrap();
         assert!(matches!(o, TickOutcome::Finished { .. }));
-        assert!(!e.pump.transport().running());
+        // pump keeps holding the final setpoint; the run record is Completed
+        assert!(e.pump.transport().running());
+        assert!(e.status().holding.is_some());
         assert!(e.store().running_run().unwrap().is_none());
         assert_eq!(
             e.store().run(id).unwrap().unwrap().status,

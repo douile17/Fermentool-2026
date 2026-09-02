@@ -20,7 +20,9 @@ use fermentool_curves::CurveSpec;
 use fermentool_modbus::Transport;
 
 use crate::config::SerialConfig;
-use crate::engine::{ActiveStatus, Engine, RecoveryInfo, RunConfig, TickOutcome, TICK_INTERVAL};
+use crate::engine::{
+    ActiveStatus, Engine, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome, TICK_INTERVAL,
+};
 use crate::store::{EventRow, RunRow, RunStatus, TickRow};
 use crate::transport::{SwapTransport, TransportKind};
 
@@ -60,6 +62,8 @@ pub enum Command {
         pump_addr: u8,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Stop a pump still holding a completed run's final setpoint.
+    StopPump(oneshot::Sender<Result<(), String>>),
     Shutdown,
 }
 
@@ -70,6 +74,8 @@ pub struct DaemonStatus {
     pub has_pending_recovery: bool,
     /// `"sim"` or the open serial port name.
     pub transport: String,
+    /// Set when a run completed and the pump is still holding its final speed.
+    pub holding: Option<HoldingStatus>,
 }
 
 /// Sending / receiving on the control channel failed — the thread is gone.
@@ -125,6 +131,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
             .map(|r| r.is_some())
             .unwrap_or(false),
         transport: st.transport,
+        holding: st.holding,
     }
 }
 
@@ -372,6 +379,10 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let _ = reply.send(msg);
             true
         }
+        Command::StopPump(reply) => {
+            let _ = reply.send(engine.stop_pump(now).map_err(|e| e.to_string()));
+            true
+        }
     }
 }
 
@@ -509,6 +520,58 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(msg.to_lowercase().contains("simulator"), "got: {msg}");
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stop_pump_releases_a_completed_run_hold() {
+        let engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        let (events, _keep_rx) = broadcast::channel(16);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        let cfg = RunConfig {
+            name: "short".into(),
+            control_var: ControlVar::Rpm,
+            direction: Direction::Cw,
+            pump_addr: 1,
+            curve: CurveSpec::linear(10.0, 20.0, Duration::from_secs(1)),
+        };
+        handle
+            .call(|reply| Command::StartRun(cfg, reply))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // let the 1 s journal tick fire and complete the run
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let st = handle.call(Command::Status).await.unwrap();
+        assert!(st.active.is_none(), "run should have completed");
+        assert!(st.holding.is_some(), "pump should be holding the final setpoint");
+
+        handle.call(Command::StopPump).await.unwrap().unwrap();
+        let st = handle.call(Command::Status).await.unwrap();
+        assert!(st.holding.is_none());
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stop_pump_with_nothing_held_errors() {
+        let engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        let (events, _keep_rx) = broadcast::channel(16);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        let err = handle.call(Command::StopPump).await.unwrap().unwrap_err();
+        assert_eq!(err, "no run is active");
 
         handle.shutdown();
     }
