@@ -116,6 +116,13 @@ impl Default for SerialConfig {
     }
 }
 
+impl SerialConfig {
+    /// `true` when this points at the pump simulator rather than a real port.
+    pub fn use_simulator(&self) -> bool {
+        self.path.eq_ignore_ascii_case("sim") || self.path.is_empty()
+    }
+}
+
 impl Default for PumpConfig {
     fn default() -> Self {
         Self { address: 1 }
@@ -183,7 +190,7 @@ impl Config {
 
     /// `true` when the pump simulator should be used instead of a real port.
     pub fn use_simulator(&self) -> bool {
-        self.serial.path.eq_ignore_ascii_case("sim") || self.serial.path.is_empty()
+        self.serial.use_simulator()
     }
 }
 
