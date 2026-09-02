@@ -58,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/recovery/resume", post(resume))
         .route("/api/recovery/discard", post(discard))
         .route("/api/serial/ports", get(serial_ports))
+        .route("/api/serial/reconnect", post(serial_reconnect))
         .route("/api/shutdown", post(shutdown))
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
@@ -402,6 +403,49 @@ async fn serial_ports() -> ApiResult<Response> {
     Ok(Json(json!({ "ports": out })).into_response())
 }
 
+#[derive(Deserialize)]
+struct ReconnectReq {
+    /// New serial path; omitted = keep the current one.
+    #[serde(default)]
+    path: Option<String>,
+    /// New baud; omitted = keep the current one.
+    #[serde(default)]
+    baud: Option<u32>,
+}
+
+/// Persist `serial.*` to `config.toml` and rebuild the live pump transport
+/// without a daemon restart. Refused (409) while a run is active.
+async fn serial_reconnect(
+    State(s): State<AppState>,
+    Json(req): Json<ReconnectReq>,
+) -> ApiResult<Response> {
+    let mut cfg = s.config.read().await.clone();
+    if let Some(p) = req.path {
+        cfg.serial.path = p;
+    }
+    if let Some(b) = req.baud {
+        cfg.serial.baud = b;
+    }
+    cfg.save(&s.config_path)
+        .map_err(|e| ApiError::Bad(e.to_string()))?;
+    *s.config.write().await = cfg.clone();
+
+    let serial = cfg.serial.clone();
+    let pump_addr = cfg.pump.address;
+    let msg = s
+        .control
+        .call(move |reply| Command::Reconnect {
+            serial,
+            pump_addr,
+            reply,
+        })
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+
+    Ok(Json(json!({ "connected": msg })).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +594,85 @@ mod tests {
         let app = router(test_state());
         let res = app.oneshot(get("/api/runs/999")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reconnect_persists_config_and_reports_the_transport() {
+        let dir = std::env::temp_dir().join(format!("ft-reconnect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfgp = dir.join("config.toml");
+
+        let mut st = test_state();
+        st.config_path = Arc::new(cfgp.clone());
+        let app = router(st);
+
+        let res = app
+            .oneshot(post_json("/api/serial/reconnect", json!({ "path": "sim" })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert!(
+            v["connected"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("simulator"),
+            "got: {v}"
+        );
+
+        let written = std::fs::read_to_string(&cfgp).unwrap();
+        assert!(
+            written.contains("path = \"sim\""),
+            "config not written: {written}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reconnect_is_conflict_during_a_run() {
+        let app = router(test_state());
+
+        let start = post_json(
+            "/api/runs",
+            json!({
+                "name": "t", "control_var": "rpm", "direction": "cw",
+                "pump_addr": 1, "curve": linear_curve()
+            }),
+        );
+        assert_eq!(
+            app.clone().oneshot(start).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let res = app
+            .oneshot(post_json("/api/serial/reconnect", json!({ "path": "sim" })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn reconnect_with_empty_body_uses_current_config() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(post_json("/api/serial/reconnect", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reconnect_rejects_a_non_json_body() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/serial/reconnect")
+            .header("content-type", "application/json")
+            .body(Body::from("not json"))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert!(res.status().is_client_error(), "got: {}", res.status());
     }
 }
