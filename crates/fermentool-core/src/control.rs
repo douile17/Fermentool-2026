@@ -10,7 +10,7 @@
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use serde::Serialize;
@@ -19,10 +19,15 @@ use tokio::sync::{broadcast, oneshot};
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::Transport;
 
-use crate::engine::{ActiveStatus, Engine, RecoveryInfo, RunConfig, TickOutcome};
+use crate::engine::{ActiveStatus, Engine, RecoveryInfo, RunConfig, TickOutcome, TICK_INTERVAL};
 use crate::store::{EventRow, RunRow, RunStatus, TickRow};
 
 const IDLE_POLL: Duration = Duration::from_millis(500);
+
+/// Sub-second cadence for `Engine::apply_setpoint`. 150 ms is ~3x a MODBUS write
+/// transaction at 9600 8E1 and well under the 200 ms serial timeout, so a steep
+/// ramp steps through each pump grid value without loading the bus.
+const WRITE_SETPOINT_INTERVAL: Duration = Duration::from_millis(150);
 
 /// One request to the control thread. Each carries a `oneshot` reply channel.
 pub enum Command {
@@ -141,8 +146,79 @@ fn control_loop<T: Transport>(
     events: &broadcast::Sender<DaemonStatus>,
 ) {
     tracing::info!("control loop started");
+    // Two absolute deadlines while a run is active, each advanced by whole steps
+    // from its own previous value (never `now + interval`) so the phase stays
+    // locked to the run start — command traffic between them can't shift the
+    // cadence and no timing error accumulates over a long run:
+    //
+    //   * `next_journal` (+= TICK_INTERVAL, 1 s): `Engine::tick` — writes the
+    //     pump, appends a journal row, owns run completion. Also the heartbeat
+    //     that keeps writing when the curve is flat.
+    //   * `next_write` (+= WRITE_SETPOINT_INTERVAL, 150 ms): `Engine::apply_setpoint`
+    //     — writes the pump only when the setpoint has moved by a pump step,
+    //     so a steep ramp steps through every grid value instead of jumping.
+    let mut next_journal: Option<Instant> = None;
+    let mut next_write: Option<Instant> = None;
+
     loop {
-        let wait = engine.tick_interval().unwrap_or(IDLE_POLL);
+        if engine.tick_interval().is_none() {
+            next_journal = None;
+            next_write = None;
+        } else {
+            let journal_due = *next_journal.get_or_insert_with(|| Instant::now() + TICK_INTERVAL);
+            let write_due =
+                *next_write.get_or_insert_with(|| Instant::now() + WRITE_SETPOINT_INTERVAL);
+
+            if Instant::now() >= journal_due {
+                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match engine.tick(Timestamp::now()) {
+                        Ok(TickOutcome::Finished { seq, target }) => {
+                            tracing::info!(seq, target, "run finished");
+                            true
+                        }
+                        Ok(TickOutcome::Applied { .. }) => true,
+                        Ok(TickOutcome::Idle) => false,
+                        Err(e) => {
+                            tracing::warn!("tick error: {e}");
+                            false
+                        }
+                    }
+                }));
+                match done {
+                    Ok(true) => {
+                        let _ = events.send(current_status(engine, grace));
+                    }
+                    Ok(false) => {}
+                    Err(_) => tracing::error!("panic in tick; loop continues"),
+                }
+                next_journal = Some(advance_past(journal_due, TICK_INTERVAL));
+                // The journal tick just wrote the pump — hold the next sub-second
+                // write a full interval off so we don't write twice in a row.
+                next_write = Some(Instant::now() + WRITE_SETPOINT_INTERVAL);
+                continue;
+            }
+
+            if Instant::now() >= write_due {
+                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine.apply_setpoint(Timestamp::now())
+                }));
+                match done {
+                    Ok(Ok(true)) => {
+                        let _ = events.send(current_status(engine, grace));
+                    }
+                    Ok(Ok(false)) => {}
+                    Ok(Err(e)) => tracing::warn!("apply_setpoint error: {e}"),
+                    Err(_) => tracing::error!("panic in apply_setpoint; loop continues"),
+                }
+                next_write = Some(advance_past(write_due, WRITE_SETPOINT_INTERVAL));
+                continue;
+            }
+        }
+
+        let wait = match (next_journal, next_write) {
+            (Some(j), Some(w)) => j.min(w).saturating_duration_since(Instant::now()),
+            _ => IDLE_POLL,
+        };
         match rx.recv_timeout(wait) {
             Ok(Command::Shutdown) => break,
             Ok(cmd) => {
@@ -157,33 +233,26 @@ fn control_loop<T: Transport>(
                     Err(_) => tracing::error!("panic while handling a command; loop continues"),
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {
-                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match engine
-                    .tick(Timestamp::now())
-                {
-                    Ok(TickOutcome::Finished { seq, target }) => {
-                        tracing::info!(seq, target, "run finished");
-                        true
-                    }
-                    Ok(TickOutcome::Applied { .. }) => true,
-                    Ok(TickOutcome::Idle) => false,
-                    Err(e) => {
-                        tracing::warn!("tick error: {e}");
-                        false
-                    }
-                }));
-                match done {
-                    Ok(true) => {
-                        let _ = events.send(current_status(engine, grace));
-                    }
-                    Ok(false) => {}
-                    Err(_) => tracing::error!("panic in tick; loop continues"),
-                }
-            }
+            // Woke on a deadline (or early): the due checks at the top of the
+            // loop do the work.
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     tracing::info!("control loop stopped");
+}
+
+/// Advance `deadline` by whole `step`s until it is in the future — keeps the
+/// cadence phase-locked while a slow tick / long stall doesn't trigger a burst
+/// of makeup work.
+fn advance_past(mut deadline: Instant, step: Duration) -> Instant {
+    let now = Instant::now();
+    loop {
+        deadline += step;
+        if deadline > now {
+            return deadline;
+        }
+    }
 }
 
 /// Returns `true` when the run state may have changed and a status broadcast is warranted.
@@ -271,5 +340,116 @@ fn handle<T: Transport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) -
             let _ = reply.send(series);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use fermentool_curves::CurveSpec;
+    use fermentool_modbus::{Pump, SimPump};
+
+    use crate::engine::{Engine, RunConfig};
+    use crate::store::{ControlVar, Direction, Store};
+
+    fn cadence_run() -> RunConfig {
+        RunConfig {
+            name: "cadence".into(),
+            control_var: ControlVar::Rpm,
+            direction: Direction::Cw,
+            pump_addr: 1,
+            curve: CurveSpec::linear(0.0, 100.0, Duration::from_secs(3600)),
+        }
+    }
+
+    /// A burst of API commands between ticks must not shift the tick cadence.
+    /// The UI refetches `/ticks` + `/events` after every WS push, i.e. two
+    /// commands land ~immediately after each tick; with the deadline reset on
+    /// every `recv_timeout` this steady traffic starves the tick loop. Against
+    /// an absolute deadline the loop still ticks ~once per second.
+    #[tokio::test]
+    async fn tick_cadence_is_independent_of_command_traffic() {
+        let engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        let (events, _keep_rx) = broadcast::channel(64);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        handle
+            .call(|reply| Command::StartRun(cadence_run(), reply))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let until = Instant::now() + Duration::from_millis(3000);
+        while Instant::now() < until {
+            let _ = handle.call(Command::Status).await;
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+
+        let st = handle.call(Command::Status).await.unwrap();
+        let last_seq = st.active.and_then(|a| a.last_seq);
+        // ~3 ticks in 3 s. `last_seq` is `next_seq - 1`, so >= Some(1) means at
+        // least two ticks fired despite ~75 Status calls; the upper bound guards
+        // against a makeup-tick burst.
+        assert!(
+            matches!(last_seq, Some(s) if (1..=8).contains(&s)),
+            "cadence not held under command flood: last_seq = {last_seq:?}"
+        );
+
+        handle.shutdown();
+    }
+
+    /// Between two 1 s journal ticks the sub-second write loop must still move
+    /// the setpoint, so a steep ramp doesn't jump a whole tick's worth at once.
+    #[tokio::test]
+    async fn setpoint_advances_between_journal_ticks() {
+        let engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        let (events, _keep_rx) = broadcast::channel(64);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        let cfg = RunConfig {
+            name: "ramp".into(),
+            control_var: ControlVar::Rpm,
+            direction: Direction::Cw,
+            pump_addr: 1,
+            // 0 → 350 rpm in 60 s ⇒ ~5.8 rpm/s: a 0.1 grid step every ~17 ms.
+            curve: CurveSpec::linear(0.0, 350.0, Duration::from_secs(60)),
+        };
+        handle
+            .call(|reply| Command::StartRun(cfg, reply))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let a = handle
+            .call(Command::Status)
+            .await
+            .unwrap()
+            .active
+            .and_then(|s| s.last_target);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let b = handle
+            .call(Command::Status)
+            .await
+            .unwrap()
+            .active
+            .and_then(|s| s.last_target);
+
+        // Well before the first journal tick (1 s), the setpoint has already
+        // climbed via the 150 ms write loop.
+        assert!(
+            matches!((a, b), (Some(x), Some(y)) if y > x + 0.05),
+            "setpoint did not advance between journal ticks: {a:?} -> {b:?}"
+        );
+
+        handle.shutdown();
     }
 }

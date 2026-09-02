@@ -18,13 +18,17 @@ use crate::store::{
     ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunStatus, Store, StoreError,
 };
 
-/// Fixed setpoint cadence — not user-tunable.
+/// Fixed **journal** cadence — not user-tunable.
 ///
-/// 1 s is far finer than anything the run needs (a 100 h feed profile moves the
-/// setpoint by a tiny fraction per second) and far coarser than one MODBUS
-/// transaction (~tens of ms), so there is ~10x headroom and no risk of the
-/// "slave busy" exception. Faster would only bloat the journal and the bus for
-/// no physical gain; the pump's own 0.1 rpm step and internal ramp dominate.
+/// [`Engine::tick`] fires once a second: it appends a journal row, owns run
+/// completion, and is the heartbeat that keeps writing the pump when the curve
+/// is flat. 1 s keeps the journal small over a 100 h run.
+///
+/// The pump setpoint itself is refreshed faster — the control loop also calls
+/// [`Engine::apply_setpoint`] ~every 150 ms so a steep ramp steps the pump
+/// through each grid value ([`setpoint_grid`]) instead of jumping a whole
+/// second's worth; that write is skipped when the value hasn't moved, so the
+/// bus stays quiet on gentle curves.
 pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -141,6 +145,9 @@ struct ActiveRun {
     duration_s: i64,
     next_seq: i64,
     last_target: Option<f64>,
+    /// Setpoint last written to the pump, already snapped to [`setpoint_grid`].
+    /// [`Engine::apply_setpoint`] compares against this to skip no-op writes.
+    last_write_q: Option<f64>,
 }
 
 /// Owns the pump and the journal for the lifetime of the process.
@@ -203,7 +210,7 @@ impl<T: Transport> Engine<T> {
         spec.validate().map_err(EngineError::Config)?;
 
         let duration_s = spec.duration.as_secs() as i64;
-        let first = spec.value_at(Duration::ZERO);
+        let first = quantize(spec.value_at(Duration::ZERO), setpoint_grid(cfg.control_var));
 
         // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
         // head-type / tubing-size registers are deliberately left untouched — see
@@ -238,6 +245,7 @@ impl<T: Transport> Engine<T> {
             duration_s,
             next_seq: 0,
             last_target: Some(first),
+            last_write_q: Some(first),
         });
         Ok(id)
     }
@@ -252,10 +260,14 @@ impl<T: Transport> Engine<T> {
         let control_var = active.control_var;
         let duration_s = active.duration_s;
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
-        let target = active.spec.value_at(Duration::from_secs_f64(elapsed_s));
+        let target = quantize(
+            active.spec.value_at(Duration::from_secs_f64(elapsed_s)),
+            setpoint_grid(control_var),
+        );
         let seq = active.next_seq;
         active.next_seq += 1;
         active.last_target = Some(target);
+        active.last_write_q = Some(target);
 
         let write = write_setpoint(&mut self.pump, control_var, target);
         let written_ok = write.is_ok();
@@ -297,6 +309,54 @@ impl<T: Transport> Engine<T> {
             target,
             written_ok,
         })
+    }
+
+    /// Sub-second setpoint write between journal ticks: compute the setpoint for
+    /// the **real elapsed time**, snap it to [`setpoint_grid`], and write it to
+    /// the pump **only if it changed** since the last write. No journal row, no
+    /// completion check — [`Engine::tick`] owns those. Returns `true` when a new
+    /// value was written.
+    ///
+    /// Called ~every 150 ms by the control loop so a steep ramp steps the pump
+    /// through each grid value instead of jumping a journal tick's worth at once.
+    pub fn apply_setpoint(&mut self, now: Timestamp) -> Result<bool> {
+        let Some(active) = self.active.as_mut() else {
+            return Ok(false);
+        };
+        let id = active.id;
+        let control_var = active.control_var;
+        let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
+        // The curve's final value belongs to the completing tick.
+        if elapsed_s >= active.duration_s as f64 {
+            return Ok(false);
+        }
+        let target = quantize(
+            active.spec.value_at(Duration::from_secs_f64(elapsed_s)),
+            setpoint_grid(control_var),
+        );
+        if active.last_write_q == Some(target) {
+            return Ok(false);
+        }
+
+        match write_setpoint(&mut self.pump, control_var, target) {
+            Ok(()) => {
+                active.last_write_q = Some(target);
+                active.last_target = Some(target);
+                Ok(true)
+            }
+            Err(e) => {
+                // The next journal tick will journal the write state; here just
+                // note it. Keep the run going — a transient bus error recovers.
+                self.store.log_event(&NewEvent {
+                    run_id: Some(id),
+                    wall_time: now,
+                    level: EventLevel::Warn,
+                    kind: "write_fail".into(),
+                    detail: Some(e.to_string()),
+                })?;
+                Ok(false)
+            }
+        }
     }
 
     /// Graceful stop: stop the pump, mark the run `stopped`.
@@ -376,7 +436,10 @@ impl<T: Transport> Engine<T> {
                 "run is past its end plus grace; finish or abort instead".into(),
             ));
         }
-        let target = run.curve.value_at(Duration::from_secs_f64(elapsed_s));
+        let target = quantize(
+            run.curve.value_at(Duration::from_secs_f64(elapsed_s)),
+            setpoint_grid(run.control_var),
+        );
 
         self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
 
@@ -403,6 +466,7 @@ impl<T: Transport> Engine<T> {
             duration_s: run.duration_s,
             next_seq,
             last_target: Some(target),
+            last_write_q: Some(target),
         });
         Ok(run.id)
     }
@@ -470,6 +534,24 @@ fn write_setpoint<T: Transport>(
         ControlVar::Rpm => pump.set_speed_rpm(value as f32),
         ControlVar::MlMin => pump.set_flow_ml_min(value as f32),
     }
+}
+
+/// The pump's usable setpoint step for a control variable.
+///
+/// `Rpm` snaps to the documented 0.1 rpm motor step. `MlMin` snaps to the pump's
+/// 4-decimal display resolution — its own firmware then collapses that onto a
+/// motor step, since Fermentool does not own the tube calibration and cannot do
+/// that conversion itself (see `docs/DESIGN.md`).
+fn setpoint_grid(control_var: ControlVar) -> f64 {
+    match control_var {
+        ControlVar::Rpm => 0.1,
+        ControlVar::MlMin => 1e-4,
+    }
+}
+
+/// Snap `value` to the nearest multiple of `step`.
+fn quantize(value: f64, step: f64) -> f64 {
+    (value / step).round() * step
 }
 
 /// Drive an engine in real time until the run finishes or `stop` is set. The
@@ -666,6 +748,67 @@ mod tests {
     fn tick_with_no_run_is_idle() {
         let mut e = engine();
         assert!(matches!(e.tick(t0()).unwrap(), TickOutcome::Idle));
+    }
+
+    #[test]
+    fn quantize_snaps_to_the_grid() {
+        assert!((quantize(8.04, 0.1) - 8.0).abs() < 1e-9);
+        assert!((quantize(8.06, 0.1) - 8.1).abs() < 1e-9);
+        assert!((quantize(10.0083333, 1e-4) - 10.0083).abs() < 1e-9);
+        assert_eq!(setpoint_grid(ControlVar::Rpm), 0.1);
+        assert_eq!(setpoint_grid(ControlVar::MlMin), 1e-4);
+    }
+
+    #[test]
+    fn apply_setpoint_writes_on_a_grid_step_and_never_journals() {
+        let mut e = engine();
+        let mut cfg = linear_cfg();
+        // 10 → 370 rpm over 1 h ⇒ 0.1 rpm/s near t0; clamp-intersected to ≤ 350.
+        cfg.curve =
+            CurveSpec::linear(10.0, 370.0, Duration::from_secs(3600)).with_clamp(0.0, 5000.0);
+        let id = e.start_run(cfg, t0()).unwrap();
+        let at_ms = |ms: i64| t0() + SignedDuration::from_millis(ms);
+
+        // 400 ms in: still on the 10.0 rpm grid point → no write.
+        assert!(!e.apply_setpoint(at_ms(400)).unwrap());
+        assert_eq!(e.store().tick_count(id).unwrap(), 0);
+
+        // 6 s in: curve is at 10.6 → crosses the grid, writes the quantised value.
+        assert!(e.apply_setpoint(at_ms(6_000)).unwrap());
+        assert!((e.pump.transport().speed_rpm() as f64 - 10.6).abs() < 1e-3);
+
+        // same grid point again → no second write.
+        assert!(!e.apply_setpoint(at_ms(6_040)).unwrap());
+
+        // journalling stays the 1 s tick's job.
+        assert_eq!(e.store().tick_count(id).unwrap(), 0);
+        e.tick(at_ms(7_000)).unwrap();
+        assert_eq!(e.store().tick_count(id).unwrap(), 1);
+    }
+
+    #[test]
+    fn apply_setpoint_quantises_ml_min_to_the_display_grid() {
+        let mut e = engine();
+        let cfg = RunConfig {
+            control_var: ControlVar::MlMin,
+            // 10 → 46 ml/min over 1 h ⇒ 0.01 ml/min per second, so one 1e-4 grid
+            // step every 10 ms.
+            curve: CurveSpec::linear(10.0, 46.0, Duration::from_secs(3600)),
+            ..linear_cfg()
+        };
+        e.start_run(cfg, t0()).unwrap();
+        // 1235 ms in: raw 10.012350, exactly between two 1e-4 grid points.
+        e.apply_setpoint(t0() + SignedDuration::from_millis(1235))
+            .unwrap();
+        let f = e.pump.transport().flow_ml_min() as f64;
+        let on_grid = (f * 10_000.0).round() / 10_000.0;
+        assert!((f - on_grid).abs() < 1e-5, "not snapped to the 1e-4 grid: {f}");
+    }
+
+    #[test]
+    fn apply_setpoint_is_false_with_no_run() {
+        let mut e = engine();
+        assert!(!e.apply_setpoint(t0()).unwrap());
     }
 
     // ---- crash recovery ----
