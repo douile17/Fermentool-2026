@@ -136,6 +136,7 @@ pub struct EngineStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct HoldingStatus {
     pub run_id: i64,
+    pub name: String,
     pub control_var: ControlVar,
     /// The setpoint the pump is holding (curve's final, quantised value).
     pub value: f64,
@@ -362,8 +363,14 @@ impl<T: Transport> Engine<T> {
                 kind: "curve_done".into(),
                 detail: Some(format!("pump holding at {target:.3}")),
             })?;
+            let name = self
+                .store
+                .run(id)?
+                .map(|r| r.name)
+                .unwrap_or_default();
             self.holding = Some(HoldingStatus {
                 run_id: id,
+                name,
                 control_var,
                 value: target,
                 finished_at: now,
@@ -734,6 +741,7 @@ mod tests {
 
         let h = e.status().holding.expect("holding set after completion");
         assert_eq!(h.run_id, id);
+        assert_eq!(h.name, "r");
         assert_eq!(h.control_var, ControlVar::Rpm);
         assert!((h.value - 100.0).abs() < 1e-6); // curve end, quantised
 

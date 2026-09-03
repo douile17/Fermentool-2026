@@ -6,13 +6,22 @@
   import History from './routes/History.svelte';
   import Settings from './routes/Settings.svelte';
   import ResumeModal from './components/ResumeModal.svelte';
+  import FinishModal from './components/FinishModal.svelte';
 
-  const nav = [
+  const navAll = [
     ['overview', 'Overview', '▦'],
     ['new', 'New run', '＋'],
     ['history', 'History', '≣'],
     ['settings', 'Settings', '⚙'],
   ];
+
+  // A run is on: hide "New run" until the pump is idle again.
+  const running = $derived(!!app.status?.active);
+  const nav = $derived(running ? navAll.filter(([id]) => id !== 'new') : navAll);
+
+  $effect(() => {
+    if (running && app.route === 'new') app.route = 'overview';
+  });
 
   $effect(() => {
     get('/api/status')
@@ -26,6 +35,28 @@
       app.connected = true;
     });
   });
+
+  // "run complete" pop-up — shows once per completed run per browser session.
+  const readFinishAck = () => {
+    try {
+      return Number(sessionStorage.getItem('ft-finish-ack')) || null;
+    } catch {
+      return null;
+    }
+  };
+  let finishAck = $state(readFinishAck());
+  const hold = $derived(app.status?.holding ?? null);
+  const showFinish = $derived(!!hold && !app.status?.active && hold.run_id !== finishAck);
+  function dismissFinish() {
+    if (hold) {
+      try {
+        sessionStorage.setItem('ft-finish-ack', String(hold.run_id));
+      } catch {
+        /* private mode — modal just won't re-suppress across reloads */
+      }
+      finishAck = hold.run_id;
+    }
+  }
 
   // fetch recovery details once when the daemon reports one
   let recovery = $state(null);
@@ -92,6 +123,10 @@
 
 {#if recovery}
   <ResumeModal info={recovery} ondone={() => (recovery = null)} />
+{/if}
+
+{#if showFinish}
+  <FinishModal {hold} ondismiss={dismissFinish} />
 {/if}
 
 <style>
