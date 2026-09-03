@@ -371,13 +371,28 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
+/// `/assets/*` files carry a content hash in their name, so they can be cached
+/// forever. Everything else (chiefly `index.html`, which points at the current
+/// hashed bundle) must be revalidated every load, or a stale `index.html` pins
+/// the browser to an old bundle.
+fn cache_control(path: &str) -> &'static str {
+    if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
 async fn static_handler(uri: Uri) -> Response {
     let raw = uri.path().trim_start_matches('/');
     let path = if raw.is_empty() { "index.html" } else { raw };
 
     if let Some(file) = Assets::get(path) {
         return (
-            [(header::CONTENT_TYPE, mime_for(path))],
+            [
+                (header::CONTENT_TYPE, mime_for(path)),
+                (header::CACHE_CONTROL, cache_control(path)),
+            ],
             file.data.into_owned(),
         )
             .into_response();
@@ -385,7 +400,10 @@ async fn static_handler(uri: Uri) -> Response {
     // SPA fallback: unknown non-asset path -> index.html
     match Assets::get("index.html") {
         Some(index) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             index.data.into_owned(),
         )
             .into_response(),
