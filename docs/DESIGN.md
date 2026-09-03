@@ -10,8 +10,8 @@ calm, white-forward, legible at a glance from across the bench, honest about sta
 | `--teal-700` | `#00707F` | Primary. Actions, active nav, key numbers, links, brand. |
 | `--teal-400` | `#5FA4B0` | Secondary accent, focus ring, secondary chart series, muted emphasis. |
 | `--white` | `#FFFFFF` | Card / surface background. |
-| `--lime-300` | `#B9CD76` | Soft fills — area under the planned curve, subtle badges/highlights. |
-| `--green-500` | `#7DB928` | **Live / running** indicator, success, positive deltas. |
+| `--lime-300` | `#A4DDC7` (dark `#1F4F3F`) | Soft fills — area under the planned curve, subtle badges/highlights. |
+| `--green-500` | `#10A074` (dark `#37D39B`) | **Live / running** indicator, success, positive deltas. Emerald, chosen 2026-09 to replace the acid yellow-green that clashed with the teal. |
 
 Neutrals derived for light mode: page `--bg #F4F7F7`, hairline `--line #E1EAE9`,
 text `--ink #0E2A2F`, secondary text `--muted #5C7378`.

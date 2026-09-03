@@ -1,13 +1,13 @@
-/* Fermentool UI — white-dominant, teal/green palette. See docs/DESIGN.md. */
+/* Fermentool UI — white-dominant, teal + emerald palette. See docs/DESIGN.md. */
 
 :root {
   color-scheme: light;
   --teal-700: #00707f;
   --teal-600: #0a8090;
   --teal-400: #5fa4b0;
-  --lime-300: #b9cd76;
-  --green-500: #7db928;
-  --green-600: #6ba622;
+  --lime-300: #a4ddc7;
+  --green-500: #10a074;
+  --green-600: #0b8460;
 
   --bg: #fbfcfc;
   --surface: #ffffff;
@@ -37,8 +37,9 @@
     --teal-700: #46b6c4;
     --teal-600: #5cc2cf;
     --teal-400: #6fbecb;
-    --green-500: #93cf46;
-    --green-600: #a6da63;
+    --lime-300: #1f4f3f;
+    --green-500: #37d39b;
+    --green-600: #57e3b4;
     --bg: #0f1719;
     --surface: #17211f;
     --surface-sunken: #121b19;
@@ -57,8 +58,9 @@
   --teal-700: #46b6c4;
   --teal-600: #5cc2cf;
   --teal-400: #6fbecb;
-  --green-500: #93cf46;
-  --green-600: #a6da63;
+  --lime-300: #1f4f3f;
+  --green-500: #37d39b;
+  --green-600: #57e3b4;
   --bg: #0f1719;
   --surface: #17211f;
   --surface-sunken: #121b19;
