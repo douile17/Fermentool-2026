@@ -36,7 +36,7 @@
     });
   });
 
-  // "run complete" pop-up — shows once per completed run per browser session.
+  // "run complete" pop-up: shows once per completed run per browser session.
   const readFinishAck = () => {
     try {
       return Number(sessionStorage.getItem('ft-finish-ack')) || null;
@@ -52,7 +52,7 @@
       try {
         sessionStorage.setItem('ft-finish-ack', String(hold.run_id));
       } catch {
-        /* private mode — modal just won't re-suppress across reloads */
+        /* private mode: modal just won't re-suppress across reloads */
       }
       finishAck = hold.run_id;
     }

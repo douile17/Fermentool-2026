@@ -1,6 +1,6 @@
 <script>
   import { get, post } from '../lib/api.js';
-  import { num, dur, shortTime, unitFor } from '../lib/fmt.js';
+  import { num, dur, shortTime, unitFor, digitsFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
 
   let runs = $state([]);
@@ -83,9 +83,10 @@
       nowS={null}
       durationS={sel.run.duration_s}
       unit={unitFor(sel.run.control_var)}
+      digits={digitsFor(sel.run.control_var)}
     />
     <div class="pv-cap mono">
-      {sel.ticks.length} ticks · start {num(sel.run.curve.start)} → target {num(sel.run.curve.end)}
+      {sel.ticks.length} ticks · start {num(sel.run.curve.start, digitsFor(sel.run.control_var))} → target {num(sel.run.curve.end, digitsFor(sel.run.control_var))}
     </div>
 
     <div class="acts">

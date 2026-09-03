@@ -1,21 +1,33 @@
 <script>
   import { num } from '../lib/fmt.js';
-  let { start, now = null, end, unit = 'rpm', delta = null } = $props();
+  import PumpHead from './PumpHead.svelte';
+  let {
+    start,
+    now = null,
+    end,
+    unit = 'rpm',
+    delta = null,
+    direction = 'cw',
+    frac = 0,
+    digits = 1,
+  } = $props();
 </script>
 
 <div class="band">
   <div class="fig side">
     <span class="lbl">Start</span>
-    <span class="mono val">{num(start)}<span class="u">&nbsp;{unit}</span></span>
+    <span class="mono val">{num(start, digits)}<span class="u">&nbsp;{unit}</span></span>
   </div>
 
   <div class="arrow" aria-hidden="true">→</div>
 
   <div class="fig now">
     <span class="lbl">Now</span>
-    <span class="mono val big">{now == null ? '—' : num(now)}<span class="u">&nbsp;{unit}</span></span>
+    <PumpHead {direction} {frac} />
+    <span class="mono val big">{now == null ? '–' : num(now, digits)}</span>
+    <span class="u nowu">{unit}</span>
     {#if delta != null}
-      <span class="mono delta">{delta >= 0 ? '▲ +' : '▼ '}{num(Math.abs(delta), 2)} last tick</span>
+      <span class="mono delta">{delta >= 0 ? '▲ +' : '▼ '}{num(Math.abs(delta), Math.max(2, digits))} last tick</span>
     {/if}
   </div>
 
@@ -23,7 +35,7 @@
 
   <div class="fig side end">
     <span class="lbl">Target</span>
-    <span class="mono val">{num(end)}<span class="u">&nbsp;{unit}</span></span>
+    <span class="mono val">{num(end, digits)}<span class="u">&nbsp;{unit}</span></span>
   </div>
 </div>
 
@@ -46,6 +58,7 @@
   .val { font-weight: 600; color: var(--ink); font-size: 30px; letter-spacing: -0.02em; }
   .val.big { font-size: 52px; line-height: 1; letter-spacing: -0.03em; }
   .u { font-size: 14px; color: var(--muted); }
+  .nowu { font-size: 13px; letter-spacing: 0.04em; margin-top: -2px; }
   .delta { font-size: 12px; color: var(--green-600); }
   .arrow { color: var(--line); font-size: 20px; align-self: center; padding-bottom: 14px; }
 

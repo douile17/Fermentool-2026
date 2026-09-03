@@ -53,7 +53,7 @@
         baud: cfg.serial.baud,
       });
       cfg.serial.path = path;
-      msg = r.connected ? `Connected — ${r.connected}` : 'Reconnected.';
+      msg = r.connected ? `Connected: ${r.connected}` : 'Reconnected.';
     } catch (e) {
       err = e.message;
     }
@@ -67,7 +67,7 @@
     try {
       cfg.serial.path = effectivePath;
       const r = await put('/api/config', cfg);
-      msg = r.note ? `Saved — ${r.note}` : 'Saved.';
+      msg = r.note ? `Saved: ${r.note}` : 'Saved.';
     } catch (e) {
       err = e.message;
     }
@@ -102,7 +102,7 @@
         <select bind:value={portSel}>
           <option value="sim">sim (simulator)</option>
           {#each ports as p}
-            <option value={p.name}>{p.name}{p.product ? ` — ${p.product}` : ` (${p.kind})`}</option>
+            <option value={p.name}>{p.name}{p.product ? ` · ${p.product}` : ` (${p.kind})`}</option>
           {/each}
           {#if portSel !== 'sim' && portSel !== '__custom' && !ports.some((p) => p.name === portSel)}
             <option value={portSel}>{portSel} (not detected)</option>
@@ -122,7 +122,7 @@
           <button type="button" class="btn-ghost" disabled={reconnecting} onclick={reconnect}>
             {reconnecting ? 'Connecting…' : 'Connect now'}
           </button>
-          <span class="port-now">Connected to: <b>{app.status?.transport ?? '—'}</b></span>
+          <span class="port-now">Connected to: <b>{app.status?.transport ?? '–'}</b></span>
         </div>
         {#if portErr}<div class="err" style="margin-top:8px">{portErr}</div>{/if}
       </label>

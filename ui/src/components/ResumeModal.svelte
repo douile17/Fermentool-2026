@@ -1,13 +1,14 @@
 <script>
   import { post } from '../lib/api.js';
   import { num, dur } from '../lib/fmt.js';
-  import { unitFor } from '../lib/fmt.js';
+  import { unitFor, digitsFor } from '../lib/fmt.js';
 
   let { info, ondone } = $props();
   let busy = $state(false);
   let err = $state(null);
 
   const unit = $derived(unitFor(info.control_var));
+  const digits = $derived(digitsFor(info.control_var));
 
   async function act(fn) {
     busy = true;
@@ -35,10 +36,10 @@
       <b class="mono">{dur(info.elapsed_s)}</b> of
       <b class="mono">{dur(info.duration_s)}</b>.
       {#if info.past_end}
-        The curve already finished while the app was down — you can only close it out.
+        The curve already finished while the app was down, so you can only close it out.
       {:else}
-        Resuming applies the profile value for the real elapsed time now —
-        <b class="mono">{num(info.resume_target)} {unit}</b> — and re-runs the full pump
+        Resuming applies the profile value for the real elapsed time now
+        (<b class="mono">{num(info.resume_target, digits)} {unit}</b>) and re-runs the full pump
         start sequence.
       {/if}
     </p>
@@ -48,7 +49,7 @@
     <div class="row">
       {#if !info.past_end}
         <button class="btn-primary" disabled={busy} onclick={resume}>
-          Resume at {num(info.resume_target)} {unit}
+          Resume at {num(info.resume_target, digits)} {unit}
         </button>
       {/if}
       <button class="btn-ghost" disabled={busy} onclick={finish}>Finish run</button>

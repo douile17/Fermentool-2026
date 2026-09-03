@@ -222,7 +222,7 @@
 {/if}
 
 <style>
-  /* Slow "breathing" halo on the live run card — signals the pump is working. */
+  /* Slow "breathing" halo on the live run card: signals the pump is working. */
   .breathe { animation: breathe 2.8s ease-in-out infinite alternate; }
   @keyframes breathe {
     from {
@@ -236,7 +236,7 @@
         0 8px 40px color-mix(in srgb, var(--green-500) 40%, transparent);
     }
   }
-  /* Calm persistent glow on the completed-run card — the pump is still
+  /* Calm persistent glow on the completed-run card: the pump is still
      holding its final speed, so the page keeps a gentle "alive" pulse. */
   .done { animation: done-glow 3.6s ease-in-out infinite alternate; }
   @keyframes done-glow {

@@ -1,12 +1,12 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
-  import { num, unitFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
+  import { num, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
 
   let f = $state({
     name: '',
-    control_var: 'rpm',
+    control_var: 'ml_min',
     direction: 'cw',
     duration_h: 24,
     kind: 'linear',
@@ -35,7 +35,7 @@
   const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS);
   const durationS = $derived(Math.round(f.duration_h * 3600));
 
-  // F0 = µ·X0·V0 / (Yx/s·Sf) — the feed rate that sustains growth at µ.
+  // F0 = µ·X0·V0 / (Yx/s·Sf): the feed rate that sustains growth at µ.
   const fb = $derived.by(() => {
     const mu = Number(f.mu_per_hour);
     const x0 = Number(f.fb_x0);
@@ -128,13 +128,13 @@
   </div>
 
   {#if busy}
-    <div class="err" style="margin-bottom:16px">A run is already active — stop it from Overview first.</div>
+    <div class="err" style="margin-bottom:16px">A run is already active. Stop it from Overview first.</div>
   {/if}
 
   <p class="lede">
-    <b>rpm</b> drives the motor directly (deterministic). <b>ml/min</b> lets the pump do
-    the conversion using its own head / tubing setting — configure and calibrate that on
-    the pump; Fermentool never changes it.
+    <b>ml/min</b> lets the pump do the conversion using its own head / tubing setting.
+    Configure and calibrate that on the pump; Fermentool never changes it. <b>rpm</b>
+    drives the motor directly (deterministic).
   </p>
 
   <div class="grid">
@@ -148,8 +148,8 @@
 
     <div class="field"><span>Control</span>
       <div class="seg">
-        <button class:on={f.control_var === 'rpm'} onclick={() => (f.control_var = 'rpm')}>rpm</button>
         <button class:on={f.control_var === 'ml_min'} onclick={() => (f.control_var = 'ml_min')}>ml/min</button>
+        <button class:on={f.control_var === 'rpm'} onclick={() => (f.control_var = 'rpm')}>rpm</button>
       </div>
     </div>
 
@@ -210,19 +210,19 @@
       <summary>Fed-batch F₀ from strain parameters</summary>
       <p class="fb-eq mono">F₀ = µ · X₀ · V₀ / (Y<sub>x/s</sub> · S<sub>f</sub>)</p>
       <div class="grid">
-        <label class="field"><span>X₀ — biomass at feed start (g/L)</span>
+        <label class="field"><span>X₀ · biomass at feed start (g/L)</span>
           <input type="number" step="0.1" bind:value={f.fb_x0} placeholder="e.g. 2" />
         </label>
-        <label class="field"><span>V₀ — culture volume (L)</span>
+        <label class="field"><span>V₀ · culture volume (L)</span>
           <input type="number" step="0.1" bind:value={f.fb_v0} placeholder="e.g. 1.0" />
         </label>
-        <label class="field"><span>Y<sub>x/s</sub> — yield (g/g)</span>
+        <label class="field"><span>Y<sub>x/s</sub> · yield (g/g)</span>
           <input type="number" step="0.01" bind:value={f.fb_yxs} placeholder="E. coli/glucose ≈ 0.45" />
         </label>
-        <label class="field"><span>S<sub>f</sub> — feed substrate (g/L)</span>
+        <label class="field"><span>S<sub>f</sub> · feed substrate (g/L)</span>
           <input type="number" step="1" bind:value={f.fb_sf} placeholder="e.g. 500" />
         </label>
-        <label class="field"><span>V<sub>max</sub> — reactor limit (L, optional)</span>
+        <label class="field"><span>V<sub>max</sub> · reactor limit (L, optional)</span>
           <input type="number" step="0.1" bind:value={f.fb_vmax} placeholder="for the t_max hint" />
         </label>
       </div>
@@ -251,9 +251,9 @@
     {#if previewErr}
       <div class="err">{previewErr}</div>
     {:else if preview.length}
-      <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} />
+      <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} digits={digitsFor(f.control_var)} />
       <div class="pv-cap mono">
-        start {num(preview[0][1])} {unit} · end {num(preview[preview.length - 1][1])} {unit} · {f.duration_h} h
+        start {num(preview[0][1], digitsFor(f.control_var))} {unit} · end {num(preview[preview.length - 1][1], digitsFor(f.control_var))} {unit} · {f.duration_h} h
       </div>
     {:else}
       <p class="muted">Adjust the fields to see the curve.</p>

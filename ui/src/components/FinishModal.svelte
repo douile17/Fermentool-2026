@@ -45,8 +45,8 @@
     <h2 id="ft-done">“{hold.name}” finished</h2>
 
     <p class="lede">
-      The pump is <b>still running</b> at the profile's final rate —
-      <b class="mono">{num(hold.value, digits)}&nbsp;{unit}</b> — and holds there
+      The pump is <b>still running</b> at the profile's final rate
+      (<b class="mono">{num(hold.value, digits)}&nbsp;{unit}</b>) and holds there
       until you stop it.
     </p>
 

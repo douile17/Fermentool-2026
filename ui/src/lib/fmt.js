@@ -1,7 +1,7 @@
 // Small formatting helpers.
 
 export function num(x, digits = 1) {
-  if (x == null || Number.isNaN(x)) return '—';
+  if (x == null || Number.isNaN(x)) return '–';
   return Number(x).toFixed(digits);
 }
 
@@ -29,10 +29,10 @@ export function clock(seconds) {
 }
 
 export function shortTime(iso) {
-  if (!iso) return '—';
+  if (!iso) return '–';
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
-    ? '—'
+    ? '–'
     : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
