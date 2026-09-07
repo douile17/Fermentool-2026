@@ -8,6 +8,11 @@
 //!   8. embedded Svelte UI + WebSocket push
 //!   9. per-OS single-binary packaging + service files
 
+// Release builds run as a windowless background service: no console flashes up
+// when the user double-clicks the exe. Debug builds keep the console so
+// `cargo run` still shows live logs. Either way the file logger is the record.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,6 +63,25 @@ fn resolve_paths(config_dir_override: Option<&str>) -> Paths {
     }
 }
 
+/// Best-effort: open `url` in the machine's default browser. Fire-and-forget —
+/// the daemon never waits on it and a failure only means the user opens the page
+/// themselves. On Windows `explorer.exe <url>` launches the browser without a
+/// console window flashing up.
+#[cfg(not(debug_assertions))]
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    let (bin, arg) = ("explorer.exe", url.to_string());
+    #[cfg(target_os = "macos")]
+    let (bin, arg) = ("open", url.to_string());
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (bin, arg) = ("xdg-open", url.to_string());
+
+    match std::process::Command::new(bin).arg(arg).spawn() {
+        Ok(_) => tracing::info!("opened {url} in the default browser"),
+        Err(e) => tracing::warn!("could not open a browser ({e}); open {url} manually"),
+    }
+}
+
 fn init_tracing(level: &str, log_dir: &Path) -> anyhow::Result<WorkerGuard> {
     use tracing_subscriber::prelude::*;
 
@@ -68,9 +92,15 @@ fn init_tracing(level: &str, log_dir: &Path) -> anyhow::Result<WorkerGuard> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
 
+    // The console layer only makes sense when there's a console: debug builds.
+    // Release builds are windowless (`windows_subsystem = "windows"`), so writing
+    // to a detached stderr is pointless — the daily file is the record.
+    let console = cfg!(debug_assertions)
+        .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(console)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
@@ -134,6 +164,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            // Log it too: a windowless release build has no console to print to,
+            // and this is the usual "I double-clicked it twice" case.
+            tracing::error!(
+                "port {} already in use — Fermentool may already be running",
+                config.port
+            );
             anyhow::bail!(
                 "port {} is already in use — another Fermentool instance may be running, \
                  or change `port` in {}",
@@ -143,7 +179,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e).context("bind listener"),
     };
-    tracing::info!("API listening on http://{addr}");
+    let url = format!("http://{addr}");
+    tracing::info!("API listening on {url}");
+
+    // Release builds have no console, so pop the UI in the default browser.
+    #[cfg(not(debug_assertions))]
+    open_in_browser(&url);
 
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal(shutdown))
