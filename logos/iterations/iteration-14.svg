@@ -1,8 +1,0 @@
-<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <title>Fermentool — element tile, Ft only</title>
-  <g id="icon">
-    <rect x="28" y="28" width="456" height="456" rx="48" fill="#0a4d57"/>
-    <text x="242" y="370" font-family="Helvetica, Arial, sans-serif" font-size="320"
-      font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="-12">Ft</text>
-  </g>
-</svg>
