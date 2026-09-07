@@ -8,7 +8,7 @@
   // `animation-duration`: a live setpoint changes `frac` continuously, and
   // retiming a running CSS animation makes the rotor visibly jump. Accumulating
   // the angle means a speed change only bends the rate from here on.
-  let { direction = 'cw', frac = 0, size = 84 } = $props();
+  let { direction = 'cw', frac = 0, size = 84, spin = true } = $props();
 
   let angle = $state(0);
 
@@ -18,7 +18,7 @@
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   $effect(() => {
-    if (reduced) return;
+    if (reduced || !spin) return;
     let raf = 0;
     let last = 0;
 
@@ -63,16 +63,18 @@
 
 <style>
   .pump { display: block; flex: none; }
-  svg { width: 100%; height: 100%; overflow: visible; }
+  svg { display: block; width: 100%; height: 100%; overflow: visible; }
 
+  /* Colours are overridable via CSS vars so the nav can tint the whole glyph
+     to match its label; defaults keep the standalone (FigureBand) look. */
   .wall {
-    fill: var(--surface);
-    stroke: var(--muted);
+    fill: var(--ph-body, color-mix(in srgb, var(--teal-400) 16%, var(--surface)));
+    stroke: var(--ph-line, var(--muted));
     stroke-width: 2.4;
   }
   .ring {
-    fill: var(--surface);
-    stroke: var(--muted);
+    fill: var(--ph-fill, var(--surface));
+    stroke: var(--ph-line, var(--muted));
     stroke-width: 3;
   }
 
@@ -82,5 +84,5 @@
   }
 
   .hub,
-  .roller { fill: var(--ink); }
+  .roller { fill: var(--ph-detail, var(--ink)); }
 </style>

@@ -26,15 +26,26 @@ async function req(method, path, payload) {
 export const get = (path) => req('GET', path);
 export const post = (path, payload) => req('POST', path, payload ?? {});
 export const put = (path, payload) => req('PUT', path, payload);
+export const del = (path) => req('DELETE', path);
 
 /** Subscribe to status frames. Returns an unsubscribe function. Auto-reconnects. */
 export function connectWs(onStatus) {
   let live = true;
   let ws = null;
+  let retry = 1500;
 
   const open = () => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/api/ws`);
+    ws.onopen = () => {
+      retry = 1500;
+      // Pull a fresh snapshot on every (re)connect so a dropped socket during
+      // a long run doesn't leave the UI on stale status.
+      fetch('/api/status')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((s) => s && onStatus(s))
+        .catch(() => {});
+    };
     ws.onmessage = (e) => {
       try {
         onStatus(JSON.parse(e.data));
@@ -43,7 +54,9 @@ export function connectWs(onStatus) {
       }
     };
     ws.onclose = () => {
-      if (live) setTimeout(open, 1500);
+      if (!live) return;
+      setTimeout(open, retry);
+      retry = Math.min(retry * 2, 15000); // backoff, capped at 15s
     };
     ws.onerror = () => ws && ws.close();
   };

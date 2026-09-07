@@ -1,0 +1,19 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>Fermentool — Ramp-F</title>
+  <defs>
+    <linearGradient id="grad" x1="120" y1="420" x2="400" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00707f"/>
+      <stop offset="1" stop-color="#10a074"/>
+    </linearGradient>
+  </defs>
+  <g id="icon" fill="none" stroke="url(#grad)" stroke-width="50" stroke-linecap="round" stroke-linejoin="round">
+    <!-- stem = time axis -->
+    <path d="M150 410 V150"/>
+    <!-- top arm rises: the feed accelerating -->
+    <path d="M150 150 Q286 150 372 96"/>
+    <!-- mid arm -->
+    <path d="M150 268 H300"/>
+  </g>
+  <!-- leading edge of the feed -->
+  <circle id="tip" cx="372" cy="96" r="20" fill="#10a074"/>
+</svg>

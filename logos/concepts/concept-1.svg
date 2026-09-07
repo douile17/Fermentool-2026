@@ -1,0 +1,17 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>Fermentool — Tube-F</title>
+  <defs>
+    <linearGradient id="grad" x1="0" y1="512" x2="512" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00707f"/>
+      <stop offset="1" stop-color="#10a074"/>
+    </linearGradient>
+  </defs>
+  <g id="icon" fill="none" stroke="url(#grad)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round">
+    <!-- stem + top arm as one continuous bent run of tubing -->
+    <path d="M170 420 V214 Q170 150 234 150 H330"/>
+    <!-- mid arm -->
+    <path d="M170 274 H304"/>
+  </g>
+  <!-- nozzle flare at the feed end -->
+  <path id="nozzle" d="M330 122 L384 150 L330 178 Z" fill="#10a074"/>
+</svg>

@@ -1,0 +1,14 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>Fermentool FT monogram</title>
+  <g id="icon" fill="#0a4d57">
+    <!-- shared top bar: F top-arm + T crossbar -->
+    <path d="M84 120 L404 120 A14 14 0 0 1 418 134 L418 172 A14 14 0 0 1 404 186 L84 186 Z"/>
+    <!-- F leg -->
+    <path d="M118 186 L178 186 L178 292 A12 12 0 0 1 166 304 L130 304 A12 12 0 0 1 118 292 Z"/>
+    <!-- T stem -->
+    <path d="M246 186 L308 186 L308 388 A14 14 0 0 1 294 402 L260 402 A14 14 0 0 1 246 388 Z"/>
+    <!-- swoosh: the F's lower arm as a sweep of flow -->
+    <path fill="none" stroke="#0a4d57" stroke-width="60" stroke-linecap="round"
+      d="M150 300 C154 372 224 420 322 412 C378 407 414 372 420 300"/>
+  </g>
+</svg>

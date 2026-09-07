@@ -1,0 +1,13 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>Fermentool F — stencil</title>
+  <g id="icon" fill="#12292e">
+    <!-- stem, broken into segments -->
+    <rect x="156" y="92" width="84" height="120"/>
+    <rect x="156" y="236" width="84" height="88"/>
+    <rect x="156" y="348" width="84" height="72"/>
+    <!-- top arm, detached from the stem by a gap -->
+    <rect x="264" y="92" width="128" height="84"/>
+    <!-- mid arm, detached -->
+    <rect x="264" y="236" width="96" height="76"/>
+  </g>
+</svg>

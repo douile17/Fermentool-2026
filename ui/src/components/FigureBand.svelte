@@ -6,7 +6,6 @@
     now = null,
     end,
     unit = 'rpm',
-    delta = null,
     direction = 'cw',
     frac = 0,
     digits = 1,
@@ -26,9 +25,6 @@
     <PumpHead {direction} {frac} />
     <span class="mono val big">{now == null ? '–' : num(now, digits)}</span>
     <span class="u nowu">{unit}</span>
-    {#if delta != null}
-      <span class="mono delta">{delta >= 0 ? '▲ +' : '▼ '}{num(Math.abs(delta), Math.max(2, digits))} last tick</span>
-    {/if}
   </div>
 
   <div class="arrow" aria-hidden="true">→</div>
@@ -59,8 +55,12 @@
   .val.big { font-size: 52px; line-height: 1; letter-spacing: -0.03em; }
   .u { font-size: 14px; color: var(--muted); }
   .nowu { font-size: 13px; letter-spacing: 0.04em; margin-top: -2px; }
-  .delta { font-size: 12px; color: var(--green-600); }
-  .arrow { color: var(--line); font-size: 20px; align-self: center; padding-bottom: 14px; }
+  .arrow {
+    color: var(--muted);
+    font-size: 18px;
+    align-self: center;
+    padding-bottom: 14px;
+  }
 
   @media (max-width: 720px) {
     .band { grid-template-columns: 1fr; text-align: left; }

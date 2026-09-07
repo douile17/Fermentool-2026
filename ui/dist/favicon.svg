@@ -1,0 +1,12 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>Fermentool</title>
+  <defs>
+    <linearGradient id="ft-bg" x1="28" y1="28" x2="484" y2="484" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00707f"/>
+      <stop offset="1" stop-color="#10a074"/>
+    </linearGradient>
+  </defs>
+  <rect x="28" y="28" width="456" height="456" rx="48" fill="url(#ft-bg)"/>
+  <text x="242" y="370" font-family="Helvetica, Arial, sans-serif" font-size="320"
+    font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="-12">Ft</text>
+</svg>

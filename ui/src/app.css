@@ -9,9 +9,9 @@
   --green-500: #10a074;
   --green-600: #0b8460;
 
-  --bg: #fbfcfc;
+  --bg: #e8eeec;
   --surface: #ffffff;
-  --surface-sunken: #f3f6f5;
+  --surface-sunken: #eef2f1;
   --line: #e9efee;
   --line-soft: #f0f4f3;
   --ink: #12292e;
@@ -129,6 +129,11 @@ input[type="text"], input[type="number"], input[type="search"], select {
   border-radius: var(--radius-ctl);
   padding: var(--s-2) var(--s-3);
   width: 100%;
+}
+input::placeholder {
+  color: var(--muted);
+  font-style: italic;
+  opacity: 0.7;
 }
 input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible {
   outline: 2px solid var(--teal-400);

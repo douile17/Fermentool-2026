@@ -4,6 +4,10 @@ export const app = $state({
   status: null,
   /** WebSocket / API reachable. */
   connected: false,
-  /** current route id */
-  route: 'overview',
+  /** top-level section from the sidebar: 'pump' | 'settings' */
+  route: 'pump',
+  /** sub-view within the pump panel: 'overview' | 'new' | 'history' */
+  tab: 'overview',
+  /** Form seed for NewRun, set by "Run again" in History. Consumed once. */
+  prefill: null,
 });

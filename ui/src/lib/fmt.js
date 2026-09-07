@@ -36,6 +36,35 @@ export function shortTime(iso) {
     : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
+/** "4 Sep 10:04" — date + time, for run stamps that can span days. */
+export function stamp(iso) {
+  if (!iso) return '–';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? '–'
+    : d.toLocaleString(undefined, {
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+}
+
+/** "4 Sep 2026, 10:04" — full stamp with year, for history where runs age. */
+export function stampY(iso) {
+  if (!iso) return '–';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? '–'
+    : d.toLocaleString(undefined, {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+}
+
 export function elapsedSeconds(startedAtIso) {
   const t0 = Date.parse(startedAtIso);
   return Number.isNaN(t0) ? 0 : (Date.now() - t0) / 1000;

@@ -1,0 +1,19 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>Fermentool — Hex badge F</title>
+  <defs>
+    <linearGradient id="grad" x1="60" y1="60" x2="452" y2="452" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00707f"/>
+      <stop offset="1" stop-color="#10a074"/>
+    </linearGradient>
+  </defs>
+  <g id="icon">
+    <!-- flat-top hexagon: technical badge, not a rounded square -->
+    <path d="M167 44 H345 L456 256 L345 468 H167 L56 256 Z" fill="url(#grad)"/>
+    <!-- geometric F reversed out -->
+    <g fill="#ffffff">
+      <rect x="196" y="150" width="52" height="216" rx="8"/>
+      <rect x="196" y="150" width="150" height="52" rx="8"/>
+      <rect x="196" y="244" width="112" height="48" rx="8"/>
+    </g>
+  </g>
+</svg>

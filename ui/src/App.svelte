@@ -5,22 +5,53 @@
   import NewRun from './routes/NewRun.svelte';
   import History from './routes/History.svelte';
   import Settings from './routes/Settings.svelte';
+  import PumpHead from './components/PumpHead.svelte';
   import ResumeModal from './components/ResumeModal.svelte';
   import FinishModal from './components/FinishModal.svelte';
 
-  const navAll = [
-    ['overview', 'Overview', '▦'],
-    ['new', 'New run', '＋'],
-    ['history', 'History', '≣'],
-    ['settings', 'Settings', '⚙'],
+  // Flat sidebar: "Pump" up top, "Settings" pinned to the foot. Pump's
+  // sub-views are tabs on the main panel, not a nested menu.
+  // "New run" isn't a tab — Overview already offers it (idle empty state,
+  // completed run) and History's "Run again" jumps straight to it.
+  const pumpTabs = [
+    ['overview', 'Overview'],
+    ['history', 'History'],
   ];
 
-  // A run is on: hide "New run" until the pump is idle again.
   const running = $derived(!!app.status?.active);
-  const nav = $derived(running ? navAll.filter(([id]) => id !== 'new') : navAll);
 
   $effect(() => {
-    if (running && app.route === 'new') app.route = 'overview';
+    if (running && app.tab === 'new') app.tab = 'overview';
+  });
+
+  // Sliding indicator for the tab bar: track the active button's box.
+  let tabsEl = $state(null);
+  let ind = $state({ x: 0, w: 0 });
+  let indReady = $state(false);
+
+  function measureTab() {
+    if (!tabsEl) return;
+    const on = tabsEl.querySelector('.tab.on');
+    // No selected tab (e.g. the hidden 'new' view): collapse the indicator
+    // rather than leaving it frozen under the previous tab.
+    if (!on) {
+      ind = { x: ind.x, w: 0 };
+      return;
+    }
+    ind = { x: on.offsetLeft, w: on.offsetWidth };
+    indReady = true;
+  }
+
+  $effect(() => {
+    void app.tab;
+    if (!tabsEl) return;
+    requestAnimationFrame(measureTab);
+  });
+
+  $effect(() => {
+    const onResize = () => measureTab();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   });
 
   $effect(() => {
@@ -90,12 +121,23 @@
     </div>
 
     <nav aria-label="Sections">
-      {#each nav as [id, label, icon]}
-        <button class="nav-item" class:active={app.route === id} onclick={() => (app.route = id)}>
-          <span class="ic" aria-hidden="true">{icon}</span>{label}
-        </button>
-      {/each}
+      <button
+        class="nav-item"
+        class:active={app.route === 'pump'}
+        class:running
+        onclick={() => (app.route = 'pump')}
+      >
+        <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} /></span>Pump control
+      </button>
     </nav>
+
+    <button
+      class="nav-item nav-settings"
+      class:active={app.route === 'settings'}
+      onclick={() => (app.route = 'settings')}
+    >
+      <span class="ic" aria-hidden="true">⚙</span>Settings
+    </button>
 
     <div class="rail-foot">
       <span class="status" class:on={app.connected}>
@@ -108,14 +150,52 @@
 
   <main class="main">
     <div class="wrap">
-      {#if app.route === 'overview'}
-        <Overview />
-      {:else if app.route === 'new'}
-        <NewRun />
-      {:else if app.route === 'history'}
-        <History />
-      {:else if app.route === 'settings'}
+      {#if app.status && app.status.serial_ok === false}
+        <div class="alarm" role="alert">
+          <b>Pump link lost.</b> The serial port to the pump won't open — the pump is holding its
+          last setpoint. The daemon is retrying automatically.
+        </div>
+      {:else if app.status && app.status.pump_confirmed === false}
+        <div class="alarm" role="alert">
+          <b>Pump not tracking.</b> Writes are getting through but the pump reports a different
+          value than commanded. Check the pump for a fault.
+        </div>
+      {:else if app.status && (app.status.write_fails ?? 0) >= 3}
+        <div class="alarm degrade" role="alert">
+          Pump link degrading — {app.status.write_fails} consecutive writes failed.
+        </div>
+      {/if}
+
+      {#if app.route === 'settings'}
         <Settings />
+      {:else}
+        <div
+          class="tabs"
+          class:ready={indReady}
+          role="tablist"
+          aria-label="Pump views"
+          bind:this={tabsEl}
+          style="--ind-x:{ind.x}px; --ind-w:{ind.w}px"
+        >
+          <span class="tab-ind" aria-hidden="true"></span>
+          {#each pumpTabs as [id, label]}
+            <button
+              class="tab"
+              class:on={app.tab === id}
+              role="tab"
+              aria-selected={app.tab === id}
+              onclick={() => (app.tab = id)}
+            >{label}</button>
+          {/each}
+        </div>
+
+        {#if app.tab === 'new'}
+          <NewRun />
+        {:else if app.tab === 'history'}
+          <History />
+        {:else}
+          <Overview />
+        {/if}
       {/if}
     </div>
   </main>
@@ -139,11 +219,18 @@
     padding: var(--s-6) var(--s-3);
     background: var(--surface);
     border-right: 1px solid var(--line-soft);
+    /* Pin the rail to the viewport so its foot (daemon status, theme
+       toggle) stays at the physical bottom instead of the page bottom. */
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100vh;
+    overflow-y: auto;
   }
   .brand { display: flex; align-items: center; gap: var(--s-2); padding: 0 var(--s-2); }
   .mark {
-    width: 26px; height: 26px; border-radius: 7px; flex: none;
-    background: linear-gradient(135deg, var(--teal-700), var(--green-500));
+    width: 28px; height: 28px; flex: none;
+    background: center / contain no-repeat url("/favicon.svg");
   }
   .word { font-weight: 640; letter-spacing: -0.01em; }
 
@@ -155,16 +242,38 @@
     color: var(--muted);
     background: transparent; border: none;
     text-align: left; width: 100%; cursor: pointer;
+    /* label line-box = icon box, so align-items:center lands them dead level */
+    line-height: 18px;
   }
   .nav-item .ic { width: 15px; text-align: center; opacity: 0.8; font-size: 12px; }
+  .nav-item .pump-ic {
+    width: 18px; height: 18px;
+    display: inline-flex; align-items: center; justify-content: center;
+    opacity: 0.8;
+    /* filled square body in the label colour (green while running); the central
+       disc stays hollow — filled with the rail's own background so it reads as
+       an empty ring */
+    --ph-body: currentColor;
+    --ph-fill: var(--surface);
+    --ph-line: currentColor;
+    --ph-detail: currentColor;
+  }
+  /* A live run: the glyph goes green (semantic) and spins, so the pump's
+     state is visible from any section. Text keeps its normal colour. */
+  .nav-item.running .pump-ic {
+    opacity: 1;
+    --ph-line: var(--green-500);
+    --ph-detail: var(--green-500);
+  }
   .nav-item:hover { background: var(--surface-sunken); color: var(--ink); }
   .nav-item.active {
     background: color-mix(in srgb, var(--teal-700) 11%, var(--surface));
     color: var(--teal-700); font-weight: 600;
   }
+  /* Settings sits apart from Pump, pushed down to just above the rail foot. */
+  .nav-settings { margin-top: auto; }
 
   .rail-foot {
-    margin-top: auto;
     padding: 0 var(--s-2);
     display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
   }
@@ -181,12 +290,82 @@
   .main { padding: var(--s-7) var(--s-8) var(--s-8); }
   .wrap { max-width: 1000px; margin: 0 auto; }
 
+  .alarm {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    margin-bottom: var(--s-5);
+    padding: var(--s-3) var(--s-4);
+    border-radius: var(--radius-ctl);
+    font-size: 13px;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  }
+  .alarm.degrade {
+    background: color-mix(in srgb, #d68b45 16%, var(--surface));
+    color: #a2621c;
+    border-color: color-mix(in srgb, #d68b45 45%, transparent);
+  }
+
+  /* Segmented control with a sliding teal indicator behind the active tab. */
+  .tabs {
+    position: relative;
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    margin-bottom: var(--s-6);
+    background: var(--surface-sunken);
+    border-radius: var(--radius-ctl);
+  }
+  .tab {
+    position: relative;
+    z-index: 1;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    padding: var(--s-2) var(--s-5);
+    border-radius: 7px;
+    cursor: pointer;
+    transition: color 0.2s ease;
+  }
+  .tab:hover:not(.on) { color: var(--ink); }
+  .tab.on { color: var(--teal-700); font-weight: 600; }
+  .tab:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent);
+    outline-offset: -2px;
+  }
+  .tab-ind {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    left: 0;
+    width: var(--ind-w, 0);
+    transform: translateX(var(--ind-x, 0));
+    background: color-mix(in srgb, var(--teal-700) 13%, var(--surface));
+    border-radius: 7px;
+  }
+  .tabs.ready .tab-ind {
+    transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+      width 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tab, .tabs.ready .tab-ind { transition: none; }
+  }
+
   @media (max-width: 820px) {
     .app { grid-template-columns: 1fr; }
     .rail {
       flex-direction: row; align-items: center;
       border-right: none; border-bottom: 1px solid var(--line-soft);
       overflow-x: auto;
+      /* back to a normal flow bar on narrow screens */
+      position: static;
+      height: auto;
+      overflow-y: visible;
     }
     .rail-foot { margin-top: 0; }
     .main { padding: var(--s-5) var(--s-4) var(--s-7); }

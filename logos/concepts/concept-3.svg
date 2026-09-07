@@ -1,0 +1,14 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>Fermentool — Roller-F</title>
+  <g id="icon">
+    <!-- the F as a rail, each arm ending in a pump roller -->
+    <g fill="none" stroke="#00707f" stroke-width="46" stroke-linecap="round">
+      <path d="M176 150 V404"/>
+      <path d="M176 174 H320"/>
+      <path d="M176 268 H288"/>
+    </g>
+    <circle cx="344" cy="174" r="36" fill="#00707f"/>
+    <circle cx="312" cy="268" r="32" fill="#10a074"/>
+    <circle cx="176" cy="404" r="36" fill="#0a8090"/>
+  </g>
+</svg>
