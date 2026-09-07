@@ -157,6 +157,8 @@
   }
 
   const busy = $derived(app.status?.active != null);
+  // A real port is configured but not open: a run would drive nothing.
+  const linkDown = $derived(app.status?.serial_ok === false);
 </script>
 
 <section class="card">
@@ -166,6 +168,13 @@
 
   {#if busy}
     <div class="err" style="margin-bottom:16px">A run is already active. Stop it from Overview first.</div>
+  {/if}
+
+  {#if linkDown}
+    <div class="err" style="margin-bottom:16px">
+      Pump link is down — connect the pump before starting a run (or set the serial port to
+      the simulator in Settings).
+    </div>
   {/if}
 
   <div class="group">
@@ -321,7 +330,7 @@
   {#if startErr}<div class="err" style="margin-top:16px">{startErr}</div>{/if}
 
   <div class="foot">
-    <button class="btn-primary" disabled={starting || busy || !!previewErr || durationS <= 0} onclick={start}>
+    <button class="btn-primary" disabled={starting || busy || linkDown || !!previewErr || durationS <= 0} onclick={start}>
       {starting ? 'Starting…' : 'Start run'}
     </button>
   </div>

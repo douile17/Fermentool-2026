@@ -43,6 +43,9 @@ pub enum EngineError {
     Busy,
     /// No run is active.
     Idle,
+    /// A real serial port is configured but not open — starting/resuming a run
+    /// would silently drive nothing.
+    SerialDown,
 }
 
 impl std::fmt::Display for EngineError {
@@ -53,6 +56,10 @@ impl std::fmt::Display for EngineError {
             EngineError::Config(s) => write!(f, "invalid run config: {s}"),
             EngineError::Busy => write!(f, "a run is already active"),
             EngineError::Idle => write!(f, "no run is active"),
+            EngineError::SerialDown => write!(
+                f,
+                "the pump link is down — connect the pump (or set serial.path to \"sim\") before starting a run"
+            ),
         }
     }
 }
@@ -431,6 +438,12 @@ impl<T: Transport> Engine<T> {
         if self.active.is_some() {
             return Err(EngineError::Busy);
         }
+        // Refuse to start against a dead link: a real port is configured but the
+        // engine is on the no-op simulator fallback, so every pump write would
+        // "succeed" while the pump does nothing.
+        if self.serial_lost {
+            return Err(EngineError::SerialDown);
+        }
         // A new run supersedes any completed-run hold.
         self.holding = None;
 
@@ -756,6 +769,9 @@ impl<T: Transport> Engine<T> {
     pub fn resume(&mut self, now: Timestamp, grace: Duration) -> Result<i64> {
         if self.active.is_some() {
             return Err(EngineError::Busy);
+        }
+        if self.serial_lost {
+            return Err(EngineError::SerialDown);
         }
         let Some(run) = self.store.running_run()? else {
             return Err(EngineError::Idle);
@@ -1207,6 +1223,28 @@ mod tests {
             .unwrap()
             .iter()
             .any(|ev| ev.kind == "serial_lost"));
+    }
+
+    #[test]
+    fn start_run_is_refused_while_the_pump_link_is_down() {
+        // Real port configured, engine on the sim fallback (port wouldn't open):
+        // a run would drive nothing, so it must be refused up front.
+        let transport: Box<dyn fermentool_modbus::Transport + Send> = Box::new(SimPump::new(1));
+        let mut e = Engine::new(Pump::new(transport, 1), Store::open_in_memory().unwrap(), "test");
+        e.set_serial(
+            crate::config::SerialConfig {
+                path: "NOPE_NOT_A_REAL_PORT_99999".into(),
+                baud: 9600,
+            },
+            1,
+        );
+        assert!(e.serial_lost());
+        assert!(matches!(
+            e.start_run(linear_cfg(), t0()),
+            Err(EngineError::SerialDown)
+        ));
+        // No run row was written.
+        assert!(e.store().list_runs(10).unwrap().is_empty());
     }
 
     #[test]
