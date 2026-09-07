@@ -68,6 +68,12 @@ pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>,
 /// (a no-op — `control.rs`'s simulator-backed tests build an `Engine<SimPump>`).
 pub trait SwapTransport {
     fn swap(&mut self, serial: &SerialConfig, pump_addr: u8) -> TransportKind;
+
+    /// Like [`swap`](Self::swap) but for automatic recovery: it does **not**
+    /// fall back to the simulator. On failure it leaves a safe no-op sink in
+    /// place (so writes don't error-spam) and returns `None`, so the caller
+    /// keeps retrying the real port instead of silently driving nothing.
+    fn swap_strict(&mut self, serial: &SerialConfig, pump_addr: u8) -> Option<TransportKind>;
 }
 
 impl SwapTransport for Box<dyn Transport + Send> {
@@ -81,11 +87,33 @@ impl SwapTransport for Box<dyn Transport + Send> {
         *self = new;
         kind
     }
+
+    fn swap_strict(&mut self, serial: &SerialConfig, pump_addr: u8) -> Option<TransportKind> {
+        if serial.use_simulator() {
+            *self = Box::new(SimPump::new(pump_addr));
+            return Some(TransportKind::Sim);
+        }
+        // release the old handle first (Windows), then try the real port
+        *self = Box::new(SimPump::new(pump_addr));
+        match fermentool_modbus::serial::SerialTransport::open(&serial.path, serial.baud, OPEN_TIMEOUT)
+        {
+            Ok(t) => {
+                *self = Box::new(t);
+                Some(TransportKind::Serial(serial.path.clone()))
+            }
+            // `*self` is now a SimPump no-op sink: the pump keeps its last real
+            // setpoint, and the caller will retry.
+            Err(_) => None,
+        }
+    }
 }
 
 impl SwapTransport for SimPump {
     fn swap(&mut self, _serial: &SerialConfig, _pump_addr: u8) -> TransportKind {
         TransportKind::Sim
+    }
+    fn swap_strict(&mut self, _serial: &SerialConfig, _pump_addr: u8) -> Option<TransportKind> {
+        Some(TransportKind::Sim)
     }
 }
 
@@ -125,6 +153,16 @@ mod tests {
     fn simpump_swap_is_a_noop() {
         let mut p = SimPump::new(1);
         assert_eq!(p.swap(&sc("COM3"), 1), TransportKind::Sim);
+    }
+
+    #[test]
+    fn swap_strict_errors_instead_of_falling_back_to_sim() {
+        let mut t: Box<dyn Transport + Send> = Box::new(SimPump::new(1));
+        // A dead port returns None (auto-recovery keeps retrying) rather than
+        // silently becoming the simulator.
+        assert!(t.swap_strict(&sc("NOPE_NOT_A_REAL_PORT_99999"), 1).is_none());
+        // The simulator is always available.
+        assert_eq!(t.swap_strict(&sc("sim"), 1).unwrap(), TransportKind::Sim);
     }
 
     #[test]

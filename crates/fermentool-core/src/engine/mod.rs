@@ -130,6 +130,15 @@ pub struct EngineStatus {
     /// setpoint (it is not stopped on natural completion). Cleared by
     /// [`Engine::stop_pump`] or by starting another run.
     pub holding: Option<HoldingStatus>,
+    /// `false` once the serial link to the pump is lost (the configured port
+    /// won't reopen). The daemon keeps retrying; the UI should raise an alarm.
+    pub serial_ok: bool,
+    /// Consecutive failed pump writes since the last success — a non-zero value
+    /// means the link is degrading even if not yet fully lost.
+    pub write_fails: u32,
+    /// `false` once the pump stops matching the commanded setpoint on readback
+    /// (a stall / fault the writes alone don't reveal).
+    pub pump_confirmed: bool,
 }
 
 /// A completed run whose final setpoint the pump is still holding.
@@ -179,7 +188,31 @@ pub struct Engine<T: Transport> {
     transport: TransportKind,
     /// A completed run the pump is still holding at its final setpoint.
     holding: Option<HoldingStatus>,
+    /// The configured serial link, kept so the daemon can reopen it on its own
+    /// after a mid-run cable/adapter glitch.
+    serial: SerialConfig,
+    pump_addr: u8,
+    /// Consecutive failed pump writes since the last success.
+    write_fails: u32,
+    /// The real port was configured but is not currently open.
+    serial_lost: bool,
+    /// Consecutive readback checks where the pump did not match the setpoint.
+    readback_fails: u32,
+    /// `false` once the pump has stopped tracking the commanded setpoint for
+    /// several consecutive readbacks (a fault / stall the writes don't reveal).
+    pump_confirmed: bool,
 }
+
+/// Consecutive failed writes after which the control loop reopens the port.
+pub const REOPEN_AFTER_WRITE_FAILS: u32 = 5;
+
+/// Read the pump back and compare it to the setpoint every this many journal
+/// ticks (≈ every 10 s), one extra MODBUS read.
+const READBACK_EVERY_TICKS: i64 = 10;
+
+/// Consecutive readback mismatches before the pump is flagged as not tracking
+/// (≈ 30 s of sustained deviation, so a ramp's motor lag doesn't trip it).
+const READBACK_MISMATCH_LIMIT: u32 = 3;
 
 impl<T: Transport> Engine<T> {
     pub fn new(pump: Pump<T>, store: Store, app_version: impl Into<String>) -> Self {
@@ -190,6 +223,72 @@ impl<T: Transport> Engine<T> {
             active: None,
             transport: TransportKind::Sim,
             holding: None,
+            serial: SerialConfig {
+                path: "sim".into(),
+                baud: 9600,
+            },
+            pump_addr: 0,
+            write_fails: 0,
+            serial_lost: false,
+            readback_fails: 0,
+            pump_confirmed: true,
+        }
+    }
+
+    /// Record the serial link the daemon should reopen on its own after a
+    /// failure. If a real port is configured but the pump is currently on the
+    /// simulator (it wouldn't open at boot), mark the link lost so recovery
+    /// starts retrying immediately.
+    pub fn set_serial(&mut self, serial: SerialConfig, pump_addr: u8) {
+        let lost = !serial.use_simulator() && self.transport == TransportKind::Sim;
+        self.serial = serial;
+        self.pump_addr = pump_addr;
+        self.serial_lost = lost;
+        if lost {
+            let _ = self.store.log_event(&NewEvent {
+                run_id: None,
+                wall_time: Timestamp::now(),
+                level: EventLevel::Error,
+                kind: "serial_lost".into(),
+                detail: Some(format!("{} not open at startup; retrying", self.serial.path)),
+            });
+        }
+    }
+
+    /// Consecutive failed pump writes since the last success.
+    pub fn write_fails(&self) -> u32 {
+        self.write_fails
+    }
+
+    /// The configured real port is not currently open.
+    pub fn serial_lost(&self) -> bool {
+        self.serial_lost
+    }
+
+    /// `false` once the pump stopped tracking the setpoint (readback mismatch).
+    pub fn pump_confirmed(&self) -> bool {
+        self.pump_confirmed
+    }
+
+    /// A real serial port is configured (not the simulator) — the control loop
+    /// keeps the link alive with a periodic probe even when no run is active.
+    pub fn serial_is_real(&self) -> bool {
+        !self.serial.use_simulator()
+    }
+
+    /// Poll the pump to keep the link's health current while idle / holding.
+    /// A failed read counts toward the same streak as a failed write, so the
+    /// loop's recovery kicks in whether or not a run is active.
+    pub fn probe_link(&mut self) -> bool {
+        match self.pump.read_speed_rpm() {
+            Ok(_) => {
+                self.write_fails = 0;
+                true
+            }
+            Err(_) => {
+                self.write_fails = self.write_fails.saturating_add(1);
+                false
+            }
         }
     }
 
@@ -221,7 +320,79 @@ impl<T: Transport> Engine<T> {
         }
         let kind = self.pump.transport_mut().swap(serial, pump_addr);
         self.transport = kind.clone();
+        self.write_fails = 0;
+        // If the caller asked for a real port but `swap` fell back to the
+        // simulator, the link is *not* healthy — keep it flagged so the alarm
+        // stays up and the auto-recovery loop keeps retrying. Only an actual
+        // real-port open (or an intentional switch to "sim") clears it.
+        self.serial_lost = !serial.use_simulator() && kind == TransportKind::Sim;
+        if self.serial_lost {
+            let _ = self.store.log_event(&NewEvent {
+                run_id: None,
+                wall_time: Timestamp::now(),
+                level: EventLevel::Error,
+                kind: "serial_lost".into(),
+                detail: Some(format!(
+                    "{} did not open on reconnect; retrying automatically",
+                    serial.path
+                )),
+            });
+        }
         Ok(kind)
+    }
+
+    /// Automatic serial recovery: reopen the configured port in place. Unlike
+    /// [`swap_transport`](Self::swap_transport) this is allowed while a run is
+    /// active (a mid-run adapter glitch is exactly when it's needed) and does
+    /// **not** fall back to the simulator — a failed reopen leaves a no-op sink
+    /// so the pump keeps its last real setpoint and the caller retries.
+    /// Returns `true` when the real port is (back) open.
+    pub fn recover_serial(&mut self, now: Timestamp) -> bool
+    where
+        T: SwapTransport,
+    {
+        if self.serial.use_simulator() {
+            return true; // nothing to recover
+        }
+        let run_id = self.active.as_ref().map(|a| a.id);
+        match self
+            .pump
+            .transport_mut()
+            .swap_strict(&self.serial, self.pump_addr)
+        {
+            Some(kind) => {
+                let was_lost = self.serial_lost;
+                self.transport = kind;
+                self.serial_lost = false;
+                self.write_fails = 0;
+                if was_lost {
+                    let _ = self.store.log_event(&NewEvent {
+                        run_id,
+                        wall_time: now,
+                        level: EventLevel::Info,
+                        kind: "serial_recovered".into(),
+                        detail: Some(format!("reopened {}", self.serial.path)),
+                    });
+                }
+                true
+            }
+            None => {
+                if !self.serial_lost {
+                    self.serial_lost = true;
+                    let _ = self.store.log_event(&NewEvent {
+                        run_id,
+                        wall_time: now,
+                        level: EventLevel::Error,
+                        kind: "serial_lost".into(),
+                        detail: Some(format!(
+                            "{} will not open; pump holding last setpoint, retrying",
+                            self.serial.path
+                        )),
+                    });
+                }
+                false
+            }
+        }
     }
 
     /// Read access to the journal (for the API / diagnostics).
@@ -242,6 +413,9 @@ impl<T: Transport> Engine<T> {
             }),
             transport: self.transport.label(),
             holding: self.holding.clone(),
+            serial_ok: !self.serial_lost,
+            write_fails: self.write_fails,
+            pump_confirmed: self.pump_confirmed,
         }
     }
 
@@ -297,6 +471,8 @@ impl<T: Transport> Engine<T> {
             detail: Some(format!("first setpoint {first:.3}")),
         })?;
 
+        self.readback_fails = 0;
+        self.pump_confirmed = true;
         self.active = Some(ActiveRun {
             id,
             started_at: now,
@@ -331,6 +507,11 @@ impl<T: Transport> Engine<T> {
 
         let write = write_setpoint(&mut self.pump, control_var, target);
         let written_ok = write.is_ok();
+        self.write_fails = if written_ok {
+            0
+        } else {
+            self.write_fails.saturating_add(1)
+        };
         if let Err(e) = &write {
             self.store.log_event(&NewEvent {
                 run_id: Some(id),
@@ -340,6 +521,60 @@ impl<T: Transport> Engine<T> {
                 detail: Some(e.to_string()),
             })?;
         }
+
+        // Every Nth tick, read the pump back and confirm it is on the setpoint.
+        // The pump reaches a new speed in well under the sub-second write
+        // cadence, so by readback time it should match `target`; a sustained
+        // gap means a stall / fault the writes alone don't reveal.
+        let readback: Option<f64> = if written_ok && seq > 0 && seq % READBACK_EVERY_TICKS == 0 {
+            match read_actual(&mut self.pump, control_var) {
+                Ok(actual) => {
+                    let actual = actual as f64;
+                    let tol = (5.0 * setpoint_grid(control_var)).max(0.04 * target.abs());
+                    if (actual - target).abs() > tol {
+                        self.readback_fails = self.readback_fails.saturating_add(1);
+                        if self.readback_fails >= READBACK_MISMATCH_LIMIT && self.pump_confirmed {
+                            self.pump_confirmed = false;
+                            self.store.log_event(&NewEvent {
+                                run_id: Some(id),
+                                wall_time: now,
+                                level: EventLevel::Error,
+                                kind: "readback_mismatch".into(),
+                                detail: Some(format!(
+                                    "commanded {target:.3}, pump reports {actual:.3}"
+                                )),
+                            })?;
+                        }
+                    } else {
+                        self.readback_fails = 0;
+                        if !self.pump_confirmed {
+                            self.pump_confirmed = true;
+                            self.store.log_event(&NewEvent {
+                                run_id: Some(id),
+                                wall_time: now,
+                                level: EventLevel::Info,
+                                kind: "readback_ok".into(),
+                                detail: Some(format!("pump back on setpoint at {actual:.3}")),
+                            })?;
+                        }
+                    }
+                    Some(actual)
+                }
+                Err(e) => {
+                    self.store.log_event(&NewEvent {
+                        run_id: Some(id),
+                        wall_time: now,
+                        level: EventLevel::Warn,
+                        kind: "readback_fail".into(),
+                        detail: Some(e.to_string()),
+                    })?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         self.store.append_tick(&NewTick {
             run_id: id,
             seq,
@@ -347,7 +582,7 @@ impl<T: Transport> Engine<T> {
             elapsed_s,
             target,
             written_ok,
-            readback: None,
+            readback,
             note: None,
         })?;
 
@@ -416,11 +651,13 @@ impl<T: Transport> Engine<T> {
             Ok(()) => {
                 active.last_write_q = Some(target);
                 active.last_target = Some(target);
+                self.write_fails = 0;
                 Ok(true)
             }
             Err(e) => {
                 // The next journal tick will journal the write state; here just
                 // note it. Keep the run going — a transient bus error recovers.
+                self.write_fails = self.write_fails.saturating_add(1);
                 self.store.log_event(&NewEvent {
                     run_id: Some(id),
                     wall_time: now,
@@ -552,6 +789,8 @@ impl<T: Transport> Engine<T> {
             )),
         })?;
 
+        self.readback_fails = 0;
+        self.pump_confirmed = true;
         self.active = Some(ActiveRun {
             id: run.id,
             started_at: run.started_at,
@@ -627,6 +866,17 @@ fn write_setpoint<T: Transport>(
     match control_var {
         ControlVar::Rpm => pump.set_speed_rpm(value as f32),
         ControlVar::MlMin => pump.set_flow_ml_min(value as f32),
+    }
+}
+
+/// Read the pump's current value for the run's control variable.
+fn read_actual<T: Transport>(
+    pump: &mut Pump<T>,
+    control_var: ControlVar,
+) -> std::result::Result<f32, PumpError> {
+    match control_var {
+        ControlVar::Rpm => pump.read_speed_rpm(),
+        ControlVar::MlMin => pump.read_flow_ml_min(),
     }
 }
 
@@ -849,7 +1099,7 @@ mod tests {
         let mut e = engine();
         let id = e.start_run(linear_cfg(), t0()).unwrap();
 
-        e.pump.transport_mut().drop_next = 1;
+        e.pump.transport_mut().drop_next = 2; // write + its retry both dropped
         let o = e.tick(at(600)).unwrap();
         assert!(matches!(
             o,
@@ -875,6 +1125,106 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn write_fails_counter_tracks_the_streak_and_resets() {
+        let mut e = engine();
+        e.start_run(linear_cfg(), t0()).unwrap();
+        assert_eq!(e.write_fails(), 0);
+
+        e.pump.transport_mut().drop_next = 4; // 2 ticks × (write + retry) all dropped
+        e.tick(at(10)).unwrap();
+        assert_eq!(e.write_fails(), 1);
+        e.tick(at(20)).unwrap();
+        assert_eq!(e.write_fails(), 2);
+
+        e.tick(at(30)).unwrap(); // drop_next exhausted → the write lands
+        assert_eq!(e.write_fails(), 0);
+    }
+
+    #[test]
+    fn sustained_readback_mismatch_flags_the_pump_then_clears() {
+        let mut e = engine();
+        let mut cfg = linear_cfg();
+        cfg.curve = CurveSpec::linear(50.0, 50.0, Duration::from_secs(100_000)); // flat 50 rpm
+        let id = e.start_run(cfg, t0()).unwrap();
+        assert!(e.status().pump_confirmed);
+
+        // pump stuck at 5 rpm no matter what we command
+        e.pump.transport_mut().frozen_readback = Some(5.0);
+        for s in 1..=45 {
+            e.tick(at(s)).unwrap(); // readback checks at seq 10/20/30/40
+        }
+        assert!(!e.status().pump_confirmed);
+        assert!(e
+            .store()
+            .events(Some(id), 100)
+            .unwrap()
+            .iter()
+            .any(|ev| ev.kind == "readback_mismatch"));
+
+        // fault cleared → the pump reads back the commanded value again
+        e.pump.transport_mut().frozen_readback = None;
+        for s in 46..=70 {
+            e.tick(at(s)).unwrap();
+        }
+        assert!(e.status().pump_confirmed);
+    }
+
+    #[test]
+    fn recover_serial_is_a_noop_on_the_simulator() {
+        let mut e = engine();
+        e.set_serial(
+            crate::config::SerialConfig {
+                path: "sim".into(),
+                baud: 9600,
+            },
+            1,
+        );
+        assert!(!e.serial_lost());
+        assert!(e.recover_serial(t0()));
+        assert!(!e.serial_lost());
+    }
+
+    #[test]
+    fn recover_serial_stays_lost_when_the_port_will_not_open() {
+        let transport: Box<dyn fermentool_modbus::Transport + Send> = Box::new(SimPump::new(1));
+        let mut e = Engine::new(Pump::new(transport, 1), Store::open_in_memory().unwrap(), "test");
+        e.set_serial(
+            crate::config::SerialConfig {
+                path: "NOPE_NOT_A_REAL_PORT_99999".into(),
+                baud: 9600,
+            },
+            1,
+        );
+        assert!(e.serial_lost()); // real port configured but engine is on sim
+        assert!(!e.recover_serial(t0())); // swap_strict fails to open
+        assert!(e.serial_lost());
+        assert!(e
+            .store()
+            .events(None, 20)
+            .unwrap()
+            .iter()
+            .any(|ev| ev.kind == "serial_lost"));
+    }
+
+    #[test]
+    fn probe_link_feeds_the_same_write_fail_streak() {
+        // Idle-time link probe: a failed read counts toward the write-fail
+        // streak exactly like a failed pump write, so the control loop's
+        // recovery trips whether or not a run is carrying it.
+        let mut sim = SimPump::new(1);
+        sim.drop_next = 4; // 2 probes fail (read + retry each), then reads recover
+        let transport: Box<dyn fermentool_modbus::Transport + Send> = Box::new(sim);
+        let mut e = Engine::new(Pump::new(transport, 1), Store::open_in_memory().unwrap(), "test");
+
+        assert!(!e.probe_link());
+        assert_eq!(e.write_fails(), 1);
+        assert!(!e.probe_link());
+        assert_eq!(e.write_fails(), 2);
+        assert!(e.probe_link()); // bus quiet again
+        assert_eq!(e.write_fails(), 0);
     }
 
     #[test]

@@ -86,6 +86,7 @@ fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<Box<dyn Transp
     let (transport, kind) = fermentool_core::transport::open(&cfg.serial, cfg.pump.address);
     let mut engine = Engine::new(Pump::new(transport, cfg.pump.address), store, VERSION);
     engine.set_transport_kind(kind);
+    engine.set_serial(cfg.serial.clone(), cfg.pump.address);
     Ok(engine)
 }
 

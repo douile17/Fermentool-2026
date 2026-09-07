@@ -343,6 +343,21 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Wipe every run and its journal (ticks + events), atomically. The caller
+    /// is responsible for refusing this while a run is active or holding.
+    ///
+    /// Uses a real transaction (not a raw `BEGIN; … COMMIT;` batch) so that a
+    /// mid-way failure rolls back on drop instead of leaving this long-lived
+    /// connection stuck inside an open transaction.
+    pub fn clear_history(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM ticks", [])?;
+        tx.execute("DELETE FROM events", [])?;
+        tx.execute("DELETE FROM runs", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Move a run to a terminal state.
     pub fn finish_run(&self, id: i64, status: RunStatus, ended_at: Timestamp) -> Result<()> {
         self.conn.execute(

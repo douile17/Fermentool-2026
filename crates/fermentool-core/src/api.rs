@@ -12,7 +12,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/preview", post(preview))
         .route("/api/runs", get(list_runs).post(create_run))
+        .route("/api/history", delete(clear_history))
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/ticks", get(get_ticks))
         .route("/api/runs/{id}/events", get(get_events))
@@ -175,6 +176,15 @@ async fn create_run(State(s): State<AppState>, Json(cfg): Json<RunConfig>) -> Ap
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Bad)?;
     Ok((StatusCode::CREATED, Json(json!({ "run_id": id }))).into_response())
+}
+
+async fn clear_history(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::ClearHistory)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "cleared": true })).into_response())
 }
 
 async fn get_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {

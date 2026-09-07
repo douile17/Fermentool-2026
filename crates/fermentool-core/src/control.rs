@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot};
 
@@ -21,7 +21,8 @@ use fermentool_modbus::Transport;
 
 use crate::config::SerialConfig;
 use crate::engine::{
-    ActiveStatus, Engine, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome, TICK_INTERVAL,
+    ActiveStatus, Engine, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome,
+    REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
 };
 use crate::store::{EventRow, RunRow, RunStatus, TickRow};
 use crate::transport::{SwapTransport, TransportKind};
@@ -32,6 +33,21 @@ const IDLE_POLL: Duration = Duration::from_millis(500);
 /// transaction at 9600 8E1 and well under the 200 ms serial timeout, so a steep
 /// ramp steps through each pump grid value without loading the bus.
 const WRITE_SETPOINT_INTERVAL: Duration = Duration::from_millis(150);
+
+/// While the serial link is lost, retry reopening the port this often.
+const SERIAL_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+
+/// When no run is active, poll the pump this often so a cable pulled between
+/// runs (or during a completed-run hold) is still noticed and auto-recovered.
+/// Matches the 1 s journal cadence, so an idle dead link trips the alarm on the
+/// same ~5-fail streak as a mid-run one.
+const LINK_PROBE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// If the wall clock and the monotonic clock disagree by more than this since
+/// the run started, the system clock has stepped (NTP correction, VM
+/// resume, …): the run's elapsed time is pinned to the monotonic clock for that
+/// tick so the pump doesn't lurch to the wrong point on the curve.
+const CLOCK_STEP_LIMIT: Duration = Duration::from_secs(5);
 
 /// One request to the control thread. Each carries a `oneshot` reply channel.
 pub enum Command {
@@ -44,6 +60,9 @@ pub enum Command {
     DiscardRecovery(RunStatus, oneshot::Sender<Result<(), String>>),
     GetRun(i64, oneshot::Sender<Result<Option<RunRow>, String>>),
     ListRuns(i64, oneshot::Sender<Result<Vec<RunRow>, String>>),
+    /// Delete every run + journal. Refused while a run is active or a crash
+    /// recovery is pending.
+    ClearHistory(oneshot::Sender<Result<(), String>>),
     GetTicks {
         run_id: i64,
         from: i64,
@@ -76,6 +95,13 @@ pub struct DaemonStatus {
     pub transport: String,
     /// Set when a run completed and the pump is still holding its final speed.
     pub holding: Option<HoldingStatus>,
+    /// `false` while the serial link to the pump is lost (the daemon is
+    /// retrying); the UI should raise a loud alarm.
+    pub serial_ok: bool,
+    /// Consecutive failed pump writes since the last success.
+    pub write_fails: u32,
+    /// `false` once the pump stops matching the commanded setpoint on readback.
+    pub pump_confirmed: bool,
 }
 
 /// Sending / receiving on the control channel failed — the thread is gone.
@@ -132,6 +158,9 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
             .unwrap_or(false),
         transport: st.transport,
         holding: st.holding,
+        serial_ok: st.serial_ok,
+        write_fails: st.write_fails,
+        pump_confirmed: st.pump_confirmed,
     }
 }
 
@@ -178,19 +207,53 @@ fn control_loop<T: Transport + SwapTransport>(
     //     so a steep ramp steps through every grid value instead of jumping.
     let mut next_journal: Option<Instant> = None;
     let mut next_write: Option<Instant> = None;
+    // (run's wall `started_at`, monotonic anchor taken now, run id) — lets a tick
+    // detect a system-clock step and use monotonic time instead.
+    let mut run_epoch: Option<(Timestamp, Instant, i64)> = None;
+    // Cooldown between automatic serial-reopen attempts while the link is down.
+    let mut next_serial_retry: Option<Instant> = None;
+    // Idle-time link probe deadline.
+    let mut next_probe: Option<Instant> = None;
 
     loop {
+        // Keep the monotonic run epoch in sync with what the engine is running.
+        match engine.status().active {
+            Some(a) if run_epoch.map(|(_, _, id)| id) != Some(a.run_id) => {
+                run_epoch = Some((a.started_at, Instant::now(), a.run_id));
+            }
+            Some(_) => {}
+            None => run_epoch = None,
+        }
+
         if engine.tick_interval().is_none() {
             next_journal = None;
             next_write = None;
+            // No run: keep the serial link's health current so a cable pulled
+            // between runs still trips the alarm and the auto-reopen.
+            if engine.serial_is_real() {
+                let probe_due =
+                    *next_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
+                if Instant::now() >= probe_due {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        engine.probe_link()
+                    }));
+                    maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
+                    next_probe = Some(advance_past(probe_due, LINK_PROBE_INTERVAL));
+                    continue;
+                }
+            } else {
+                next_probe = None;
+            }
         } else {
+            next_probe = None;
             let journal_due = *next_journal.get_or_insert_with(|| Instant::now() + TICK_INTERVAL);
             let write_due =
                 *next_write.get_or_insert_with(|| Instant::now() + WRITE_SETPOINT_INTERVAL);
 
             if Instant::now() >= journal_due {
+                let now = run_now(run_epoch);
                 let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match engine.tick(Timestamp::now()) {
+                    match engine.tick(now) {
                         Ok(TickOutcome::Finished { seq, target }) => {
                             tracing::info!(seq, target, "run finished");
                             true
@@ -210,6 +273,7 @@ fn control_loop<T: Transport + SwapTransport>(
                     Ok(false) => {}
                     Err(_) => tracing::error!("panic in tick; loop continues"),
                 }
+                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
                 next_journal = Some(advance_past(journal_due, TICK_INTERVAL));
                 // The journal tick just wrote the pump — hold the next sub-second
                 // write a full interval off so we don't write twice in a row.
@@ -218,8 +282,9 @@ fn control_loop<T: Transport + SwapTransport>(
             }
 
             if Instant::now() >= write_due {
+                let now = run_now(run_epoch);
                 let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine.apply_setpoint(Timestamp::now())
+                    engine.apply_setpoint(now)
                 }));
                 match done {
                     Ok(Ok(true)) => {
@@ -229,6 +294,7 @@ fn control_loop<T: Transport + SwapTransport>(
                     Ok(Err(e)) => tracing::warn!("apply_setpoint error: {e}"),
                     Err(_) => tracing::error!("panic in apply_setpoint; loop continues"),
                 }
+                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
                 next_write = Some(advance_past(write_due, WRITE_SETPOINT_INTERVAL));
                 continue;
             }
@@ -236,7 +302,10 @@ fn control_loop<T: Transport + SwapTransport>(
 
         let wait = match (next_journal, next_write) {
             (Some(j), Some(w)) => j.min(w).saturating_duration_since(Instant::now()),
-            _ => IDLE_POLL,
+            // Idle: wake for the link probe if one is scheduled, else just poll.
+            _ => next_probe
+                .map(|p| p.saturating_duration_since(Instant::now()).min(IDLE_POLL))
+                .unwrap_or(IDLE_POLL),
         };
         match rx.recv_timeout(wait) {
             Ok(Command::Shutdown) => break,
@@ -253,8 +322,11 @@ fn control_loop<T: Transport + SwapTransport>(
                 }
             }
             // Woke on a deadline (or early): the due checks at the top of the
-            // loop do the work.
-            Err(RecvTimeoutError::Timeout) => {}
+            // loop do the work. Also keep chipping at a lost serial link even
+            // when no run is active.
+            Err(RecvTimeoutError::Timeout) => {
+                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -272,6 +344,61 @@ fn advance_past(mut deadline: Instant, step: Duration) -> Instant {
             return deadline;
         }
     }
+}
+
+/// The timestamp to hand a tick. Normally wall-clock `now`, but if the wall
+/// clock has drifted from the monotonic clock by more than [`CLOCK_STEP_LIMIT`]
+/// since the run started, it stepped — pin the run's elapsed time to the
+/// monotonic anchor for this tick so the pump doesn't jump on the curve.
+fn run_now(run_epoch: Option<(Timestamp, Instant, i64)>) -> Timestamp {
+    let Some((wall_start, mono_start, _)) = run_epoch else {
+        return Timestamp::now();
+    };
+    let wall = Timestamp::now();
+    let wall_secs = wall.duration_since(wall_start).as_secs_f64();
+    let mono_secs = mono_start.elapsed().as_secs_f64();
+    if (wall_secs - mono_secs).abs() > CLOCK_STEP_LIMIT.as_secs_f64() {
+        tracing::warn!(
+            wall_secs,
+            mono_secs,
+            "system clock stepped mid-run; using monotonic time for this tick"
+        );
+        wall_start + SignedDuration::from_nanos((mono_secs * 1e9) as i64)
+    } else {
+        wall
+    }
+}
+
+/// Reopen the pump's serial port on its own after a mid-run adapter/cable
+/// glitch. Runs when the link is lost or writes are failing in a streak;
+/// rate-limited to one attempt per [`SERIAL_RETRY_INTERVAL`] while it stays down.
+fn maybe_recover_serial<T: Transport + SwapTransport>(
+    engine: &mut Engine<T>,
+    events: &broadcast::Sender<DaemonStatus>,
+    grace: Duration,
+    next_retry: &mut Option<Instant>,
+) {
+    let needs_recovery =
+        engine.serial_lost() || engine.write_fails() >= REOPEN_AFTER_WRITE_FAILS;
+    if !needs_recovery {
+        *next_retry = None;
+        return;
+    }
+    if next_retry.is_some_and(|t| Instant::now() < t) {
+        return;
+    }
+    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.recover_serial(Timestamp::now())
+    }))
+    .unwrap_or(false);
+    if ok {
+        tracing::info!("serial link reopened");
+        *next_retry = None;
+    } else {
+        tracing::warn!("serial link down; retrying in {SERIAL_RETRY_INTERVAL:?}");
+        *next_retry = Some(Instant::now() + SERIAL_RETRY_INTERVAL);
+    }
+    let _ = events.send(current_status(engine, grace));
 }
 
 /// Returns `true` when the run state may have changed and a status broadcast is warranted.
@@ -321,6 +448,27 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         }
         Command::ListRuns(limit, reply) => {
             let _ = reply.send(engine.store().list_runs(limit).map_err(|e| e.to_string()));
+            false
+        }
+        Command::ClearHistory(reply) => {
+            let pending = engine
+                .pending_recovery(now, grace)
+                .map(|o| o.is_some())
+                .unwrap_or(false);
+            let status = engine.status();
+            let res = if status.active.is_some() {
+                Err("a run is active — stop it before clearing history".to_string())
+            } else if status.holding.is_some() {
+                // the pump is still driving a completed run's final setpoint;
+                // deleting that run's row would orphan what the pump is doing.
+                Err("the pump is holding a completed run — stop the pump before clearing history"
+                    .to_string())
+            } else if pending {
+                Err("a crash recovery is pending — resolve it before clearing history".to_string())
+            } else {
+                engine.store().clear_history().map_err(|e| e.to_string())
+            };
+            let _ = reply.send(res);
             false
         }
         Command::GetTicks {
@@ -572,6 +720,45 @@ mod tests {
 
         let err = handle.call(Command::StopPump).await.unwrap().unwrap_err();
         assert_eq!(err, "no run is active");
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn idle_link_probe_flags_a_dead_port_with_no_run() {
+        // A real port is configured and was "open" at boot, but every read now
+        // fails (cable pulled). With no run to carry recovery, the idle-time
+        // link probe must still drive the write-fail streak and latch the alarm.
+        let mut sim = SimPump::new(1);
+        sim.drop_next = 100_000; // every probe read (and its retry) fails
+        let transport: Box<dyn Transport + Send> = Box::new(sim);
+        let mut engine = Engine::new(
+            Pump::new(transport, 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        // Kind first, so set_serial doesn't pre-flag the link — detection here
+        // must come from the probe streak, not the boot check.
+        engine.set_transport_kind(TransportKind::Serial("NOPE_NOT_A_REAL_PORT_99999".into()));
+        engine.set_serial(
+            crate::config::SerialConfig {
+                path: "NOPE_NOT_A_REAL_PORT_99999".into(),
+                baud: 9600,
+            },
+            1,
+        );
+        assert!(!engine.serial_lost(), "precondition: link starts healthy");
+
+        let (events, _keep_rx) = broadcast::channel(16);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        // 1 s probe cadence: ~5 failed probes cross REOPEN_AFTER_WRITE_FAILS,
+        // then recover_serial can't reopen the port and latches serial_lost.
+        tokio::time::sleep(Duration::from_millis(8000)).await;
+
+        let st = handle.call(Command::Status).await.unwrap();
+        assert!(st.active.is_none());
+        assert!(!st.serial_ok, "idle probe should have flagged the dead link");
 
         handle.shutdown();
     }

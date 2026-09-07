@@ -355,6 +355,7 @@ pub trait PumpTransport {
     fn start(&mut self) -> Result<(), PumpError>;
     fn stop(&mut self) -> Result<(), PumpError>;
     fn read_speed_rpm(&mut self) -> Result<f32, PumpError>;
+    fn read_flow_ml_min(&mut self) -> Result<f32, PumpError>;
 }
 
 /// A LabQ pump at `address`, reachable through `transport`.
@@ -377,23 +378,37 @@ impl<T: Transport> Pump<T> {
         &mut self.transport
     }
 
+    /// One transaction, retried once on any failure.
+    ///
+    /// The LabQ silently discards a frame that lands inside its inter-frame gap,
+    /// and an RS-485 line picks up the occasional glitch — both surface here as a
+    /// timeout or a bad frame. A single re-send (already spaced by the
+    /// transport's own inter-frame gap) clears almost all of them, so a
+    /// long run doesn't accumulate one-off `write_fail`s.
+    fn transact_retrying(&mut self, req: &[u8]) -> Result<Vec<u8>, PumpError> {
+        match self.transport.transaction(req) {
+            Ok(r) => Ok(r),
+            Err(_first) => Ok(self.transport.transaction(req)?),
+        }
+    }
+
     fn write_reg(&mut self, reg: u16, value: u16) -> Result<(), PumpError> {
         let req = frame::build_write_single(self.address, reg, value);
-        let resp = self.transport.transaction(&req)?;
+        let resp = self.transact_retrying(&req)?;
         frame::parse_write_single_response(&resp, self.address, reg, value)?;
         Ok(())
     }
 
     fn write_f32(&mut self, reg: u16, value: f32) -> Result<(), PumpError> {
         let req = frame::build_write_f32(self.address, reg, value);
-        let resp = self.transport.transaction(&req)?;
+        let resp = self.transact_retrying(&req)?;
         frame::parse_write_multiple_response(&resp, self.address, reg, 2)?;
         Ok(())
     }
 
     fn read_f32(&mut self, reg: u16) -> Result<f32, PumpError> {
         let req = frame::build_read_holding(self.address, reg, 2);
-        let resp = self.transport.transaction(&req)?;
+        let resp = self.transact_retrying(&req)?;
         let words = frame::parse_read_holding_response(&resp, self.address, 2)?;
         Ok(f32_from_words(words[0], words[1]))
     }
@@ -437,6 +452,10 @@ impl<T: Transport> PumpTransport for Pump<T> {
     fn read_speed_rpm(&mut self) -> Result<f32, PumpError> {
         self.read_f32(reg::MOTOR_SPEED)
     }
+
+    fn read_flow_ml_min(&mut self) -> Result<f32, PumpError> {
+        self.read_f32(reg::FLOW_RATE)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +473,9 @@ pub struct SimPump {
     pub drop_next: usize,
     /// Answer the next transaction with this exception code instead of acting.
     pub next_exception: Option<u8>,
+    /// When set, a read of MOTOR_SPEED / FLOW_RATE reports this value instead of
+    /// what was written — models a pump that stops tracking the setpoint.
+    pub frozen_readback: Option<f32>,
     /// Number of transactions seen (successful or dropped).
     pub transactions: usize,
 }
@@ -465,6 +487,7 @@ impl SimPump {
             regs: [0; 10],
             drop_next: 0,
             next_exception: None,
+            frozen_readback: None,
             transactions: 0,
         }
     }
@@ -571,9 +594,20 @@ impl Transport for SimPump {
             0x03 => {
                 let reg = u16::from_be_bytes([body[2], body[3]]);
                 let qty = u16::from_be_bytes([body[4], body[5]]);
+                // Optional fault: report a stuck setpoint on the value registers.
+                let frozen_words = match (self.frozen_readback, reg) {
+                    (Some(v), reg::MOTOR_SPEED) | (Some(v), reg::FLOW_RATE) if qty == 2 => {
+                        Some(f32_to_words(v))
+                    }
+                    _ => None,
+                };
                 let mut out = vec![body[0], 0x03, (2 * qty) as u8];
                 for i in 0..qty {
-                    let w = self.get(reg + i);
+                    let w = match (frozen_words, i) {
+                        (Some((hi, _)), 0) => hi,
+                        (Some((_, lo)), 1) => lo,
+                        _ => self.get(reg + i),
+                    };
                     out.push((w >> 8) as u8);
                     out.push(w as u8);
                 }
@@ -894,10 +928,18 @@ mod tests {
     }
 
     #[test]
+    fn a_single_dropped_frame_is_transparently_retried() {
+        let mut pump = Pump::new(SimPump::new(1), 1);
+        pump.transport_mut().drop_next = 1; // one drop — the built-in retry clears it
+        pump.set_speed_rpm(50.0).unwrap();
+        assert!((pump.transport().speed_rpm() - 50.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn sim_fault_injection_surfaces_as_errors() {
         let mut pump = Pump::new(SimPump::new(1), 1);
 
-        pump.transport_mut().drop_next = 1;
+        pump.transport_mut().drop_next = 2; // both the write and its retry are dropped
         assert!(matches!(
             pump.set_speed_rpm(50.0),
             Err(PumpError::Transport(TransportError::Timeout))
