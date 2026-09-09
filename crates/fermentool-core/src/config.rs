@@ -59,6 +59,13 @@ pub struct SerialConfig {
     pub path: String,
     /// 1200 | 2400 | 4800 | 9600. Frame is fixed at 8E1 by the LabQ pump.
     pub baud: u32,
+    /// Permit starting / resuming a run while the engine is on the pump
+    /// simulator (no real port). Off by default: a machine that was never wired
+    /// to a pump — or whose `config.toml` still carries the shipped
+    /// `path = "sim"` — then refuses to run a cycle that would silently drive
+    /// nothing. Turn it on for bench testing against the simulator.
+    #[serde(default)]
+    pub allow_simulator: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +119,7 @@ impl Default for SerialConfig {
         Self {
             path: "sim".into(),
             baud: 9600,
+            allow_simulator: false,
         }
     }
 }
@@ -215,6 +223,16 @@ mod tests {
         assert_eq!(cfg.serial.baud, 9600); // default
         assert_eq!(cfg.pump.address, 1); // default
         assert!(cfg.resume.prompt); // default
+    }
+
+    #[test]
+    fn allow_simulator_defaults_off_for_new_and_pre_existing_configs() {
+        // Fresh defaults.
+        assert!(!Config::default().serial.allow_simulator);
+        // A config.toml written before this field existed (the shipped
+        // `path = "sim"` default) must not silently permit simulator runs.
+        let cfg = Config::from_toml("[serial]\npath = \"sim\"\nbaud = 9600\n").unwrap();
+        assert!(!cfg.serial.allow_simulator);
     }
 
     #[test]

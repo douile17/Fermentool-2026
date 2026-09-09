@@ -125,6 +125,7 @@ mod tests {
         SerialConfig {
             path: path.to_string(),
             baud: 9600,
+            allow_simulator: false,
         }
     }
 

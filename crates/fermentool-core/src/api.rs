@@ -120,9 +120,16 @@ async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiRe
     new.save(&s.config_path)
         .map_err(|e| ApiError::Bad(e.to_string()))?;
     *s.config.write().await = new.clone();
+    // `serial.allow_simulator` gates Start/Resume in the live engine, so a save
+    // that flips it must reach the control thread — otherwise the Settings
+    // checkbox looks broken until the next reconnect.
+    let _ = s
+        .control
+        .call(|reply| Command::SetAllowSimulator(new.serial.allow_simulator, reply))
+        .await;
     Ok(Json(json!({
         "saved": true,
-        "note": "port and serial changes take effect on restart"
+        "note": "serial port, baud and pump address changes apply on the next Connect; other changes take effect on restart"
     }))
     .into_response())
 }
@@ -209,17 +216,23 @@ fn i64_max() -> i64 {
     i64::MAX
 }
 
+/// Hard cap on one `/ticks` response: a 100 h run holds ~360 k rows, and the
+/// chart only ever needs a downsampled window. Callers page with `from`/`to`.
+const MAX_TICKS_SPAN: i64 = 50_000;
+
 async fn get_ticks(
     State(s): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<TickQuery>,
 ) -> ApiResult<Response> {
+    let from = q.from.max(0);
+    let to = q.to.min(from.saturating_add(MAX_TICKS_SPAN));
     let ticks = s
         .control
         .call(|reply| Command::GetTicks {
             run_id: id,
-            from: q.from,
-            to: q.to,
+            from,
+            to,
             reply,
         })
         .await
@@ -450,6 +463,9 @@ struct ReconnectReq {
     /// New baud; omitted = keep the current one.
     #[serde(default)]
     baud: Option<u32>,
+    /// New MODBUS slave address; omitted = keep the current one.
+    #[serde(default)]
+    pump_addr: Option<u8>,
 }
 
 /// Persist `serial.*` to `config.toml` and rebuild the live pump transport
@@ -464,6 +480,12 @@ async fn serial_reconnect(
     }
     if let Some(b) = req.baud {
         cfg.serial.baud = b;
+    }
+    if let Some(a) = req.pump_addr {
+        if !(1..=247).contains(&a) {
+            return Err(ApiError::Bad("MODBUS address must be 1..=247".into()));
+        }
+        cfg.pump.address = a;
     }
 
     // Swap first — a refused reconnect (e.g. a run is active) must not touch

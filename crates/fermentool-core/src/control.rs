@@ -90,6 +90,10 @@ pub enum Command {
     },
     /// Stop a pump still holding a completed run's final setpoint.
     StopPump(oneshot::Sender<Result<(), String>>),
+    /// Push a changed `serial.allow_simulator` from a config save to the live
+    /// engine, so enabling simulator runs in Settings takes effect without a
+    /// reconnect or restart.
+    SetAllowSimulator(bool, oneshot::Sender<()>),
     Shutdown,
 }
 
@@ -109,6 +113,13 @@ pub struct DaemonStatus {
     pub write_fails: u32,
     /// `false` once the pump stops matching the commanded setpoint on readback.
     pub pump_confirmed: bool,
+    /// `false` once tick journalling has been failing (disk full / unwritable).
+    /// The pump keeps running; this warns that the run's history is being lost.
+    pub journal_ok: bool,
+    /// The engine is driving the in-process simulator, not a real serial port.
+    pub simulator: bool,
+    /// `serial.allow_simulator` — simulator runs are explicitly enabled.
+    pub allow_simulator: bool,
 }
 
 /// Sending / receiving on the control channel failed — the thread is gone.
@@ -168,6 +179,9 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         serial_ok: st.serial_ok,
         write_fails: st.write_fails,
         pump_confirmed: st.pump_confirmed,
+        journal_ok: st.journal_ok,
+        simulator: st.simulator,
+        allow_simulator: st.allow_simulator,
     }
 }
 
@@ -550,22 +564,39 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             reply,
         } => {
             let wanted_serial = !serial.use_simulator();
-            let msg = engine
-                .swap_transport(&serial, pump_addr)
-                .map(|kind| match kind {
-                    TransportKind::Serial(name) => format!("serial port open: {name}"),
-                    TransportKind::Sim if wanted_serial => format!(
-                        "could not open {} — running on the pump simulator",
-                        serial.path
-                    ),
-                    TransportKind::Sim => "running on the pump simulator".to_string(),
-                })
-                .map_err(|e| e.to_string());
+            let path = serial.path.clone();
+            let msg = match engine.swap_transport(&serial, pump_addr) {
+                Ok(kind) => {
+                    // `swap_transport` has just run a live probe read for a real
+                    // port, so `serial_ok` now reflects whether a pump actually
+                    // answered — not merely that the COM port opened.
+                    let pump_responding = engine.status().serial_ok;
+                    Ok(match kind {
+                        TransportKind::Serial(name) if pump_responding => {
+                            format!("connected to {name} — pump responding")
+                        }
+                        TransportKind::Serial(name) => format!(
+                            "{name} opened, but the pump is not responding — check power, \
+                             wiring, MODBUS address and baud"
+                        ),
+                        TransportKind::Sim if wanted_serial => {
+                            format!("could not open {path} — running on the pump simulator")
+                        }
+                        TransportKind::Sim => "running on the pump simulator".to_string(),
+                    })
+                }
+                Err(e) => Err(e.to_string()),
+            };
             let _ = reply.send(msg);
             true
         }
         Command::StopPump(reply) => {
             let _ = reply.send(engine.stop_pump(now).map_err(|e| e.to_string()));
+            true
+        }
+        Command::SetAllowSimulator(allow, reply) => {
+            engine.set_allow_simulator(allow);
+            let _ = reply.send(());
             true
         }
     }
@@ -694,6 +725,7 @@ mod tests {
         let serial = crate::config::SerialConfig {
             path: "sim".into(),
             baud: 9600,
+            allow_simulator: false,
         };
         let msg = handle
             .call(|reply| Command::Reconnect {
@@ -781,6 +813,7 @@ mod tests {
             crate::config::SerialConfig {
                 path: "NOPE_NOT_A_REAL_PORT_99999".into(),
                 baud: 9600,
+                allow_simulator: false,
             },
             1,
         );
@@ -819,6 +852,7 @@ mod tests {
         let serial = crate::config::SerialConfig {
             path: "sim".into(),
             baud: 9600,
+            allow_simulator: false,
         };
         let err = handle
             .call(|reply| Command::Reconnect {
@@ -830,6 +864,40 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert_eq!(err, "a run is already active");
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn start_run_is_refused_on_the_simulator_when_not_enabled() {
+        let mut engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        // Shipped default: on the simulator, simulator runs not enabled.
+        engine.set_serial(
+            crate::config::SerialConfig {
+                path: "sim".into(),
+                baud: 9600,
+                allow_simulator: false,
+            },
+            1,
+        );
+        let (events, _keep_rx) = broadcast::channel(16);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+
+        let err = handle
+            .call(|reply| Command::StartRun(cadence_run(), reply))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("simulator"), "got: {err}");
+
+        let st = handle.call(Command::Status).await.unwrap();
+        assert!(st.simulator);
+        assert!(!st.allow_simulator);
+        assert!(st.active.is_none());
 
         handle.shutdown();
     }

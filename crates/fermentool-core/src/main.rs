@@ -82,6 +82,43 @@ fn open_in_browser(url: &str) {
     }
 }
 
+/// Delete rolled `fermentool.log.*` files older than `retain_days`. Best-effort:
+/// `tracing_appender`'s daily roller creates files but never removes them, so
+/// over months of 100 h runs the log dir would grow without bound. `0` disables.
+fn prune_old_logs(log_dir: &Path, retain_days: u32) {
+    if retain_days == 0 {
+        return;
+    }
+    let cutoff = match std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(u64::from(retain_days) * 86_400))
+    {
+        Some(t) => t,
+        None => return,
+    };
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // Keep the live file (`fermentool.log`); only prune the dated rolls.
+        if !name.starts_with("fermentool.log.") {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| m < cutoff)
+            .unwrap_or(false);
+        if old {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => tracing::info!("pruned old log {name}"),
+                Err(e) => tracing::warn!("could not prune {name}: {e}"),
+            }
+        }
+    }
+}
+
 fn init_tracing(level: &str, log_dir: &Path) -> anyhow::Result<WorkerGuard> {
     use tracing_subscriber::prelude::*;
 
@@ -117,6 +154,10 @@ fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<Box<dyn Transp
     let mut engine = Engine::new(Pump::new(transport, cfg.pump.address), store, VERSION);
     engine.set_transport_kind(kind);
     engine.set_serial(cfg.serial.clone(), cfg.pump.address);
+    // No pump I/O on the startup path — a blocking MODBUS probe here would delay
+    // the HTTP server (and the auto-opened browser). `set_serial` already flags
+    // a port that won't open; the control loop's idle probe confirms an
+    // open-but-silent port within a few seconds and latches the alarm then.
     Ok(engine)
 }
 
@@ -143,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
         PathBuf::from(&config.log.dir)
     };
     let _log_guard = init_tracing(&config.log.level, &log_dir)?;
+    prune_old_logs(&log_dir, config.log.retain_days);
 
     tracing::info!("fermentool-core {VERSION} starting");
     tracing::info!(data_dir = %paths.data_dir.display(), "paths resolved");
