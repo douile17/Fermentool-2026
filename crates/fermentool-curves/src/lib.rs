@@ -321,12 +321,30 @@ impl CurveSpec {
                     lerp(s, e, p)
                 }
             }
-            CurveParams::Sigmoid(sp) => sigmoid_value(s, e, p, t / 3600.0, self.mode, sp),
+            CurveParams::Sigmoid(sp) => {
+                sigmoid_value(s, e, p, t / 3600.0, d / 3600.0, self.mode, sp)
+            }
             CurveParams::Step { segments } => step_value(s, segments, t),
             CurveParams::Custom { points, interp } => custom_value(s, e, p, points, *interp, t),
         };
 
-        raw.clamp(self.clamp_min, self.clamp_max)
+        // `validate()` rejects specs whose derived `end` isn't finite, but keep
+        // `value_at` total anyway: a non-finite `end` can make `lerp` yield NaN
+        // (`s + inf·0`), and a NaN setpoint must never leave this function.
+        // Fall back to `start`, a known-good value.
+        let raw = if raw.is_nan() { s } else { raw };
+        // Not `f64::clamp` — it panics if a bound is NaN or `min > max`.
+        // `validate()` forbids both, but a spec that skipped validation (e.g.
+        // straight into `preview`) must still get a number, not a panic: treat a
+        // non-finite or inverted bound as "no limit on that side".
+        let mut v = raw;
+        if self.clamp_min.is_finite() && v < self.clamp_min {
+            v = self.clamp_min;
+        }
+        if self.clamp_max.is_finite() && v > self.clamp_max {
+            v = self.clamp_max;
+        }
+        v
     }
 
     /// Sample the curve into `(elapsed_seconds, value)` pairs for the UI preview
@@ -358,6 +376,16 @@ impl CurveSpec {
         }
         if self.clamp_min < 0.0 {
             return Err("clamp_min must be >= 0".into());
+        }
+        // A Physio rate can be finite yet still blow `end` up to ±inf over a
+        // long duration (`start * e^(µ·hours)`), and inf feeds NaN through
+        // `lerp`/`powf` in `value_at`. Reject it here so a NaN setpoint can
+        // never reach the pump layer.
+        if !self.effective_end().is_finite() {
+            return Err(
+                "the derived end value is not finite — the physiological rate is too large for this duration"
+                    .into(),
+            );
         }
 
         let d = self.duration.as_secs_f64();
@@ -444,9 +472,31 @@ fn logistic(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }
 
-fn sigmoid_value(s: f64, e: f64, p: f64, t_hours: f64, mode: ParamMode, sp: &SigmoidParams) -> f64 {
+fn sigmoid_value(
+    s: f64,
+    e: f64,
+    p: f64,
+    t_hours: f64,
+    dur_hours: f64,
+    mode: ParamMode,
+    sp: &SigmoidParams,
+) -> f64 {
     match mode {
-        ParamMode::Physio => s + (e - s) * logistic(sp.k_per_hour * (t_hours - sp.midpoint_hours)),
+        ParamMode::Physio => {
+            // A raw logistic does not sit on `s` at t=0 or `e` at t=duration.
+            // Rescale it onto `[0, dur_hours]` the same way the endpoints form
+            // is normalised, so the curve hits both endpoints exactly for any
+            // `k_per_hour` / `midpoint_hours` (and stays monotonic, including
+            // `k_per_hour < 0`).
+            let g = |th: f64| logistic(sp.k_per_hour * (th - sp.midpoint_hours));
+            let lo = g(0.0);
+            let hi = g(dur_hours);
+            if (hi - lo).abs() < 1e-12 {
+                lerp(s, e, p)
+            } else {
+                s + (e - s) * (g(t_hours) - lo) / (hi - lo)
+            }
+        }
         ParamMode::Endpoints => {
             let a = if sp.steepness > 0.0 {
                 sp.steepness
@@ -626,13 +676,58 @@ mod tests {
                 midpoint_hours: 5.0,
             }),
         };
-        let mid = c.value_at(hours(5));
-        assert!(close(mid, 50.0));
+        // Normalised: sits exactly on the endpoints, and a midpoint at the
+        // half-way mark still crosses the mean by symmetry.
+        assert!(close(c.value_at(Duration::ZERO), 0.0));
+        assert!(close(c.value_at(hours(10)), 100.0));
+        assert!(close(c.value_at(hours(5)), 50.0));
         let mut prev = f64::NEG_INFINITY;
         for i in 0..=100 {
             let v = c.value_at(Duration::from_secs_f64(i as f64 * 360.0));
             assert!((0.0..=100.0).contains(&v));
             assert!(v >= prev - EPS, "sigmoid physio should be monotonic");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn sigmoid_physio_hits_endpoints_for_offset_midpoint_and_negative_rate() {
+        // Inflection well off-centre: a raw logistic would start far from `start`
+        // and finish short of `end`; the normalised form pins both.
+        let rising = CurveSpec {
+            mode: ParamMode::Physio,
+            start: 10.0,
+            end: 40.0,
+            duration: hours(8),
+            clamp_min: 0.0,
+            clamp_max: f64::MAX,
+            params: CurveParams::Sigmoid(SigmoidParams {
+                steepness: 0.0,
+                midpoint_frac: 0.0,
+                k_per_hour: 1.0,
+                midpoint_hours: 2.0,
+            }),
+        };
+        assert!(close(rising.value_at(Duration::ZERO), 10.0));
+        assert!(close(rising.value_at(hours(8)), 40.0));
+
+        // Negative rate with the same endpoints: still runs start -> end,
+        // monotonically (the normalisation flips sign with the denominator).
+        let falling_rate = CurveSpec {
+            params: CurveParams::Sigmoid(SigmoidParams {
+                k_per_hour: -1.0,
+                midpoint_hours: 6.0,
+                ..SigmoidParams::default()
+            }),
+            ..rising.clone()
+        };
+        assert!(close(falling_rate.value_at(Duration::ZERO), 10.0));
+        assert!(close(falling_rate.value_at(hours(8)), 40.0));
+        let mut prev = f64::NEG_INFINITY;
+        for i in 0..=100 {
+            let v = falling_rate.value_at(Duration::from_secs_f64(i as f64 * 288.0));
+            assert!((10.0..=40.0).contains(&v));
+            assert!(v >= prev - EPS, "monotonic regardless of k sign");
             prev = v;
         }
     }
@@ -779,6 +874,39 @@ mod tests {
             ..CurveSpec::constant(1.0, Duration::from_secs(100))
         };
         assert!(bad_custom.validate().is_err());
+
+        // A finite µ / rate that still overflows `end` to ±inf over a long run
+        // must be rejected — otherwise `value_at` can emit NaN.
+        let exp_overflow = CurveSpec::exponential_physio(2.0, 20.0, hours(100));
+        assert!(!exp_overflow.effective_end().is_finite());
+        assert!(exp_overflow.validate().is_err());
+
+        let lin_overflow = CurveSpec {
+            mode: ParamMode::Physio,
+            params: CurveParams::Linear(LinearParams { rate_per_hour: 1e307 }),
+            ..CurveSpec::linear(1.0, 1.0, hours(100))
+        };
+        assert!(!lin_overflow.effective_end().is_finite());
+        assert!(lin_overflow.validate().is_err());
+
+        // And even if a caller ignores validate(), value_at never emits NaN.
+        for c in [&exp_overflow, &lin_overflow] {
+            for frac in [0.0, 0.25, 0.5, 1.0] {
+                let v = c.value_at(Duration::from_secs_f64(frac * 100.0 * 3600.0));
+                assert!(!v.is_nan(), "value_at produced NaN at frac {frac}");
+            }
+        }
+
+        // A non-finite clamp bound is rejected by validate(), and value_at still
+        // returns a number instead of panicking in `f64::clamp` when a caller
+        // skips validation.
+        let bad_clamp = CurveSpec {
+            clamp_max: f64::NAN,
+            ..CurveSpec::linear(1.0, 2.0, hours(1))
+        };
+        assert!(bad_clamp.validate().is_err());
+        let v = bad_clamp.value_at(Duration::from_secs_f64(1800.0));
+        assert!(v.is_finite(), "value_at must stay total for a NaN clamp bound");
     }
 
     #[test]
