@@ -70,14 +70,22 @@ Dans Fermentool : panneau dépliable **« Fed-batch F₀ from strain parameters 
 | **V₀**      | volume de culture au début du feed (L) | lu sur le réacteur |
 | **Y_{x/s}** | rendement biomasse/substrat (g/g) | littérature souche+substrat, ou ΔX/ΔS mesuré en batch. Glucose/E. coli ≈ 0,45 |
 | **S_f**     | substrat limitant **dans le flacon de feed** (g/L) | tu l'as préparé → connu (ex. 500 g/L glucose) |
+| **m_s** *(option)* | coefficient de maintenance (g substrat · g biomasse⁻¹ · h⁻¹) | littérature souche. E. coli/glucose ≈ 0,02–0,04. Vide → forme croissance seule |
 | **V_max** *(option)* | volume max du réacteur (L) | fiche réacteur — sert au `t_max` |
 
 ### 4.2 Formule
 
 ```
-F₀ [L/h]     = µ · X₀ · V₀ / (Y_{x/s} · S_f)
+F₀ [L/h]     = (µ / Y_{x/s} + m_s) · X₀ · V₀ / S_f
 F₀ [ml/min]  = F₀[L/h] × 1000 / 60
 ```
+
+`m_s` vide → terme `µ / Y_{x/s}` seul (forme croissance seule). Le renseigner
+ajoute typiquement 5–10 % de débit (E. coli à µ modéré).
+
+Hypothèses : `µ` et `Y_{x/s}` constants, culture **substrat-limitante**
+(S ≈ 0, tout le substrat entrant est consommé). Volume perdu par évaporation /
+prélèvements et ajouté par la régulation de pH non pris en compte dans `t_max`.
 
 → **`Start` = F₀ en ml/min** (mode *Control* = **ml/min**), `µ` = ton µ.
 
@@ -106,14 +114,16 @@ pour *Duration*. (En pratique le **kLa / transfert d'O₂** limite souvent avant
 | S_f       | 500 g/L |
 | V_max     | 3 L |
 
-**F₀**
+**F₀** (`m_s` laissé vide — forme croissance seule)
 
 ```
-F₀ = (0,15 × 3 × 1,5) / (0,45 × 500)
-   = 0,675 / 225
+F₀ = (0,15 / 0,45) × 3 × 1,5 / 500
+   = 0,3333 × 4,5 / 500
    = 0,003 L/h
    = 0,05 ml/min
 ```
+
+Avec `m_s = 0,025` : F₀ = (0,3333 + 0,025) × 4,5 / 500 ≈ 0,00323 L/h ≈ 0,054 ml/min.
 
 **t_max**
 

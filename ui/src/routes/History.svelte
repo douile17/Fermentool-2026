@@ -52,12 +52,29 @@
     open(r.id);
   }
 
+  // The server caps one /ticks response at 50 000 rows (seq window), so a run
+  // longer than ~14 h needs several pages. Walk seq from 0 until a window comes
+  // back that doesn't reach its own end — that's the last of the ticks.
+  async function fetchAllTicks(id) {
+    const SPAN = 50000; // must match the daemon's MAX_TICKS_SPAN
+    const all = [];
+    for (let from = 0; ; ) {
+      const batch = await get(`/api/runs/${id}/ticks?from=${from}&to=${from + SPAN}`);
+      if (!batch.length) break;
+      all.push(...batch);
+      const lastSeq = batch[batch.length - 1].seq;
+      if (lastSeq < from + SPAN) break;
+      from = lastSeq + 1;
+    }
+    return all;
+  }
+
   async function open(id) {
     sel = null;
     try {
       const run = await get(`/api/runs/${id}`);
       const p = await post('/api/preview', { curve: run.curve, samples: 200 });
-      const ticks = await get(`/api/runs/${id}/ticks`);
+      const ticks = await fetchAllTicks(id);
       const events = await get(`/api/runs/${id}/events?limit=100`);
       sel = { run, planned: p.series, ticks, events };
     } catch (e) {

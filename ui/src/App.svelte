@@ -6,8 +6,12 @@
   import History from './routes/History.svelte';
   import Settings from './routes/Settings.svelte';
   import PumpHead from './components/PumpHead.svelte';
+  import ConnBar from './components/ConnBar.svelte';
   import ResumeModal from './components/ResumeModal.svelte';
   import FinishModal from './components/FinishModal.svelte';
+  import { linkState } from './lib/link.js';
+
+  const pumpLink = $derived(linkState(app.status, app.connected));
 
   // Flat sidebar: "Pump" up top, "Settings" pinned to the foot. Pump's
   // sub-views are tabs on the main panel, not a nested menu.
@@ -140,31 +144,24 @@
     </button>
 
     <div class="rail-foot">
-      <span class="status" class:on={app.connected}>
-        <span class="dot" aria-hidden="true"></span>
-        {app.connected ? 'daemon online' : 'reconnecting…'}
-      </span>
-      <button class="theme" onclick={setTheme} title="Toggle theme">◐</button>
+      {#if app.status}
+        <span class="pumpstat {pumpLink.tone}" title={pumpLink.label}>
+          <span class="dot" aria-hidden="true"></span>{pumpLink.short}
+        </span>
+      {/if}
+      <div class="rail-foot-row">
+        <span class="status" class:on={app.connected}>
+          <span class="dot" aria-hidden="true"></span>
+          {app.connected ? 'daemon online' : 'reconnecting…'}
+        </span>
+        <button class="theme" onclick={setTheme} title="Toggle theme">◐</button>
+      </div>
     </div>
   </aside>
 
   <main class="main">
     <div class="wrap">
-      {#if app.status && app.status.serial_ok === false}
-        <div class="alarm" role="alert">
-          <b>Pump link lost.</b> The serial port to the pump won't open — the pump is holding its
-          last setpoint. The daemon is retrying automatically.
-        </div>
-      {:else if app.status && app.status.pump_confirmed === false}
-        <div class="alarm" role="alert">
-          <b>Pump not tracking.</b> Writes are getting through but the pump reports a different
-          value than commanded. Check the pump for a fault.
-        </div>
-      {:else if app.status && (app.status.write_fails ?? 0) >= 3}
-        <div class="alarm degrade" role="alert">
-          Pump link degrading — {app.status.write_fails} consecutive writes failed.
-        </div>
-      {/if}
+      <ConnBar />
 
       {#if app.route === 'settings'}
         <Settings />
@@ -275,12 +272,28 @@
 
   .rail-foot {
     padding: 0 var(--s-2);
-    display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+    display: flex; flex-direction: column; align-items: stretch; gap: var(--s-2);
   }
+  .rail-foot-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
   .status { display: inline-flex; align-items: center; gap: var(--s-2); font-size: 12px; color: var(--muted); }
   .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
   .status.on { color: var(--green-600); }
   .status.on .dot { background: var(--green-500); }
+
+  /* Pump-link line, sits just above "daemon online". Persistent cue once the
+     big ConnBar has hidden itself. */
+  .pumpstat {
+    display: inline-flex; align-items: center; gap: var(--s-2);
+    font-size: 12px; font-weight: 600; color: var(--muted);
+  }
+  .pumpstat .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  .pumpstat.ok { color: var(--green-600); }
+  .pumpstat.ok .dot { background: var(--green-500); }
+  .pumpstat.warn { color: #a2621c; }
+  .pumpstat.warn .dot { background: #d68b45; }
+  .pumpstat.bad { color: var(--danger); }
+  .pumpstat.bad .dot { background: var(--danger); }
+  .pumpstat.sim .dot, .pumpstat.idle .dot { background: var(--muted); }
   .theme {
     background: transparent; border: 1px solid var(--line); color: var(--muted);
     border-radius: 999px; width: 26px; height: 26px; padding: 0; font-size: 13px;
@@ -289,24 +302,6 @@
 
   .main { padding: var(--s-7) var(--s-8) var(--s-8); }
   .wrap { max-width: 1000px; margin: 0 auto; }
-
-  .alarm {
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    margin-bottom: var(--s-5);
-    padding: var(--s-3) var(--s-4);
-    border-radius: var(--radius-ctl);
-    font-size: 13px;
-    background: var(--danger-bg);
-    color: var(--danger);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
-  }
-  .alarm.degrade {
-    background: color-mix(in srgb, #d68b45 16%, var(--surface));
-    color: #a2621c;
-    border-color: color-mix(in srgb, #d68b45 45%, transparent);
-  }
 
   /* Segmented control with a sliding teal indicator behind the active tab. */
   .tabs {

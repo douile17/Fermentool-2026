@@ -2,6 +2,8 @@
   import { post } from '../lib/api.js';
   import { num, dur } from '../lib/fmt.js';
   import { unitFor, digitsFor } from '../lib/fmt.js';
+  import { app } from '../lib/state.svelte.js';
+  import { canStartRun } from '../lib/link.js';
 
   let { info, ondone } = $props();
   let busy = $state(false);
@@ -9,6 +11,8 @@
 
   const unit = $derived(unitFor(info.control_var));
   const digits = $derived(digitsFor(info.control_var));
+  // Resuming drives the pump, so it needs a live link — same gate as a new run.
+  const blocked = $derived(!canStartRun(app.status));
 
   async function act(fn) {
     busy = true;
@@ -45,10 +49,16 @@
     </p>
 
     {#if err}<div class="err">{err}</div>{/if}
+    {#if blocked && !info.past_end}
+      <div class="err">
+        The pump link is down — resuming isn't possible until it's back (or simulator runs are
+        enabled in Settings). You can still finish or abort the run.
+      </div>
+    {/if}
 
     <div class="row">
       {#if !info.past_end}
-        <button class="btn-primary" disabled={busy} onclick={resume}>
+        <button class="btn-primary" disabled={busy || blocked} onclick={resume}>
           Resume at {num(info.resume_target, digits)} {unit}
         </button>
       {/if}

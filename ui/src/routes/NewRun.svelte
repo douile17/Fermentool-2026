@@ -2,6 +2,7 @@
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
   import { num, dur, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
+  import { canStartRun } from '../lib/link.js';
   import Chart from '../components/Chart.svelte';
 
   let f = $state({
@@ -23,6 +24,7 @@
     fb_v0: null,
     fb_yxs: null,
     fb_sf: null,
+    fb_ms: null, // maintenance coefficient, optional
     fb_vmax: null,
   });
 
@@ -67,7 +69,11 @@
     return { h, m, s };
   }
 
-  // F0 = µ·X0·V0 / (Yx/s·Sf): the feed rate that sustains growth at µ.
+  // Exponential fed-batch feed that sustains growth at µ, with the substrate
+  // balance at S ≈ 0 (feed-limiting):
+  //   F(t) = (µ/Yx/s + ms)·X0·V0/Sf · e^(µt)
+  // ms is the maintenance coefficient (g substrate per g biomass per h);
+  // leave it blank for the growth-only form. Assumes µ and Yx/s constant.
   const fb = $derived.by(() => {
     const mu = Number(f.mu_per_hour);
     const x0 = Number(f.fb_x0);
@@ -75,11 +81,12 @@
     const y = Number(f.fb_yxs);
     const sf = Number(f.fb_sf);
     if (!(mu > 0 && x0 > 0 && v0 > 0 && y > 0 && sf > 0)) return null;
-    const f0_Lh = (mu * x0 * v0) / (y * sf);
+    const ms = f.fb_ms > 0 ? Number(f.fb_ms) : 0;
+    const f0_Lh = ((mu / y + ms) * x0 * v0) / sf;
     const f0_mlmin = (f0_Lh * 1000) / 60;
     const vmax = Number(f.fb_vmax);
     const tmax = vmax > v0 ? (1 / mu) * Math.log(1 + (mu * (vmax - v0)) / f0_Lh) : null;
-    return { f0_Lh, f0_mlmin, tmax };
+    return { f0_Lh, f0_mlmin, tmax, ms };
   });
 
   function useF0() {
@@ -157,8 +164,8 @@
   }
 
   const busy = $derived(app.status?.active != null);
-  // A real port is configured but not open: a run would drive nothing.
-  const linkDown = $derived(app.status?.serial_ok === false);
+  // A run drives the pump, so it needs a live link — single gate in link.js.
+  const cannotStart = $derived(!canStartRun(app.status));
 </script>
 
 <section class="card">
@@ -170,10 +177,9 @@
     <div class="err" style="margin-bottom:16px">A run is already active. Stop it from Overview first.</div>
   {/if}
 
-  {#if linkDown}
-    <div class="err" style="margin-bottom:16px">
-      Pump link is down — connect the pump before starting a run (or set the serial port to
-      the simulator in Settings).
+  {#if cannotStart}
+    <div class="gate" role="alert">
+      Connect the pump using the connection bar at the top of the screen before starting a run.
     </div>
   {/if}
 
@@ -279,7 +285,11 @@
   {#if f.kind === 'exponential' && f.mode === 'physio'}
     <details class="fb">
       <summary>Fed-batch F₀ from strain parameters</summary>
-      <p class="fb-eq mono">F₀ = µ · X₀ · V₀ / (Y<sub>x/s</sub> · S<sub>f</sub>)</p>
+      <p class="fb-eq mono">F₀ = (µ / Y<sub>x/s</sub> + m<sub>s</sub>) · X₀ · V₀ / S<sub>f</sub></p>
+      <p class="fb-note">
+        Assumes µ and Y<sub>x/s</sub> constant and the culture substrate-limiting (S ≈ 0).
+        Leave m<sub>s</sub> blank for the growth-only form.
+      </p>
       <div class="grid">
         <label class="field"><span>X₀ · biomass at feed start (g/L)</span>
           <input type="number" step="0.1" bind:value={f.fb_x0} placeholder="e.g. 2" />
@@ -290,8 +300,11 @@
         <label class="field"><span>Y<sub>x/s</sub> · yield (g/g)</span>
           <input type="number" step="0.01" bind:value={f.fb_yxs} placeholder="E. coli/glucose ≈ 0.45" />
         </label>
-        <label class="field"><span>S<sub>f</sub> · feed substrate (g/L)</span>
+        <label class="field"><span>S<sub>f</sub> · substrate in feed bottle (g/L)</span>
           <input type="number" step="1" bind:value={f.fb_sf} placeholder="e.g. 500" />
+        </label>
+        <label class="field"><span>m<sub>s</sub> · maintenance (g/g·h, optional)</span>
+          <input type="number" step="0.001" bind:value={f.fb_ms} placeholder="E. coli ≈ 0.025" />
         </label>
         <label class="field"><span>V<sub>max</sub> · reactor limit (L, optional)</span>
           <input type="number" step="0.1" bind:value={f.fb_vmax} placeholder="for the t_max hint" />
@@ -301,7 +314,7 @@
       {#if fb}
         <div class="fb-out mono">
           F₀ = <b>{fb.f0_mlmin.toFixed(3)} ml/min</b>
-          <span class="dim">({fb.f0_Lh.toFixed(4)} L/h · µ = {f.mu_per_hour} h⁻¹)</span>
+          <span class="dim">({fb.f0_Lh.toFixed(4)} L/h · µ = {f.mu_per_hour} h⁻¹{fb.ms ? ` · m_s = ${fb.ms}` : ''})</span>
           {#if fb.tmax}<br />reaches V<sub>max</sub> in ≈ <b>{fb.tmax.toFixed(1)} h</b>{/if}
         </div>
         <button class="btn-ghost" type="button" onclick={useF0}>
@@ -330,7 +343,7 @@
   {#if startErr}<div class="err" style="margin-top:16px">{startErr}</div>{/if}
 
   <div class="foot">
-    <button class="btn-primary" disabled={starting || busy || linkDown || !!previewErr || durationS <= 0} onclick={start}>
+    <button class="btn-primary" disabled={starting || busy || cannotStart || !!previewErr || durationS <= 0} onclick={start}>
       {starting ? 'Starting…' : 'Start run'}
     </button>
   </div>
@@ -403,6 +416,16 @@
   }
   .dur label > span { font-size: 12px; color: var(--muted); }
 
+  .gate {
+    margin-bottom: var(--s-5);
+    padding: var(--s-3) var(--s-4);
+    border-radius: var(--radius-ctl);
+    font-size: 13px;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  }
+
   .preview {
     margin-top: var(--s-6);
     padding-top: var(--s-5);
@@ -421,7 +444,8 @@
   }
   .fb summary { cursor: pointer; font-weight: 600; font-size: 13px; }
   .fb[open] summary { margin-bottom: var(--s-4); }
-  .fb-eq { font-size: 12px; color: var(--muted); margin: 0 0 var(--s-4); }
+  .fb-eq { font-size: 12px; color: var(--muted); margin: 0 0 var(--s-2); }
+  .fb-note { font-size: 11px; color: var(--muted); margin: 0 0 var(--s-4); line-height: 1.4; }
   .fb-out {
     font-size: 13px;
     margin: var(--s-4) 0;

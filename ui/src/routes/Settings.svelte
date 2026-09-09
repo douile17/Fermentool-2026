@@ -1,72 +1,35 @@
 <script>
   import { get, put, post } from '../lib/api.js';
-  import { app } from '../lib/state.svelte.js';
 
   let cfg = $state(null);
-  let ports = $state([]);
-  let portErr = $state(null);
   let err = $state(null);
   let msg = $state(null);
   let saving = $state(false);
-  let reconnecting = $state(false);
   let stopped = $state(false);
-
-  // <select> value: "sim", a detected port name, or "__custom".
-  let portSel = $state('sim');
-  let customPath = $state('');
-
-  const effectivePath = $derived(
-    portSel === '__custom' ? customPath.trim() : portSel,
-  );
 
   $effect(() => {
     get('/api/config')
-      .then((c) => {
-        cfg = c;
-        const p = c.serial.path ?? 'sim';
-        if (p === 'sim' || p === '') {
-          portSel = 'sim';
-        } else {
-          portSel = p;
-          customPath = p;
-        }
-      })
+      .then((c) => (cfg = c))
       .catch((e) => (err = e.message));
-    rescan();
   });
 
-  function rescan() {
-    portErr = null;
-    get('/api/serial/ports')
-      .then((r) => (ports = r.ports ?? []))
-      .catch((e) => (portErr = e.message));
-  }
-
-  async function reconnect() {
-    reconnecting = true;
-    err = null;
-    msg = null;
-    try {
-      const path = effectivePath;
-      const r = await post('/api/serial/reconnect', {
-        path,
-        baud: cfg.serial.baud,
-      });
-      cfg.serial.path = path;
-      msg = r.connected ? `Connected: ${r.connected}` : 'Reconnected.';
-    } catch (e) {
-      err = e.message;
-    }
-    reconnecting = false;
-  }
-
+  // Fields this page owns. serial.path and pump.address live in the connection
+  // bar and may have changed there since this page loaded — merge our fields
+  // onto the current server config instead of round-tripping a stale snapshot.
   async function save() {
     saving = true;
     err = null;
     msg = null;
     try {
-      cfg.serial.path = effectivePath;
-      const r = await put('/api/config', cfg);
+      const fresh = await get('/api/config');
+      fresh.port = cfg.port;
+      fresh.serial.baud = cfg.serial.baud;
+      fresh.serial.allow_simulator = cfg.serial.allow_simulator;
+      fresh.resume.grace_minutes = cfg.resume.grace_minutes;
+      fresh.resume.prompt = cfg.resume.prompt;
+      fresh.log.level = cfg.log.level;
+      const r = await put('/api/config', fresh);
+      cfg = fresh;
       msg = r.note ? `Saved: ${r.note}` : 'Saved.';
     } catch (e) {
       err = e.message;
@@ -98,34 +61,10 @@
         <input type="number" bind:value={cfg.port} />
       </label>
 
-      <label class="field"><span>Serial port</span>
-        <select bind:value={portSel}>
-          <option value="sim">sim (simulator)</option>
-          {#each ports as p}
-            <option value={p.name}>{p.name}{p.product ? ` · ${p.product}` : ` (${p.kind})`}</option>
-          {/each}
-          {#if portSel !== 'sim' && portSel !== '__custom' && !ports.some((p) => p.name === portSel)}
-            <option value={portSel}>{portSel} (not detected)</option>
-          {/if}
-          <option value="__custom">custom path…</option>
-        </select>
-        {#if portSel === '__custom'}
-          <input
-            type="text"
-            placeholder="e.g. COM12 or /dev/ttyUSB0"
-            bind:value={customPath}
-            style="margin-top:8px"
-          />
-        {/if}
-        <div class="port-row">
-          <button type="button" class="btn-ghost" onclick={rescan}>Rescan</button>
-          <button type="button" class="btn-ghost" disabled={reconnecting} onclick={reconnect}>
-            {reconnecting ? 'Connecting…' : 'Connect now'}
-          </button>
-          <span class="port-now">Connected to: <b>{app.status?.transport ?? '–'}</b></span>
-        </div>
-        {#if portErr}<div class="err" style="margin-top:8px">{portErr}</div>{/if}
-      </label>
+      <p class="field-note">
+        The serial port and pump MODBUS address are set in the connection bar at the top of
+        the screen. Baud below is applied the next time you click Connect there.
+      </p>
 
       <label class="field"><span>Baud</span>
         <select bind:value={cfg.serial.baud}>
@@ -133,8 +72,9 @@
         </select>
       </label>
 
-      <label class="field"><span>Pump address</span>
-        <input type="number" min="1" max="247" bind:value={cfg.pump.address} />
+      <label class="field check">
+        <input type="checkbox" bind:checked={cfg.serial.allow_simulator} />
+        <span>Allow runs on the pump simulator (bench testing — no real pump)</span>
       </label>
 
       <label class="field"><span>Resume grace (minutes)</span>
@@ -179,14 +119,12 @@
   }
   .field.check { flex-direction: row; align-items: center; gap: var(--s-2); }
   .field.check span { color: var(--ink); font-size: 13px; }
-  .port-row {
-    display: flex;
-    align-items: center;
-    gap: var(--s-2);
-    margin-top: var(--s-2);
-    flex-wrap: wrap;
+  .field-note {
+    grid-column: 1 / -1;
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
   }
-  .port-now { color: var(--muted); font-size: 13px; }
   .foot { margin-top: var(--s-6); }
   .muted { color: var(--muted); }
   .ok {
