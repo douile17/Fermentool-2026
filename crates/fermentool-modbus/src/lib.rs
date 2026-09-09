@@ -121,13 +121,33 @@ pub enum PduError {
     MalformedResponse,
 }
 
+/// Human-readable name for a MODBUS exception code, so a log line reads
+/// "0x03 (illegal data value)" instead of a bare number the operator has to
+/// look up. Codes per the MODBUS Application Protocol spec, §7.
+pub fn exception_name(code: u8) -> &'static str {
+    match code {
+        0x01 => "illegal function",
+        0x02 => "illegal data address",
+        0x03 => "illegal data value",
+        0x04 => "device failure",
+        0x05 => "acknowledge (long operation in progress)",
+        0x06 => "device busy",
+        0x08 => "memory parity error",
+        0x0A => "gateway path unavailable",
+        0x0B => "gateway target device failed to respond",
+        _ => "unknown",
+    }
+}
+
 impl core::fmt::Display for PduError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             PduError::TooShort => write!(f, "response too short"),
             PduError::BadCrc => write!(f, "response CRC mismatch"),
             PduError::UnexpectedFunction(x) => write!(f, "unexpected function byte 0x{x:02X}"),
-            PduError::Exception(c) => write!(f, "MODBUS exception 0x{c:02X}"),
+            PduError::Exception(c) => {
+                write!(f, "MODBUS exception 0x{c:02X} ({})", exception_name(*c))
+            }
             PduError::MalformedResponse => write!(f, "malformed response"),
         }
     }
@@ -378,6 +398,17 @@ impl<T: Transport> Pump<T> {
         &mut self.transport
     }
 
+    /// The MODBUS slave address this pump is addressed at.
+    pub fn address(&self) -> u8 {
+        self.address
+    }
+
+    /// Re-target this pump at a different MODBUS slave address (same bus).
+    /// Used when the operator corrects the address without a daemon restart.
+    pub fn set_address(&mut self, address: u8) {
+        self.address = address;
+    }
+
     /// One transaction, retried once on any failure.
     ///
     /// The LabQ silently discards a frame that lands inside its inter-frame gap,
@@ -473,6 +504,10 @@ pub struct SimPump {
     pub drop_next: usize,
     /// Answer the next transaction with this exception code instead of acting.
     pub next_exception: Option<u8>,
+    /// When true, every `10H` write to `MOTOR_SPEED` / `FLOW_RATE` is answered
+    /// with exception `0x03` (illegal data value) — models a LabQ that refuses a
+    /// setpoint (e.g. ml/min with no head/tubing calibration set on the pump).
+    pub reject_setpoint_writes: bool,
     /// When set, a read of MOTOR_SPEED / FLOW_RATE reports this value instead of
     /// what was written — models a pump that stops tracking the setpoint.
     pub frozen_readback: Option<f32>,
@@ -487,6 +522,7 @@ impl SimPump {
             regs: [0; 10],
             drop_next: 0,
             next_exception: None,
+            reject_setpoint_writes: false,
             frozen_readback: None,
             transactions: 0,
         }
@@ -581,6 +617,11 @@ impl Transport for SimPump {
                 let qty = u16::from_be_bytes([body[4], body[5]]);
                 if body.len() < 7 + 2 * qty as usize {
                     return Err(TransportError::Timeout);
+                }
+                if self.reject_setpoint_writes
+                    && (reg == reg::MOTOR_SPEED || reg == reg::FLOW_RATE)
+                {
+                    return Ok(with_crc(vec![body[0], 0x10 | 0x80, 0x03]));
                 }
                 for i in 0..qty as usize {
                     let hi = body[7 + 2 * i];
@@ -953,6 +994,36 @@ mod tests {
             pump.start(),
             Err(PumpError::Pdu(PduError::Exception(0x02)))
         ));
+    }
+
+    #[test]
+    fn exception_display_names_the_code() {
+        assert_eq!(
+            PduError::Exception(0x03).to_string(),
+            "MODBUS exception 0x03 (illegal data value)"
+        );
+        assert_eq!(
+            PduError::Exception(0x02).to_string(),
+            "MODBUS exception 0x02 (illegal data address)"
+        );
+        assert!(PduError::Exception(0x7F).to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn sim_can_reject_setpoint_writes_with_0x03() {
+        let mut pump = Pump::new(SimPump::new(1), 1);
+        pump.transport_mut().reject_setpoint_writes = true;
+        assert!(matches!(
+            pump.set_flow_ml_min(12.0),
+            Err(PumpError::Pdu(PduError::Exception(0x03)))
+        ));
+        assert!(matches!(
+            pump.set_speed_rpm(50.0),
+            Err(PumpError::Pdu(PduError::Exception(0x03)))
+        ));
+        // start/stop and direction still work — only the value registers are refused.
+        pump.start().unwrap();
+        assert!(pump.transport().running());
     }
 
     #[test]
