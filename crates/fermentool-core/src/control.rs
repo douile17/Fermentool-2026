@@ -34,8 +34,15 @@ const IDLE_POLL: Duration = Duration::from_millis(500);
 /// ramp steps through each pump grid value without loading the bus.
 const WRITE_SETPOINT_INTERVAL: Duration = Duration::from_millis(150);
 
-/// While the serial link is lost, retry reopening the port this often.
-const SERIAL_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+/// While the serial link is lost, retry reopening the port on an exponential
+/// backoff: `SERIAL_RETRY_MIN`, then doubling, capped at `SERIAL_RETRY_MAX`. The
+/// first retry is quick so a cable plugged straight back in recovers in ~1 s;
+/// the backoff then keeps a mid-run recovery attempt (a port close/reopen plus
+/// one or two blocking MODBUS confirm reads, ~0.5-1 s) from churning a marginal
+/// port every second and starving the 150 ms setpoint writes. The log stays
+/// quiet regardless — `maybe_recover_serial` reports only the down/up edges.
+const SERIAL_RETRY_MIN: Duration = Duration::from_secs(1);
+const SERIAL_RETRY_MAX: Duration = Duration::from_secs(15);
 
 /// When no run is active, poll the pump this often so a cable pulled between
 /// runs (or during a completed-run hold) is still noticed and auto-recovered.
@@ -214,7 +221,8 @@ fn control_loop<T: Transport + SwapTransport>(
     // wall-vs-monotonic gap after a resume isn't mistaken for a clock step.
     let mut run_epoch: Option<(Timestamp, Instant, SignedDuration, i64)> = None;
     // Cooldown between automatic serial-reopen attempts while the link is down.
-    let mut next_serial_retry: Option<Instant> = None;
+    // `(when to try the next reopen, the backoff delay that scheduled it)`.
+    let mut next_serial_retry: Option<(Instant, Duration)> = None;
     // Idle-time link probe deadline.
     let mut next_probe: Option<Instant> = None;
 
@@ -384,12 +392,15 @@ fn run_now(run_epoch: Option<(Timestamp, Instant, SignedDuration, i64)>) -> Time
 
 /// Reopen the pump's serial port on its own after a mid-run adapter/cable
 /// glitch. Runs when the link is lost or writes are failing in a streak;
-/// rate-limited to one attempt per [`SERIAL_RETRY_INTERVAL`] while it stays down.
+/// attempts are spaced by an exponential backoff between [`SERIAL_RETRY_MIN`]
+/// and [`SERIAL_RETRY_MAX`] while it stays down. `next_retry` doubles as the
+/// "already reported" flag: it is `None` outside a recovery streak, so the
+/// down/up log lines fire only on the edges.
 fn maybe_recover_serial<T: Transport + SwapTransport>(
     engine: &mut Engine<T>,
     events: &broadcast::Sender<DaemonStatus>,
     grace: Duration,
-    next_retry: &mut Option<Instant>,
+    next_retry: &mut Option<(Instant, Duration)>,
 ) {
     let needs_recovery =
         engine.serial_lost() || engine.write_fails() >= REOPEN_AFTER_WRITE_FAILS;
@@ -397,19 +408,32 @@ fn maybe_recover_serial<T: Transport + SwapTransport>(
         *next_retry = None;
         return;
     }
-    if next_retry.is_some_and(|t| Instant::now() < t) {
+    if next_retry.is_some_and(|(t, _)| Instant::now() < t) {
         return;
     }
+    // `None` here means this is the first attempt of a fresh outage; log the
+    // down/up transitions only, never the retries in between.
+    let prev_delay = next_retry.map(|(_, d)| d);
     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         engine.recover_serial(Timestamp::now())
     }))
     .unwrap_or(false);
     if ok {
-        tracing::info!("serial link reopened");
+        if prev_delay.is_some() {
+            tracing::info!("serial link reopened");
+        }
         *next_retry = None;
     } else {
-        tracing::warn!("serial link down; retrying in {SERIAL_RETRY_INTERVAL:?}");
-        *next_retry = Some(Instant::now() + SERIAL_RETRY_INTERVAL);
+        if prev_delay.is_none() {
+            tracing::warn!(
+                "serial link down; auto-reconnecting (backoff {SERIAL_RETRY_MIN:?}..{SERIAL_RETRY_MAX:?})"
+            );
+        }
+        let delay = match prev_delay {
+            Some(d) => (d * 2).min(SERIAL_RETRY_MAX),
+            None => SERIAL_RETRY_MIN,
+        };
+        *next_retry = Some((Instant::now() + delay, delay));
     }
     let _ = events.send(current_status(engine, grace));
 }
