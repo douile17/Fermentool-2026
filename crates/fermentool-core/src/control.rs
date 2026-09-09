@@ -207,9 +207,12 @@ fn control_loop<T: Transport + SwapTransport>(
     //     so a steep ramp steps through every grid value instead of jumping.
     let mut next_journal: Option<Instant> = None;
     let mut next_write: Option<Instant> = None;
-    // (run's wall `started_at`, monotonic anchor taken now, run id) — lets a tick
-    // detect a system-clock step and use monotonic time instead.
-    let mut run_epoch: Option<(Timestamp, Instant, i64)> = None;
+    // (run's wall `started_at`, monotonic anchor, run's elapsed time when that
+    // anchor was taken, run id) — lets a tick detect a system-clock step and use
+    // monotonic time instead. The elapsed-at-anchor term is ~0 for a fresh run
+    // but carries the pre-restart elapsed on a resume, so the expected
+    // wall-vs-monotonic gap after a resume isn't mistaken for a clock step.
+    let mut run_epoch: Option<(Timestamp, Instant, SignedDuration, i64)> = None;
     // Cooldown between automatic serial-reopen attempts while the link is down.
     let mut next_serial_retry: Option<Instant> = None;
     // Idle-time link probe deadline.
@@ -218,8 +221,12 @@ fn control_loop<T: Transport + SwapTransport>(
     loop {
         // Keep the monotonic run epoch in sync with what the engine is running.
         match engine.status().active {
-            Some(a) if run_epoch.map(|(_, _, id)| id) != Some(a.run_id) => {
-                run_epoch = Some((a.started_at, Instant::now(), a.run_id));
+            Some(a) if run_epoch.map(|(_, _, _, id)| id) != Some(a.run_id) => {
+                let anchor = Instant::now();
+                let elapsed_at_anchor = Timestamp::now()
+                    .duration_since(a.started_at)
+                    .max(SignedDuration::ZERO);
+                run_epoch = Some((a.started_at, anchor, elapsed_at_anchor, a.run_id));
             }
             Some(_) => {}
             None => run_epoch = None,
@@ -350,13 +357,19 @@ fn advance_past(mut deadline: Instant, step: Duration) -> Instant {
 /// clock has drifted from the monotonic clock by more than [`CLOCK_STEP_LIMIT`]
 /// since the run started, it stepped — pin the run's elapsed time to the
 /// monotonic anchor for this tick so the pump doesn't jump on the curve.
-fn run_now(run_epoch: Option<(Timestamp, Instant, i64)>) -> Timestamp {
-    let Some((wall_start, mono_start, _)) = run_epoch else {
+///
+/// `mono_secs` is the run's elapsed time estimated along the monotonic path:
+/// what it was when the anchor was taken (`elapsed_at_anchor`, ~0 for a fresh
+/// run, the pre-restart elapsed for a resume) plus real monotonic time since.
+/// Without the `elapsed_at_anchor` term every resume would look like a multi-
+/// minute clock step and rewind the curve to its start.
+fn run_now(run_epoch: Option<(Timestamp, Instant, SignedDuration, i64)>) -> Timestamp {
+    let Some((wall_start, mono_start, elapsed_at_anchor, _)) = run_epoch else {
         return Timestamp::now();
     };
     let wall = Timestamp::now();
     let wall_secs = wall.duration_since(wall_start).as_secs_f64();
-    let mono_secs = mono_start.elapsed().as_secs_f64();
+    let mono_secs = elapsed_at_anchor.as_secs_f64() + mono_start.elapsed().as_secs_f64();
     if (wall_secs - mono_secs).abs() > CLOCK_STEP_LIMIT.as_secs_f64() {
         tracing::warn!(
             wall_secs,
@@ -795,5 +808,39 @@ mod tests {
         assert_eq!(err, "a run is already active");
 
         handle.shutdown();
+    }
+
+    /// A resume adopts a run whose `started_at` is minutes/hours in the past, so
+    /// the monotonic anchor is taken with a large elapsed-at-anchor. `run_now`
+    /// must treat that as normal and keep returning real wall-clock time — not
+    /// mistake the wall/monotonic gap for a clock step and rewind the curve.
+    #[test]
+    fn run_now_after_resume_keeps_real_elapsed() {
+        let elapsed_at_resume = SignedDuration::from_secs(3600); // run was 1 h in
+        let wall_start = Timestamp::now() - elapsed_at_resume;
+        let epoch = Some((wall_start, Instant::now(), elapsed_at_resume, 1_i64));
+
+        let handed = run_now(epoch);
+        let elapsed = handed.duration_since(wall_start).as_secs_f64();
+        assert!(
+            (elapsed - 3600.0).abs() < 2.0,
+            "resume rewound the run clock: elapsed {elapsed}s, expected ~3600s"
+        );
+    }
+
+    /// The guard must still fire for a genuine forward wall-clock step: the
+    /// anchor says ~0 elapsed a moment ago, but the wall clock now reads far
+    /// past the start. Pin to the monotonic anchor, not the jumped wall time.
+    #[test]
+    fn run_now_still_pins_a_real_wall_clock_jump() {
+        let wall_start = Timestamp::now() - SignedDuration::from_secs(120);
+        let epoch = Some((wall_start, Instant::now(), SignedDuration::ZERO, 1_i64));
+
+        let handed = run_now(epoch);
+        let elapsed = handed.duration_since(wall_start).as_secs_f64();
+        assert!(
+            elapsed < 5.0,
+            "clock-step guard did not pin to the anchor: elapsed {elapsed}s"
+        );
     }
 }
