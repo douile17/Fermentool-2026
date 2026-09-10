@@ -34,7 +34,6 @@ pub fn wait_until_up(timeout: Duration) -> bool {
 }
 
 /// Best-effort `POST /api/shutdown`. `true` if the daemon accepted it.
-#[allow(dead_code)] // wired into the tray menu in the next step
 pub fn shutdown() -> bool {
     ureq::post(&format!("{BASE}/api/shutdown"))
         .timeout(Duration::from_secs(2))

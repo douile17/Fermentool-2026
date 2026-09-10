@@ -2,10 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod daemon;
+mod tray;
 
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Manager, WindowEvent};
 
 fn main() {
     tauri::Builder::default()
@@ -18,6 +19,8 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            tray::build(&app.handle().clone())?;
+
             let handle = app.handle().clone();
             // Bring the daemon up (or attach to a running one), then reveal the
             // window. Off the main thread so the UI event loop starts now and
@@ -40,6 +43,15 @@ fn main() {
                 }
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Close = hide to tray; the daemon (and any run) keeps going.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running Fermentool");
