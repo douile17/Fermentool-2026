@@ -15,7 +15,7 @@
 
   // Flat sidebar: "Pump" up top, "Settings" pinned to the foot. Pump's
   // sub-views are tabs on the main panel, not a nested menu.
-  // "New run" isn't a tab - Overview already offers it (idle empty state,
+  // "New run" isn't a tab, Overview already offers it (idle empty state,
   // completed run) and History's "Run again" jumps straight to it.
   const pumpTabs = [
     ['overview', 'Overview'],
@@ -248,7 +248,7 @@
     display: inline-flex; align-items: center; justify-content: center;
     opacity: 0.8;
     /* filled square body in the label colour (green while running); the central
-       disc stays hollow - filled with the rail's own background so it reads as
+       disc stays hollow, filled with the rail's own background so it reads as
        an empty ring */
     --ph-body: currentColor;
     --ph-fill: var(--surface);

@@ -13,7 +13,7 @@ commit `603d362`).
 
 That works but reads as "a local web server", not an application:
 
-- No window of its own - the UI lives in whatever browser tab, easy to lose,
+- No window of its own, the UI lives in whatever browser tab, easy to lose,
   mixed in with the operator's other tabs.
 - No taskbar / tray presence; nothing tells you the daemon is up except an
   open tab.
@@ -22,7 +22,7 @@ That works but reads as "a local web server", not an application:
   resume until a human notices.
 
 `docs/IMPLEMENTATION_PLAN.md` §9 reserves this: *"Optional native WebView shell
-(Tauri/Wails) - no core changes."* `docs/service-install.md` sketches the "run
+(Tauri/Wails), no core changes."* `docs/service-install.md` sketches the "run
 it as a service" side (systemd / launchd / Task Scheduler / NSSM).
 
 ## Goal
@@ -38,12 +38,12 @@ Ship Fermentool as a **desktop app** on Windows 11 (the primary target):
    own after a reboot and offers the resume prompt.
 4. One installer `.exe`, no runtime install on the target.
 
-### `§9` "no core changes" - relaxed, on purpose
+### `§9` "no core changes", relaxed, on purpose
 
 Bundling the UI means it no longer runs on the daemon's origin, so its API
 calls become cross-origin (CORS). Option A accepts two tiny changes for this:
 
-- `ui/src/lib/api.js`: ~15 lines - target `http://127.0.0.1:8730` when running
+- `ui/src/lib/api.js`: ~15 lines, target `http://127.0.0.1:8730` when running
   inside Tauri, relative paths otherwise (dev / browser). No behaviour or
   feature change.
 - `fermentool-core`: a `tower-http` `CorsLayer` (~8 lines) allowing the Tauri
@@ -51,7 +51,7 @@ calls become cross-origin (CORS). Option A accepts two tiny changes for this:
   the threat model.
 
 The rejected alternative (Option B) was a reverse proxy *inside the shell* that
-forwards `/api/*` and the WebSocket to `:8730` under one origin - ~80 lines
+forwards `/api/*` and the WebSocket to `:8730` under one origin, ~80 lines
 incl. WS relay, a component to maintain forever, for the aesthetic gain of an
 untouched core. Not worth it.
 
@@ -75,10 +75,10 @@ run daemon. Confirm all three work from the webview:
 - a plain `GET /api/status`,
 - a `PUT /api/config` (triggers a CORS preflight),
 - the `/api/ws` WebSocket (no CORS preflight, but the server may check the
-  `Origin` header on upgrade - verify axum's handler does not reject it).
+  `Origin` header on upgrade, verify axum's handler does not reject it).
 
 If the WebSocket is rejected on `Origin`, that is a third small `fermentool-core`
-change (accept the Tauri origin on the upgrade) - decide then, cheaply.
+change (accept the Tauri origin on the upgrade), decide then, cheaply.
 
 ## Design
 
@@ -88,18 +88,18 @@ Add to the workspace: root `Cargo.toml` `members += "src-tauri"`. Crate
 `fermentool-tauri`, binary `fermentool` (installed app exe = `fermentool.exe`,
 distinct from `fermentool-core.exe`).
 
-Tauri v2 - v1 is legacy; v2 has the stable `single-instance`, `shell` and
+Tauri v2, v1 is legacy; v2 has the stable `single-instance`, `shell` and
 `process` plugins and the sidecar mechanism.
 
 `src-tauri/tauri.conf.json`:
 
 - One window: 1200×800, min 900×600, `title: "Fermentool"`, `resizable`,
   `center`, `"visible": false` at boot (shown once the shell has decided the
-  daemon is coming up - see §3).
-- `build.frontendDist = "../ui/dist"` - the Svelte SPA is **bundled**. No
+  daemon is coming up, see §3).
+- `build.frontendDist = "../ui/dist"`, the Svelte SPA is **bundled**. No
   splash page: the UI already renders a "reconnecting…" state (`app.connected`
   in `ui/src/lib/state.svelte.js`) that covers "daemon not up yet".
-- `bundle.externalBin = ["binaries/fermentool-core"]` - the daemon ships as a
+- `bundle.externalBin = ["binaries/fermentool-core"]`, the daemon ships as a
   **sidecar** (Tauri appends the target triple; real file
   `src-tauri/binaries/fermentool-core-x86_64-pc-windows-msvc.exe`, see §6).
 - `bundle.targets = ["nsis"]`, `bundle.icon` = existing logo
@@ -120,7 +120,7 @@ const BASE = '__TAURI_INTERNALS__' in window ? 'http://127.0.0.1:8730' : '';
 - `connectWs()` builds the URL from `BASE` (→ `ws://127.0.0.1:8730/api/ws`)
   instead of `location.host`, and its `onopen` snapshot fetch uses `BASE` too.
 - Nothing else in `ui/` changes. Dev (`npm run dev`, Vite proxy) and browser
-  mode (daemon serving `ui/dist`) are unaffected - `BASE` is `''` there.
+  mode (daemon serving `ui/dist`) are unaffected, `BASE` is `''` there.
 
 **`fermentool-core`** adds a CORS layer on the router
 ([crates/fermentool-core/src/api.rs](../../../crates/fermentool-core/src/api.rs)):
@@ -168,7 +168,7 @@ On startup, in order:
      `CommandChild` (it can tie the child's lifetime to the app). Drop the
      `Child` handle immediately.
    - **No Job object.** Verify on the target that killing the shell leaves the
-     child running (§ Testing #2 - hard gate).
+     child running (§ Testing #2, hard gate).
    - Poll `/api/status` every 200 ms up to ~15 s until it binds.
 4. **Show the window.** The bundled UI is already loaded; just
    `window.show() + set_focus()`. It renders in its own "reconnecting…" state
@@ -189,7 +189,7 @@ Tray menu:
 - (separator) **Quit (leave daemon running)** → `app.exit(0)` only.
 
 Left-click tray → Open. Tooltip reflects a 5 s poll of `:8730`:
-"Fermentool - running" / "Fermentool - daemon not responding".
+"Fermentool, running" / "Fermentool, daemon not responding".
 
 The daemon's `POST /api/shutdown` and the Settings "Shut down daemon" button
 are unchanged; the tray item is a second door to the same endpoint.
@@ -219,7 +219,7 @@ when the app is opened. The app, when launched, finds `:8730` already up (step
 2) and attaches.
 
 First launch right after install: the task has not fired (no new login), so the
-app spawns the daemon itself (step 3). No double-start - step 2's health check
+app spawns the daemon itself (step 3). No double-start, step 2's health check
 gates it, and `fermentool-core`'s own `AddrInUse` guard is the backstop.
 
 ### 6. Getting the daemon binary into the bundle
@@ -234,7 +234,7 @@ copy target/x86_64-pc-windows-msvc/release/fermentool-core.exe \
 ```
 
 `fermentool-core` still fails its own build if `ui/dist` is missing, so the
-sidecar carries `ui/dist` embedded exactly as today - meaning **browser mode
+sidecar carries `ui/dist` embedded exactly as today, meaning **browser mode
 still works** (run `fermentool-core.exe` alone, it serves the UI at `:8730`).
 The app bundles the *same* `ui/dist` from the *same* build, so there is no
 UI/daemon version skew within one installer. `src-tauri/binaries/` is
@@ -248,11 +248,11 @@ Release sequence in `README.md`:
 
 | Added / changed | Untouched |
 |---|---|
-| `+ src-tauri/` (new crate: `Cargo.toml`, `tauri.conf.json`, `src/main.rs`, `installer/hooks.nsh`, `installer/fermentool-task.xml`, `binaries/.gitignore`) | `crates/fermentool-curves`, `crates/fermentool-modbus` - **0 diff** |
-| root `Cargo.toml`: `members += "src-tauri"` | `ui/` - only `src/lib/api.js` |
-| `ui/src/lib/api.js`: API base (~15 lines) | `fermentool-core` - only `api.rs` + `Cargo.toml` |
+| `+ src-tauri/` (new crate: `Cargo.toml`, `tauri.conf.json`, `src/main.rs`, `installer/hooks.nsh`, `installer/fermentool-task.xml`, `binaries/.gitignore`) | `crates/fermentool-curves`, `crates/fermentool-modbus`, **0 diff** |
+| root `Cargo.toml`: `members += "src-tauri"` | `ui/`, only `src/lib/api.js` |
+| `ui/src/lib/api.js`: API base (~15 lines) | `fermentool-core`, only `api.rs` + `Cargo.toml` |
 | `crates/fermentool-core/src/api.rs`: `CorsLayer` on the router; `Cargo.toml`: `tower-http` `cors` feature | the `:8730` HTTP API surface, browser fallback, `fermentool-core.exe` standalone use |
-| `docs/service-install.md`: "Windows - Fermentool app + login task" section | |
+| `docs/service-install.md`: "Windows, Fermentool app + login task" section | |
 | `README.md`: installer build steps | |
 | `.gitignore`: `src-tauri/binaries/`, `src-tauri/target/` | |
 
@@ -262,7 +262,7 @@ it a **member** so CI compile-checks it; jobs that only need the daemon use
 
 ## Testing
 
-- **Step 0 spike** - see *Implementation order*. Gates the whole design.
+- **Step 0 spike**, see *Implementation order*. Gates the whole design.
 - **CI:** `cargo build -p fermentool-tauri` (compile check; no bundling in CI).
 - **Manual, dev machine (`cargo tauri dev`, no installer):**
   1. `:8730` free → shell spawns the sidecar → window shows in "reconnecting…"
@@ -293,13 +293,13 @@ it a **member** so CI compile-checks it; jobs that only need the daemon use
 - **WebSocket `Origin`.** `/api/ws` is a same-origin assumption today. Step 0
   verifies the webview can connect; if not, a small allow-`Origin` check on the
   upgrade handler is the fix.
-- **CORS scope.** Allow-list the three `tauri` origins, not `Any` - tidy, and
+- **CORS scope.** Allow-list the three `tauri` origins, not `Any`, tidy, and
   the listener is `127.0.0.1`-only anyway.
 - **WebView2 runtime.** Default on Windows 10 21H2+ / Windows 11. NSIS bundler:
   `bundle.windows.webviewInstallMode = downloadBootstrapper` (small installer,
   fetches at install time; install is interactive).
 - **Scheduled task is per-user** (`/sc onlogon`). Fine for one operator. Headless
-  / multi-user needs the NSSM path - deferred.
+  / multi-user needs the NSSM path, deferred.
 - **Port hard-coded to 8730** on the shell side (health check) and in `api.js`
   (`BASE`). Changing `[port]` in `config.toml` breaks the app. v1: document it;
   a follow-up can have the shell read `config.toml` and inject the base.

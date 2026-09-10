@@ -37,7 +37,7 @@
   });
 
   // Glide the chart marker between ticks. rAF (so it pauses in a background
-  // tab), but commit at ~15 fps - plenty smooth for the marker, and a fraction
+  // tab), but commit at ~15 fps, plenty smooth for the marker, and a fraction
   // of the work over a multi-day run.
   $effect(() => {
     if (!active || reducedMotion) return;
@@ -66,7 +66,7 @@
     if (id != null) load(id);
   });
 
-  // Refresh the "recent activity" list as the run advances - but at most every
+  // Refresh the "recent activity" list as the run advances, but at most every
   // few seconds, not once per tick (a 100 h run would otherwise fire ~360k
   // fetches). The live chart trace comes from the planned curve, so no per-tick
   // data is pulled here at all.
@@ -99,7 +99,7 @@
         ? Math.max(0, (now - startedAtMs) / 1000)
         : 0
   );
-  // Same as `elapsed` but off the rAF clock - feeds the chart marker only.
+  // Same as `elapsed` but off the rAF clock, feeds the chart marker only.
   const elapsedAnim = $derived(
     active ? Math.max(0, (nowAnim - startedAtMs) / 1000) : elapsed
   );
@@ -344,7 +344,7 @@
   .bar.done span { background: var(--teal-400); }
   .done-foot { display: flex; gap: var(--s-3); align-items: center; }
 
-  /* Live setpoint readout - sticks to the top of the viewport while scrolling
+  /* Live setpoint readout, sticks to the top of the viewport while scrolling
      so the current rate is always in view during a run. */
   .live {
     position: sticky;

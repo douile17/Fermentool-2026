@@ -1,12 +1,12 @@
 # Fermentool
 
 Drives a Baoding Shenchen **LabQ** peristaltic pump over MODBUS-RTU so its
-setpoint (**rpm** *or* **ml/min**) follows a chosen **time profile** - linear,
-exponential fed-batch, sigmoid, step, constant or custom - over runs that average
+setpoint (**rpm** *or* **ml/min**) follows a chosen **time profile**, linear,
+exponential fed-batch, sigmoid, step, constant or custom, over runs that average
 ~100 h, with **crash-safe journalling** and **time-correct resume** after any
 interruption.
 
-> Status: **milestone 8 - it's an app.** `cargo run -p fermentool-core` starts the
+> Status: **milestone 8, it's an app.** `cargo run -p fermentool-core` starts the
 > daemon and serves the Svelte UI at **http://127.0.0.1:8730** (simulator by default).
 > The daemon: `config.toml`, SQLite journal, curve engine + crash recovery on a control
 > thread, REST API + a `/api/ws` status stream, graceful shutdown. The UI: Overview
@@ -20,7 +20,7 @@ interruption.
 
 One self-contained native binary per OS (Windows / Linux / macOS). It owns the
 serial port, runs the curve engine, writes every tick to SQLite, **and** serves
-the web UI at `http://localhost:8730`. The UI is a disposable browser tab - it
+the web UI at `http://localhost:8730`. The UI is a disposable browser tab, it
 rebuilds its state from the daemon on reconnect, so closing it (or the whole PC)
 never loses a run. The pump keeps its last commanded speed with no further
 frames, so "hold last setpoint on crash" is inherent.
@@ -35,7 +35,7 @@ control path.)
 |---|---|
 | `crates/fermentool-curves` | Pure time-profile math (`CurveSpec`), no I/O. Fully unit-tested. |
 | `crates/fermentool-modbus`  | MODBUS-RTU CRC/framing + LabQ register map & limits. Byte-exact tests vs. the vendor doc. |
-| `crates/fermentool-core`    | The daemon - `config` · `store` (SQLite journal) · `engine` (curve engine + crash recovery) · `control` (engine on its own thread) · `api` (axum REST) · embedded UI (m8). |
+| `crates/fermentool-core`    | The daemon, `config` · `store` (SQLite journal) · `engine` (curve engine + crash recovery) · `control` (engine on its own thread) · `api` (axum REST) · embedded UI (m8). |
 | `ui/`                       | Svelte 5 + Vite front-end; built to `ui/dist/`, embedded by the daemon at milestone 8. |
 | `docs/`                     | Implementation plan, design language, wiring, service install. |
 | `LabQ Series MODBUS protocol.{md,pdf}` | Vendor protocol reference. |
@@ -77,7 +77,7 @@ cargo tauri build                        # -> target/release/bundle/nsis/Ferment
 ```
 
 `cargo tauri dev` runs it against a live daemon (run `copy-sidecar.ps1` first).
-The installer is unsigned - Windows SmartScreen warns on first run; code signing
+The installer is unsigned, Windows SmartScreen warns on first run; code signing
 is a follow-up. Design: `docs/superpowers/specs/2026-09-10-tauri-webview-shell-design.md`.
 
 ## License

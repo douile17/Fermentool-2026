@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Fermentool web UI - built to static assets and embedded in the daemon binary",
+  "description": "Fermentool web UI, built to static assets and embedded in the daemon binary",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

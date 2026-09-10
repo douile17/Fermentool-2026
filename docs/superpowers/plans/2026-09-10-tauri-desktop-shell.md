@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship Fermentool as an installable Windows desktop app - a Tauri v2 window rendering the bundled Svelte UI, backed by the existing daemon running as a detached process that auto-starts at login.
+**Goal:** Ship Fermentool as an installable Windows desktop app, a Tauri v2 window rendering the bundled Svelte UI, backed by the existing daemon running as a detached process that auto-starts at login.
 
 **Architecture:** A new `src-tauri/` crate builds `fermentool.exe`, a WebView2 window whose frontend is the bundled `ui/dist`. The unchanged `fermentool-core.exe` ships as a Tauri sidecar; the shell health-checks `127.0.0.1:8730`, and if nothing answers, spawns the daemon **detached** so it outlives the window. The window closes to a tray icon. An NSIS installer registers an "at log on" scheduled task so the daemon returns after a reboot. The only changes outside `src-tauri/` are an API-base constant in `ui/src/lib/api.js` and a `CorsLayer` in `fermentool-core` (the bundled UI is now a separate origin from the API).
 
@@ -16,9 +16,9 @@ Copied verbatim from the spec. Every task's requirements implicitly include thes
 
 - **Tauri v2**, not v1.
 - **Windows 11 is the target.** `src-tauri/` is Windows-first; `fermentool-core`, `fermentool-curves`, `fermentool-modbus` stay cross-platform.
-- **The daemon is spawned detached.** Raw `std::process::Command` with `.creation_flags(0x00000008 | 0x00000200)` (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`). Do not keep the `Child`. No Job object. **Closing the app window must never stop the daemon** - this is the load-bearing guarantee.
-- **Port is hard-coded to `8730`** - the shell health-check and the `ui/src/lib/api.js` base both assume it.
-- **Core changes are limited to exactly two things:** a `CorsLayer` in `crates/fermentool-core/src/api.rs` (+ its `Cargo.toml` dep) and an API-base constant in `ui/src/lib/api.js`. Zero changes to `fermentool-curves` / `fermentool-modbus`. Nothing else in `fermentool-core` / `ui/` (unless Task 0's spike proves the `/api/ws` upgrade needs an `Origin` allowance - then that one addition too).
+- **The daemon is spawned detached.** Raw `std::process::Command` with `.creation_flags(0x00000008 | 0x00000200)` (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`). Do not keep the `Child`. No Job object. **Closing the app window must never stop the daemon**, this is the load-bearing guarantee.
+- **Port is hard-coded to `8730`**, the shell health-check and the `ui/src/lib/api.js` base both assume it.
+- **Core changes are limited to exactly two things:** a `CorsLayer` in `crates/fermentool-core/src/api.rs` (+ its `Cargo.toml` dep) and an API-base constant in `ui/src/lib/api.js`. Zero changes to `fermentool-curves` / `fermentool-modbus`. Nothing else in `fermentool-core` / `ui/` (unless Task 0's spike proves the `/api/ws` upgrade needs an `Origin` allowance, then that one addition too).
 - **CORS allow-list is explicit**, not `Any`: `http://tauri.localhost`, `https://tauri.localhost`, `tauri://localhost`.
 - **Installer:** NSIS. Per-user scheduled task named `Fermentool`, trigger `onlogon`, `RunLevel=HighestAvailable`, `RestartOnFailure` interval `PT1M` count `3`. Uninstall deletes the task and does a best-effort `POST /api/shutdown`.
 - **WebView2 runtime:** `bundle.windows.webviewInstallMode = downloadBootstrapper`.
@@ -30,43 +30,43 @@ Copied verbatim from the spec. Every task's requirements implicitly include thes
 
 ## File Structure
 
-**New - `src-tauri/` crate:**
-- `src-tauri/Cargo.toml` - crate `fermentool-tauri`, binary `fermentool`; tauri + plugin deps.
-- `src-tauri/tauri.conf.json` - window, `frontendDist = "../ui/dist"`, sidecar, NSIS bundle config, CSP.
-- `src-tauri/build.rs` - `tauri_build::build()` (standard).
-- `src-tauri/src/main.rs` - shell entry: single-instance, daemon health-check + detached spawn, window show, tray, close-to-tray.
-- `src-tauri/src/daemon.rs` - `is_up()`, `spawn_detached()`, `wait_until_up()`, `shutdown()`.
-- `src-tauri/src/tray.rs` - tray icon + menu + handlers.
-- `src-tauri/installer/hooks.nsh` - NSIS `postInstall` / `preUninstall` hooks.
-- `src-tauri/installer/fermentool-task.xml` - scheduled-task definition with a `{{EXE}}` placeholder.
-- `src-tauri/binaries/.gitignore` - ignores the copied sidecar exe.
-- `src-tauri/icons/` - app icons generated from the existing logo.
+**New, `src-tauri/` crate:**
+- `src-tauri/Cargo.toml`, crate `fermentool-tauri`, binary `fermentool`; tauri + plugin deps.
+- `src-tauri/tauri.conf.json`, window, `frontendDist = "../ui/dist"`, sidecar, NSIS bundle config, CSP.
+- `src-tauri/build.rs`, `tauri_build::build()` (standard).
+- `src-tauri/src/main.rs`, shell entry: single-instance, daemon health-check + detached spawn, window show, tray, close-to-tray.
+- `src-tauri/src/daemon.rs`, `is_up()`, `spawn_detached()`, `wait_until_up()`, `shutdown()`.
+- `src-tauri/src/tray.rs`, tray icon + menu + handlers.
+- `src-tauri/installer/hooks.nsh`, NSIS `postInstall` / `preUninstall` hooks.
+- `src-tauri/installer/fermentool-task.xml`, scheduled-task definition with a `{{EXE}}` placeholder.
+- `src-tauri/binaries/.gitignore`, ignores the copied sidecar exe.
+- `src-tauri/icons/`, app icons generated from the existing logo.
 
-**Modified - existing:**
-- `Cargo.toml` (root) - `members += "src-tauri"`.
-- `crates/fermentool-core/Cargo.toml` - add `tower-http = { version = "0.6", features = ["cors"] }`.
-- `crates/fermentool-core/src/api.rs` - build and `.layer()` a `CorsLayer` in `router()`.
-- `ui/src/lib/api.js` - `BASE` constant; prefix `fetch` paths and the WS URL.
-- `.gitignore` (root) - `src-tauri/target/`, `src-tauri/binaries/*.exe`.
-- `docs/service-install.md` - "Windows - Fermentool app + login task" section.
-- `README.md` - installer build sequence.
-- `docs/IMPLEMENTATION_PLAN.md` - mark §9 shell "in progress", note the CORS relaxation.
+**Modified, existing:**
+- `Cargo.toml` (root), `members += "src-tauri"`.
+- `crates/fermentool-core/Cargo.toml`, add `tower-http = { version = "0.6", features = ["cors"] }`.
+- `crates/fermentool-core/src/api.rs`, build and `.layer()` a `CorsLayer` in `router()`.
+- `ui/src/lib/api.js`, `BASE` constant; prefix `fetch` paths and the WS URL.
+- `.gitignore` (root), `src-tauri/target/`, `src-tauri/binaries/*.exe`.
+- `docs/service-install.md`, "Windows, Fermentool app + login task" section.
+- `README.md`, installer build sequence.
+- `docs/IMPLEMENTATION_PLAN.md`, mark §9 shell "in progress", note the CORS relaxation.
 
 ---
 
-## Task 0: Spike - prove the webview ↔ daemon path
+## Task 0: Spike, prove the webview ↔ daemon path
 
 **Goal:** Throwaway-verify the one uncertain thing before building the real crate: a bundled UI on the `tauri.localhost` origin can reach the daemon's API and WebSocket with just a `CorsLayer`. Produces a go/no-go note and the confirmed facts later tasks depend on.
 
 **Files:**
-- Create: `/tmp/fermentool-spike/` (throwaway, outside the repo - **not committed**)
+- Create: `/tmp/fermentool-spike/` (throwaway, outside the repo, **not committed**)
 - Reference only: `crates/fermentool-core/src/api.rs` (`router()`, `/api/ws`), `ui/src/lib/api.js`
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces (written into `docs/superpowers/plans/2026-09-10-tauri-desktop-shell.md` as a short "Spike result" note appended at the bottom, and repeated verbatim in the Task 1 / Task 4 notes if it changes anything):
-  - `SPIKE_WS_NEEDS_ORIGIN_FIX: yes|no` - whether `/api/ws` rejects the `tauri.localhost` Origin.
-  - `SPIKE_WEBVIEW_ORIGIN: "<string>"` - the exact `Origin` header value the WebView2 webview sends (expected `http://tauri.localhost`; confirm).
+  - `SPIKE_WS_NEEDS_ORIGIN_FIX: yes|no`, whether `/api/ws` rejects the `tauri.localhost` Origin.
+  - `SPIKE_WEBVIEW_ORIGIN: "<string>"`, the exact `Origin` header value the WebView2 webview sends (expected `http://tauri.localhost`; confirm).
 
 - [ ] **Step 1: Install the toolchain**
 
@@ -94,11 +94,11 @@ npm --prefix C:\Users\Administrateur\Documents\SOFT_Homemade\Fermentool\ui run b
 Remove-Item -Recurse -Force .\dist -ErrorAction SilentlyContinue
 Copy-Item -Recurse C:\Users\Administrateur\Documents\SOFT_Homemade\Fermentool\ui\dist .\dist
 ```
-In `src/main.js` of the spike (or a `<script>` in `dist/index.html` you add by hand), the point is only to exercise the API - you can instead just open the app and use the real UI, since it will try to talk to `/api/...`.
+In `src/main.js` of the spike (or a `<script>` in `dist/index.html` you add by hand), the point is only to exercise the API, you can instead just open the app and use the real UI, since it will try to talk to `/api/...`.
 
 - [ ] **Step 3: Add the CorsLayer to a locally-run daemon and start it**
 
-Temporarily, in a scratch branch of the real repo (do **not** commit yet - Task 1 does it properly), add to `crates/fermentool-core/src/api.rs` `router()` just before the final return:
+Temporarily, in a scratch branch of the real repo (do **not** commit yet, Task 1 does it properly), add to `crates/fermentool-core/src/api.rs` `router()` just before the final return:
 ```rust
 use tower_http::cors::CorsLayer;
 let cors = CorsLayer::new()
@@ -114,11 +114,11 @@ and `.layer(cors)` on the router, plus `tower-http = { version = "0.6", features
 ```powershell
 cargo run -p fermentool-core
 ```
-(simulator is fine - no pump needed).
+(simulator is fine, no pump needed).
 
 - [ ] **Step 4: Point the spike UI at the daemon and run it**
 
-In the spike's copied `dist/`, the UI's `api.js` still uses relative paths. For the spike only, edit `dist/assets/index-*.js` is impractical - instead, run the daemon with the CorsLayer AND set the spike's frontend to load the UI from a `<base href>` is also messy. Simplest: in the spike `src-tauri/tauri.conf.json`, set the window to load a remote URL `"http://127.0.0.1:8730"` OR add a 3-line `dist/probe.html` that does the three checks explicitly:
+In the spike's copied `dist/`, the UI's `api.js` still uses relative paths. For the spike only, edit `dist/assets/index-*.js` is impractical, instead, run the daemon with the CorsLayer AND set the spike's frontend to load the UI from a `<base href>` is also messy. Simplest: in the spike `src-tauri/tauri.conf.json`, set the window to load a remote URL `"http://127.0.0.1:8730"` OR add a 3-line `dist/probe.html` that does the three checks explicitly:
 ```html
 <script type="module">
 const B = 'http://127.0.0.1:8730';
@@ -133,7 +133,7 @@ Set `frontendDist` to the folder holding `probe.html` and the window URL to `pro
 
 Expected in the console:
 - `GET 200`
-- `PUT 200` (this is the CORS-preflighted request - a `403`/network error here means the allow-list is wrong)
+- `PUT 200` (this is the CORS-preflighted request, a `403`/network error here means the allow-list is wrong)
 - `WS open` (a `WS error` means `/api/ws` rejects the Origin)
 
 Also, in the **daemon's** log or with Wireshark/devtools Network tab, note the exact `Origin:` request header value.
@@ -146,12 +146,12 @@ Append to the bottom of this plan file:
 
 - Toolchain: tauri-cli <version>, msvc target OK.
 - GET /api/status from the webview: PASS
-- PUT /api/config (CORS preflight) from the webview: PASS / FAIL - <notes>
+- PUT /api/config (CORS preflight) from the webview: PASS / FAIL, <notes>
 - /api/ws WebSocket from the webview: PASS / FAIL
 - SPIKE_WEBVIEW_ORIGIN: "<exact string>"
 - SPIKE_WS_NEEDS_ORIGIN_FIX: yes / no
 ```
-Then `git checkout -- crates/fermentool-core` in the real repo (drop the scratch CorsLayer - Task 1 adds it for real) and delete `/tmp/fermentool-spike`.
+Then `git checkout -- crates/fermentool-core` in the real repo (drop the scratch CorsLayer, Task 1 adds it for real) and delete `/tmp/fermentool-spike`.
 
 - [ ] **Step 6: Commit**
 
@@ -160,7 +160,7 @@ git add docs/superpowers/plans/2026-09-10-tauri-desktop-shell.md
 git commit -m "docs: record Tauri spike result"
 ```
 
-**Gate:** if GET+PUT+WS all PASS, proceed. If PUT fails, the CORS config is wrong - fix the allow-list understanding before Task 1. If WS fails, Task 1 also adds an `Origin` check to the `/api/ws` handler (an allowed third core change, per Global Constraints).
+**Gate:** if GET+PUT+WS all PASS, proceed. If PUT fails, the CORS config is wrong, fix the allow-list understanding before Task 1. If WS fails, Task 1 also adds an `Origin` check to the `/api/ws` handler (an allowed third core change, per Global Constraints).
 
 ---
 
@@ -170,7 +170,7 @@ git commit -m "docs: record Tauri spike result"
 
 **Files:**
 - Modify: `crates/fermentool-core/Cargo.toml` (add `tower-http`)
-- Modify: `crates/fermentool-core/src/api.rs` - `router()` (around line 46-66), and its `#[cfg(test)] mod tests`
+- Modify: `crates/fermentool-core/src/api.rs`, `router()` (around line 46-66), and its `#[cfg(test)] mod tests`
 - Test: `crates/fermentool-core/src/api.rs` (inline `mod tests`)
 
 **Interfaces:**
@@ -250,12 +250,12 @@ async fn cors_ignores_an_unknown_origin() {
     assert!(res.headers().get("access-control-allow-origin").is_none());
 }
 ```
-If `http` / `axum::body::Body` aren't already imported in the test module, match whatever the sibling tests use (they build requests already - copy their imports).
+If `http` / `axum::body::Body` aren't already imported in the test module, match whatever the sibling tests use (they build requests already, copy their imports).
 
 - [ ] **Step 3: Run the tests, verify they fail**
 
 Run: `cargo test -p fermentool-core cors_`
-Expected: FAIL - no `access-control-allow-origin` header (layer not added yet).
+Expected: FAIL, no `access-control-allow-origin` header (layer not added yet).
 
 - [ ] **Step 4: Add the layer**
 
@@ -302,7 +302,7 @@ git commit -m "feat(core): allow the Tauri webview origin (CORS)"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `get`, `post`, `put`, `del`, `connectWs` - same names and signatures as today. Behaviour identical when `BASE === ''`.
+- Produces: `get`, `post`, `put`, `del`, `connectWs`, same names and signatures as today. Behaviour identical when `BASE === ''`.
 
 - [ ] **Step 1: Add the base constant**
 
@@ -313,7 +313,7 @@ At the top of `ui/src/lib/api.js`, replace the `// Thin wrappers …` comment bl
 // In a Tauri window the UI is bundled into the app, so it runs on a different
 // origin (http://tauri.localhost) from the daemon and must use an absolute URL.
 // In the browser (Vite dev proxy, or the daemon serving ui/dist itself) it is
-// same-origin, so BASE is '' and every path stays relative - unchanged.
+// same-origin, so BASE is '' and every path stays relative, unchanged.
 const BASE =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
     ? 'http://127.0.0.1:8730'
@@ -352,7 +352,7 @@ Expected: build succeeds; `dist/assets/index-*.js` regenerated.
 
 - [ ] **Step 5: Manual browser smoke**
 
-Start the daemon (`cargo run -p fermentool-core`), open `http://127.0.0.1:8730`. Expected: UI loads, status is live (WS connected), Settings save works - i.e. `BASE === ''` behaves exactly as before.
+Start the daemon (`cargo run -p fermentool-core`), open `http://127.0.0.1:8730`. Expected: UI loads, status is live (WS connected), Settings save works, i.e. `BASE === ''` behaves exactly as before.
 
 - [ ] **Step 6: Commit**
 
@@ -363,13 +363,13 @@ git commit -m "feat(ui): use an absolute API base when bundled in Tauri"
 
 ---
 
-## Task 3: `src-tauri` crate - window on the bundled UI
+## Task 3: `src-tauri` crate, window on the bundled UI
 
-**Goal:** A `fermentool-tauri` crate that builds and, via `cargo tauri dev`, shows a window rendering the bundled `ui/dist`. No daemon-spawn logic yet - you run `cargo run -p fermentool-core` by hand alongside.
+**Goal:** A `fermentool-tauri` crate that builds and, via `cargo tauri dev`, shows a window rendering the bundled `ui/dist`. No daemon-spawn logic yet, you run `cargo run -p fermentool-core` by hand alongside.
 
 **Files:**
 - Create: `src-tauri/Cargo.toml`, `src-tauri/build.rs`, `src-tauri/tauri.conf.json`, `src-tauri/src/main.rs`, `src-tauri/icons/` (generated)
-- Modify: `Cargo.toml` (root - `members`), `.gitignore` (root)
+- Modify: `Cargo.toml` (root, `members`), `.gitignore` (root)
 
 **Interfaces:**
 - Consumes: `ui/dist/` (built in Task 2).
@@ -504,7 +504,7 @@ Run:
 ```powershell
 cargo build -p fermentool-tauri
 ```
-Expected: compiles (first build is slow - pulls the tauri tree).
+Expected: compiles (first build is slow, pulls the tauri tree).
 
 Then, in one terminal `cargo run -p fermentool-core` (simulator), in another:
 ```powershell
@@ -523,7 +523,7 @@ git commit -m "feat(tauri): shell crate rendering the bundled UI"
 
 ## Task 4: Detached daemon lifecycle in the shell
 
-**Goal:** On launch the shell health-checks `:8730`; if nothing answers it spawns the sidecar **detached** and waits for it to bind. Killing the shell leaves the daemon running - the hard gate.
+**Goal:** On launch the shell health-checks `:8730`; if nothing answers it spawns the sidecar **detached** and waits for it to bind. Killing the shell leaves the daemon running, the hard gate.
 
 **Files:**
 - Create: `src-tauri/src/daemon.rs`
@@ -533,11 +533,11 @@ git commit -m "feat(tauri): shell crate rendering the bundled UI"
 **Interfaces:**
 - Consumes: `tauri_plugin_shell` (path resolution), the sidecar at `src-tauri/binaries/fermentool-core-x86_64-pc-windows-msvc.exe`.
 - Produces `src-tauri/src/daemon.rs`:
-  - `pub fn is_up() -> bool` - `GET http://127.0.0.1:8730/api/status`, 500 ms timeout, true iff HTTP 200.
-  - `pub fn spawn_detached(exe: &std::path::Path) -> std::io::Result<()>` - raw `Command`, creation flags `0x00000008 | 0x00000200`, `Child` dropped.
-  - `pub fn wait_until_up(timeout: std::time::Duration) -> bool` - poll `is_up()` every 200 ms until true or timeout.
-  - `pub fn shutdown() -> bool` - `POST http://127.0.0.1:8730/api/shutdown`, 2 s timeout.
-  - `pub fn sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf>` - resolves the bundled sidecar (`app.path().resource_dir()` + platform-suffixed name) in a bundle, or the `target/<triple>/…` copy in `cargo tauri dev`.
+  - `pub fn is_up() -> bool`, `GET http://127.0.0.1:8730/api/status`, 500 ms timeout, true iff HTTP 200.
+  - `pub fn spawn_detached(exe: &std::path::Path) -> std::io::Result<()>`, raw `Command`, creation flags `0x00000008 | 0x00000200`, `Child` dropped.
+  - `pub fn wait_until_up(timeout: std::time::Duration) -> bool`, poll `is_up()` every 200 ms until true or timeout.
+  - `pub fn shutdown() -> bool`, `POST http://127.0.0.1:8730/api/shutdown`, 2 s timeout.
+  - `pub fn sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf>`, resolves the bundled sidecar (`app.path().resource_dir()` + platform-suffixed name) in a bundle, or the `target/<triple>/…` copy in `cargo tauri dev`.
 
 - [ ] **Step 1: Write `src-tauri/src/daemon.rs`**
 
@@ -584,7 +584,7 @@ pub fn spawn_detached(exe: &Path) -> io::Result<()> {
         .creation_flags(FLAGS)
         .current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
         .spawn()?;
-    drop(child); // never wait - the daemon must outlive us
+    drop(child); // never wait, the daemon must outlive us
     Ok(())
 }
 
@@ -659,15 +659,15 @@ Copy-Item -Force `
 Write-Host "sidecar copied"
 ```
 
-- [ ] **Step 4: Manual verification - spawn**
+- [ ] **Step 4: Manual verification, spawn**
 
-Run `.\src-tauri\scripts\copy-sidecar.ps1`, then (no daemon running - `taskkill /F /IM fermentool-core.exe` first):
+Run `.\src-tauri\scripts\copy-sidecar.ps1`, then (no daemon running, `taskkill /F /IM fermentool-core.exe` first):
 ```powershell
 cargo tauri dev --config src-tauri/tauri.conf.json
 ```
 Expected: window opens; within ~3 s status goes live (the shell spawned the daemon). `tasklist | findstr fermentool-core` shows one process.
 
-- [ ] **Step 5: Manual verification - THE GATE: daemon survives the shell**
+- [ ] **Step 5: Manual verification, THE GATE: daemon survives the shell**
 
 With the above running, in another terminal:
 ```powershell
@@ -676,9 +676,9 @@ taskkill /F /IM fermentool.exe
 timeout /t 2
 curl http://127.0.0.1:8730/api/status
 ```
-Expected: `curl` still returns a 200 JSON body. **If the daemon died with the shell, stop - the creation flags or the `Child` handling is wrong. Do not proceed.**
+Expected: `curl` still returns a 200 JSON body. **If the daemon died with the shell, stop, the creation flags or the `Child` handling is wrong. Do not proceed.**
 
-- [ ] **Step 6: Manual verification - attach, no double-spawn**
+- [ ] **Step 6: Manual verification, attach, no double-spawn**
 
 Start `fermentool-core.exe` by hand, then `cargo tauri dev`. Expected: window shows immediately, `tasklist` shows exactly one `fermentool-core.exe` (the shell did not spawn a second).
 
@@ -702,7 +702,7 @@ git commit -m "feat(tauri): spawn the daemon detached; attach if already up"
 **Interfaces:**
 - Consumes: `daemon::shutdown()` (Task 4).
 - Produces `src-tauri/src/tray.rs`:
-  - `pub fn build(app: &tauri::AppHandle) -> tauri::Result<()>` - creates the tray icon, menu, and click/menu handlers.
+  - `pub fn build(app: &tauri::AppHandle) -> tauri::Result<()>`, creates the tray icon, menu, and click/menu handlers.
 
 - [ ] **Step 1: Write `src-tauri/src/tray.rs`**
 
@@ -862,7 +862,7 @@ Confirm `externalBin: ["binaries/fermentool-core"]` is present so `fermentool-co
 .\src-tauri\scripts\copy-sidecar.ps1
 cargo tauri build --config src-tauri/tauri.conf.json
 ```
-Expected: `target/release/bundle/nsis/Fermentool_0.1.3_x64-setup.exe` exists. First run downloads NSIS - allow it.
+Expected: `target/release/bundle/nsis/Fermentool_0.1.3_x64-setup.exe` exists. First run downloads NSIS, allow it.
 
 - [ ] **Step 5: Manual verification on a clean Windows session (VM or a fresh user profile)**
 
@@ -876,9 +876,9 @@ Expected: `target/release/bundle/nsis/Fermentool_0.1.3_x64-setup.exe` exists. Fi
 
 - [ ] **Step 6: Write the docs**
 
-`docs/service-install.md` - add a section:
+`docs/service-install.md`, add a section:
 ```markdown
-## Windows - the Fermentool app (recommended)
+## Windows, the Fermentool app (recommended)
 
 The installer (`Fermentool_<version>_x64-setup.exe`) does this for you:
 
@@ -886,15 +886,15 @@ The installer (`Fermentool_<version>_x64-setup.exe`) does this for you:
 - registers a scheduled task **Fermentool** that starts the daemon at log on
   and restarts it (every 1 min, 3 times) if it exits.
 
-So after a reboot the daemon is back within seconds and - if a run was
-interrupted - the app shows the resume prompt when you open it. Closing the
+So after a reboot the daemon is back within seconds and, if a run was
+interrupted, the app shows the resume prompt when you open it. Closing the
 app window leaves the daemon running; use the tray menu's *Shut down daemon &
 quit* to stop it. Uninstalling removes the task and stops the daemon.
 
 The manual Task Scheduler / NSSM notes below are only for a headless machine
 with no interactive login.
 ```
-`README.md` - add under build/packaging:
+`README.md`, add under build/packaging:
 ```markdown
 ### Windows installer
 
@@ -905,7 +905,7 @@ with no interactive login.
 
 Unsigned: Windows SmartScreen will warn on first run. Code signing is a follow-up.
 ```
-`docs/IMPLEMENTATION_PLAN.md` §9 - change the "Optional native WebView shell" line to note it is implemented for Windows (Tauri v2, `src-tauri/`), and that "no core changes" was relaxed to a single `CorsLayer` - see `docs/superpowers/specs/2026-09-10-tauri-webview-shell-design.md`.
+`docs/IMPLEMENTATION_PLAN.md` §9, change the "Optional native WebView shell" line to note it is implemented for Windows (Tauri v2, `src-tauri/`), and that "no core changes" was relaxed to a single `CorsLayer`, see `docs/superpowers/specs/2026-09-10-tauri-webview-shell-design.md`.
 
 - [ ] **Step 7: Commit**
 
@@ -922,33 +922,33 @@ git commit -m "feat(tauri): NSIS installer + at-logon daemon task; docs"
 
 | Spec section | Task |
 |---|---|
-| §Goal 1 - native window, bundled UI | Task 3 |
-| §Goal 2 - detached daemon, survives window close | Task 4 (Step 5 gate) |
-| §Goal 3 - auto-start at login | Task 6 (task XML + hook) |
-| §Goal 4 - one installer .exe | Task 6 |
-| §"§9 relaxed" - CorsLayer + api.js base | Task 1, Task 2 |
-| §Implementation order - Step 0 spike | Task 0 |
-| §Design 1 - `src-tauri/` crate, Tauri v2, conf.json | Task 3 |
-| §Design 2 - api.js BASE + CorsLayer + optional WS Origin | Task 2, Task 1 (Step 6) |
-| §Design 3 - health-check, detached spawn, poll, show window | Task 4 |
-| §Design 4 - tray, close-to-tray, menu | Task 5 |
-| §Design 5 - NSIS, hooks, task XML, uninstall | Task 6 |
-| §Design 6 - sidecar copy, no version skew | Task 4 (Step 3 script) |
-| §Design 7 - repo changes table | Tasks 1-6 (files match) |
-| §Testing - spike, dev-machine manual, installer VM | Task 0 Step 4, Task 4-5 manual steps, Task 6 Step 5 |
-| §Risks - detached child | Task 4 Step 5 (hard gate) |
-| §Risks - WS Origin | Task 0 Step 4 + Task 1 Step 6 |
-| §Risks - WebView2 bootstrapper | Task 3 conf.json (`downloadBootstrapper`) |
-| §Risks - per-user task | documented, Task 6 Step 6 |
-| §Risks - port hard-coded | Global Constraints + Task 2 comment |
-| §Risks - toolchain | Task 0 Step 1 |
-| §Risks - code signing | Task 6 Step 6 README note |
+| §Goal 1, native window, bundled UI | Task 3 |
+| §Goal 2, detached daemon, survives window close | Task 4 (Step 5 gate) |
+| §Goal 3, auto-start at login | Task 6 (task XML + hook) |
+| §Goal 4, one installer .exe | Task 6 |
+| §"§9 relaxed", CorsLayer + api.js base | Task 1, Task 2 |
+| §Implementation order, Step 0 spike | Task 0 |
+| §Design 1, `src-tauri/` crate, Tauri v2, conf.json | Task 3 |
+| §Design 2, api.js BASE + CorsLayer + optional WS Origin | Task 2, Task 1 (Step 6) |
+| §Design 3, health-check, detached spawn, poll, show window | Task 4 |
+| §Design 4, tray, close-to-tray, menu | Task 5 |
+| §Design 5, NSIS, hooks, task XML, uninstall | Task 6 |
+| §Design 6, sidecar copy, no version skew | Task 4 (Step 3 script) |
+| §Design 7, repo changes table | Tasks 1-6 (files match) |
+| §Testing, spike, dev-machine manual, installer VM | Task 0 Step 4, Task 4-5 manual steps, Task 6 Step 5 |
+| §Risks, detached child | Task 4 Step 5 (hard gate) |
+| §Risks, WS Origin | Task 0 Step 4 + Task 1 Step 6 |
+| §Risks, WebView2 bootstrapper | Task 3 conf.json (`downloadBootstrapper`) |
+| §Risks, per-user task | documented, Task 6 Step 6 |
+| §Risks, port hard-coded | Global Constraints + Task 2 comment |
+| §Risks, toolchain | Task 0 Step 1 |
+| §Risks, code signing | Task 6 Step 6 README note |
 
 No gaps.
 
 **2. Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N". Task 0's spike steps describe manual actions with exact expected console output. The one conditional (Task 1 Step 6 / WS Origin) is gated on a spike output value defined in Task 0's Interfaces.
 
-**3. Type consistency:** `daemon::is_up()`, `spawn_detached(&Path)`, `wait_until_up(Duration)`, `shutdown()`, `sidecar_path(&AppHandle)` - defined in Task 4 Interfaces, used with the same names/signatures in Task 4 Step 2 and Task 5 (`daemon::shutdown()`). `tray::build(&AppHandle)` - defined Task 5 Interfaces, called Task 5 Step 2. `router(state) -> Router` unchanged. `BASE` constant name consistent across Task 2 steps. Window label `"main"` consistent (Task 3 conf.json has one unnamed window → Tauri labels it `"main"` by default; Task 4/5 use `get_webview_window("main")` - correct).
+**3. Type consistency:** `daemon::is_up()`, `spawn_detached(&Path)`, `wait_until_up(Duration)`, `shutdown()`, `sidecar_path(&AppHandle)`, defined in Task 4 Interfaces, used with the same names/signatures in Task 4 Step 2 and Task 5 (`daemon::shutdown()`). `tray::build(&AppHandle)`, defined Task 5 Interfaces, called Task 5 Step 2. `router(state) -> Router` unchanged. `BASE` constant name consistent across Task 2 steps. Window label `"main"` consistent (Task 3 conf.json has one unnamed window → Tauri labels it `"main"` by default; Task 4/5 use `get_webview_window("main")`, correct).
 
 ---
 

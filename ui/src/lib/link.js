@@ -1,4 +1,4 @@
-// Single source of truth for "how is the pump link doing?" - shared by the
+// Single source of truth for "how is the pump link doing?", shared by the
 // top ConnBar, the inline connect-gate, and the sidebar foot indicator.
 //
 // tone: 'ok' | 'warn' | 'bad' | 'sim' | 'idle'
@@ -11,7 +11,7 @@
 // connectable: true  → picking a port and clicking Connect can fix this, so the
 //                      bar shows the full ConnectControl.
 //              false → it's a pump / disk / daemon condition a reconnect won't
-//                      touch - the bar shows just the status line.
+//                      touch, the bar shows just the status line.
 export function linkState(status, connected) {
   const s = status;
   if (!connected || !s)
@@ -19,7 +19,7 @@ export function linkState(status, connected) {
   if (s.simulator && s.allow_simulator)
     return {
       tone: 'sim',
-      label: 'Simulator - test runs enabled',
+      label: 'Simulator, test runs enabled',
       short: 'simulator',
       connectable: true,
     };
@@ -44,21 +44,21 @@ export function linkState(status, connected) {
       tone: 'warn',
       label: 'Pump not tracking the setpoint',
       short: 'pump: mismatch',
-      hint: 'Writes get through but the pump reports a different value - check the pump.',
+      hint: 'Writes get through but the pump reports a different value. Check the pump.',
       connectable: false,
     };
   if (s.journal_ok === false)
     return {
       tone: 'warn',
-      label: 'Journal stalled - run history is not being saved',
+      label: 'Journal stalled, run history is not being saved',
       short: 'journal stalled',
-      hint: 'The pump is still running correctly, but tick logging is failing - check free disk space.',
+      hint: 'The pump is still running correctly, but tick logging is failing. Check free disk space.',
       connectable: false,
     };
   if ((s.write_fails ?? 0) >= 3)
     return {
       tone: 'warn',
-      label: `Link degrading - ${s.write_fails} writes failed`,
+      label: `Link degrading, ${s.write_fails} writes failed`,
       short: 'link degrading',
       connectable: true,
     };
@@ -71,7 +71,7 @@ export function linkState(status, connected) {
 }
 
 // Can a run be started / resumed right now? A run drives the pump, so it needs
-// a live link - a real port that's responding, or the simulator with simulator
+// a live link, a real port that's responding, or the simulator with simulator
 // runs enabled. Keep every "can't start" gate keyed off this one function.
 export function canStartRun(status) {
   if (!status) return false;

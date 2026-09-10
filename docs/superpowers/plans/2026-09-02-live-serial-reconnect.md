@@ -19,7 +19,7 @@
 - LabQ serial frame is fixed 8E1; valid baud values are 1200 / 2400 / 4800 / 9600.
 - No `Co-Authored-By: Claude` trailer on commits in this repo.
 - After any change under `ui/src/`, run `npm run build` in `ui/` (regenerates `ui/dist/`, which is committed).
-- Rust is at `~/.cargo/bin` - not on the Bash `PATH` by default. Prefix commands with `export PATH="$HOME/.cargo/bin:$PATH"` (or use a shell where cargo is already available).
+- Rust is at `~/.cargo/bin`, not on the Bash `PATH` by default. Prefix commands with `export PATH="$HOME/.cargo/bin:$PATH"` (or use a shell where cargo is already available).
 
 ## File Structure
 
@@ -36,7 +36,7 @@
 
 ---
 
-## Task 1: `transport` module - build & swap the pump transport
+## Task 1: `transport` module, build & swap the pump transport
 
 **Files:**
 - Create: `crates/fermentool-core/src/transport.rs`
@@ -47,8 +47,8 @@
 **Interfaces:**
 - Consumes: `crate::config::SerialConfig`; `fermentool_modbus::{SimPump, Transport}`; `fermentool_modbus::serial::SerialTransport`.
 - Produces:
-  - `pub enum TransportKind { Sim, Serial(String) }` - `#[derive(Debug, Clone, PartialEq, Eq)]`; method `pub fn label(&self) -> String` (`"sim"` or the port name).
-  - `pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>, TransportKind)` - simulator for sim/empty path, else `SerialTransport::open(path, baud, 1500ms)`, falling back to the simulator (logged `error!`) on open failure.
+  - `pub enum TransportKind { Sim, Serial(String) }`, `#[derive(Debug, Clone, PartialEq, Eq)]`; method `pub fn label(&self) -> String` (`"sim"` or the port name).
+  - `pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>, TransportKind)`, simulator for sim/empty path, else `SerialTransport::open(path, baud, 1500ms)`, falling back to the simulator (logged `error!`) on open failure.
   - `pub trait SwapTransport { fn swap(&mut self, serial: &SerialConfig, pump_addr: u8) -> TransportKind; }` with impls for `Box<dyn Transport + Send>` (real swap via `open`) and `SimPump` (no-op returning `TransportKind::Sim`).
   - `crate::config::SerialConfig::use_simulator(&self) -> bool`.
 
@@ -144,7 +144,7 @@ pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>,
 /// A live engine transport that can be rebuilt in place from a [`SerialConfig`].
 ///
 /// Implemented for the daemon's boxed transport (a real swap) and for [`SimPump`]
-/// (a no-op - `control.rs`'s simulator-backed tests build an `Engine<SimPump>`).
+/// (a no-op, `control.rs`'s simulator-backed tests build an `Engine<SimPump>`).
 pub trait SwapTransport {
     fn swap(&mut self, serial: &SerialConfig, pump_addr: u8) -> TransportKind;
 }
@@ -152,7 +152,7 @@ pub trait SwapTransport {
 impl SwapTransport for Box<dyn Transport + Send> {
     fn swap(&mut self, serial: &SerialConfig, pump_addr: u8) -> TransportKind {
         let (new, kind) = open(serial, pump_addr);
-        *self = new; // old transport dropped here - SerialTransport's Drop closes the port
+        *self = new; // old transport dropped here, SerialTransport's Drop closes the port
         kind
     }
 }
@@ -232,12 +232,12 @@ pub mod store;
 pub mod transport;
 ```
 
-- [ ] **Step 4: Run the new tests - expect PASS**
+- [ ] **Step 4: Run the new tests, expect PASS**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core transport::`
 Expected: the 6 `transport::tests::*` tests pass.
 
-- [ ] **Step 5: Run the config tests - expect PASS (no regression)**
+- [ ] **Step 5: Run the config tests, expect PASS (no regression)**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core config::`
 Expected: all existing `config::tests::*` still pass.
@@ -246,7 +246,7 @@ Expected: all existing `config::tests::*` still pass.
 
 ```bash
 git add crates/fermentool-core/src/transport.rs crates/fermentool-core/src/lib.rs crates/fermentool-core/src/config.rs
-git commit -m "core: transport module - build + swap the pump transport from config"
+git commit -m "core: transport module, build + swap the pump transport from config"
 ```
 
 ---
@@ -255,20 +255,20 @@ git commit -m "core: transport module - build + swap the pump transport from con
 
 **Files:**
 - Modify: `crates/fermentool-core/src/engine/mod.rs`
-  - `Engine<T>` struct (~line 153) - add `transport: TransportKind` field
-  - `Engine::new` (~line 162) - initialise it to `TransportKind::Sim`
+  - `Engine<T>` struct (~line 153), add `transport: TransportKind` field
+  - `Engine::new` (~line 162), initialise it to `TransportKind::Sim`
   - new methods `set_transport_kind`, `transport_kind`, `swap_transport`
-  - `EngineStatus` struct (~line 122) - add `transport: String`
-  - `Engine::status` (~line 176) - populate it
+  - `EngineStatus` struct (~line 122), add `transport: String`
+  - `Engine::status` (~line 176), populate it
 - Test: inline `#[cfg(test)] mod tests` in the same file (helpers `engine()`, `linear_cfg()`, `t0()`, `at()` already exist)
 
 **Interfaces:**
 - Consumes: `crate::transport::{SwapTransport, TransportKind}`, `crate::config::SerialConfig` (Task 1).
 - Produces:
-  - `Engine::set_transport_kind(&mut self, kind: TransportKind)` - used by `build_engine` (Task 5).
+  - `Engine::set_transport_kind(&mut self, kind: TransportKind)`, used by `build_engine` (Task 5).
   - `Engine::transport_kind(&self) -> &TransportKind`.
-  - `Engine::swap_transport(&mut self, serial: &SerialConfig, pump_addr: u8) -> Result<TransportKind>` - `Err(EngineError::Busy)` while a run is active; otherwise rebuilds the pump transport, updates the recorded kind, returns it. In `impl<T: Transport + SwapTransport> Engine<T>`.
-  - `EngineStatus { active: Option<ActiveStatus>, transport: String }` - new `transport` field (`"sim"` or port name).
+  - `Engine::swap_transport(&mut self, serial: &SerialConfig, pump_addr: u8) -> Result<TransportKind>`, `Err(EngineError::Busy)` while a run is active; otherwise rebuilds the pump transport, updates the recorded kind, returns it. In `impl<T: Transport + SwapTransport> Engine<T>`.
+  - `EngineStatus { active: Option<ActiveStatus>, transport: String }`, new `transport` field (`"sim"` or port name).
 
 - [ ] **Step 1: Write failing tests**
 
@@ -302,10 +302,10 @@ Add to the `#[cfg(test)] mod tests` block in `crates/fermentool-core/src/engine/
     }
 ```
 
-- [ ] **Step 2: Run them - expect FAIL**
+- [ ] **Step 2: Run them, expect FAIL**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core engine::tests::swap_transport 2>&1 | tail -20`
-Expected: compile error - `no method named swap_transport` / `no field transport` / `transport_kind` not found.
+Expected: compile error, `no method named swap_transport` / `no field transport` / `transport_kind` not found.
 
 - [ ] **Step 3: Add the imports**
 
@@ -327,7 +327,7 @@ pub struct Engine<T: Transport> {
     store: Store,
     app_version: String,
     active: Option<ActiveRun>,
-    /// Which transport the pump is currently driving - for the status frame.
+    /// Which transport the pump is currently driving, for the status frame.
     transport: TransportKind,
 }
 ```
@@ -368,7 +368,7 @@ Add a new `impl` block immediately after the `impl<T: Transport> Engine<T>` bloc
 ```rust
 impl<T: Transport + SwapTransport> Engine<T> {
     /// Rebuild the pump transport in place from `serial` (simulator ⇄ real
-    /// port). Refused while a run is active - stop the run first. Returns the
+    /// port). Refused while a run is active, stop the run first. Returns the
     /// transport now in use (which may be the simulator if the port failed to
     /// open).
     pub fn swap_transport(
@@ -399,7 +399,7 @@ pub struct EngineStatus {
 }
 ```
 
-`Engine::status` (~line 176) - add the field to the returned literal:
+`Engine::status` (~line 176), add the field to the returned literal:
 
 ```rust
     pub fn status(&self) -> EngineStatus {
@@ -418,7 +418,7 @@ pub struct EngineStatus {
     }
 ```
 
-- [ ] **Step 7: Run the engine tests - expect PASS**
+- [ ] **Step 7: Run the engine tests, expect PASS**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core engine::`
 Expected: the 3 new tests pass; all existing `engine::tests::*` still pass.
@@ -436,18 +436,18 @@ git commit -m "core/engine: record the live transport, add swap_transport (idle 
 
 **Files:**
 - Modify: `crates/fermentool-core/src/control.rs`
-  - `use` block - add `use crate::config::SerialConfig;` and `use crate::transport::{SwapTransport, TransportKind};`
-  - `Command` enum (~line 33) - add `Reconnect { .. }`
-  - `DaemonStatus` struct (~line 58) - add `transport: String`
-  - `current_status` (~line 108) - populate it
-  - `spawn` bound (~line 122), `control_loop` bound (~line 142), `handle` bound (~line 259) - add `+ SwapTransport`
-  - `handle` match (~line 261) - add the `Command::Reconnect` arm
+  - `use` block, add `use crate::config::SerialConfig;` and `use crate::transport::{SwapTransport, TransportKind};`
+  - `Command` enum (~line 33), add `Reconnect { .. }`
+  - `DaemonStatus` struct (~line 58), add `transport: String`
+  - `current_status` (~line 108), populate it
+  - `spawn` bound (~line 122), `control_loop` bound (~line 142), `handle` bound (~line 259), add `+ SwapTransport`
+  - `handle` match (~line 261), add the `Command::Reconnect` arm
 - Test: inline `#[cfg(test)] mod tests` (helpers `spawn`, `Command`, `cadence_run()` already there)
 
 **Interfaces:**
 - Consumes: `Engine::swap_transport` (Task 2); `crate::config::SerialConfig`; `crate::transport::TransportKind`.
 - Produces:
-  - `Command::Reconnect { serial: SerialConfig, pump_addr: u8, reply: oneshot::Sender<Result<String, String>> }` - reply is `Ok(human message)` or `Err("a run is already active")`.
+  - `Command::Reconnect { serial: SerialConfig, pump_addr: u8, reply: oneshot::Sender<Result<String, String>> }`, reply is `Ok(human message)` or `Err("a run is already active")`.
   - `DaemonStatus { app_version, active, has_pending_recovery, transport: String }`.
 
 - [ ] **Step 1: Write failing tests**
@@ -504,10 +504,10 @@ Add to `#[cfg(test)] mod tests` in `crates/fermentool-core/src/control.rs`:
     }
 ```
 
-- [ ] **Step 2: Run them - expect FAIL**
+- [ ] **Step 2: Run them, expect FAIL**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core control::tests::reconnect 2>&1 | tail -20`
-Expected: compile error - no variant `Reconnect` on `Command`.
+Expected: compile error, no variant `Reconnect` on `Command`.
 
 - [ ] **Step 3: Add the imports**
 
@@ -549,7 +549,7 @@ pub struct DaemonStatus {
 }
 ```
 
-`current_status` (~line 108) - bind the status once and forward the field:
+`current_status` (~line 108), bind the status once and forward the field:
 
 ```rust
 pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> DaemonStatus {
@@ -566,7 +566,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
 }
 ```
 
-(`current_status` stays `T: Transport` - it only reads.)
+(`current_status` stays `T: Transport`, it only reads.)
 
 - [ ] **Step 6: Widen the trait bounds**
 
@@ -612,7 +612,7 @@ In `handle`'s `match cmd` (~line 261), after the `Command::Preview` arm and befo
                 .map(|kind| match kind {
                     TransportKind::Serial(name) => format!("serial port open: {name}"),
                     TransportKind::Sim if wanted_serial => format!(
-                        "could not open {} - running on the pump simulator",
+                        "could not open {}, running on the pump simulator",
                         serial.path
                     ),
                     TransportKind::Sim => "running on the pump simulator".to_string(),
@@ -623,7 +623,7 @@ In `handle`'s `match cmd` (~line 261), after the `Command::Preview` arm and befo
         }
 ```
 
-- [ ] **Step 8: Run the control tests - expect PASS**
+- [ ] **Step 8: Run the control tests, expect PASS**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core control::`
 Expected: both new tests pass; existing `control::tests::*` (cadence, setpoint) still pass.
@@ -648,7 +648,7 @@ git commit -m "core/control: Command::Reconnect + transport field on DaemonStatu
 
 **Interfaces:**
 - Consumes: `Command::Reconnect` (Task 3); `AppState` (`config: Arc<RwLock<Config>>`, `config_path: Arc<PathBuf>`, `control`); `Config::save`.
-- Produces: `POST /api/serial/reconnect`, JSON body `{ "path"?: string, "baud"?: number }` - `200 { "connected": "<message>" }`; `409` if a run is active; `400` on config-save failure or a body that isn't valid JSON; `503` if the control thread is gone.
+- Produces: `POST /api/serial/reconnect`, JSON body `{ "path"?: string, "baud"?: number }`, `200 { "connected": "<message>" }`; `409` if a run is active; `400` on config-save failure or a body that isn't valid JSON; `503` if the control thread is gone.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -726,7 +726,7 @@ Add to `#[cfg(test)] mod tests` in `crates/fermentool-core/src/api.rs`:
     }
 ```
 
-- [ ] **Step 2: Run them - expect FAIL**
+- [ ] **Step 2: Run them, expect FAIL**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core api::tests::reconnect 2>&1 | tail -20`
 Expected: `404 Not Found` from the router (route missing) → assertions fail.
@@ -789,7 +789,7 @@ async fn serial_reconnect(
 }
 ```
 
-- [ ] **Step 5: Run the api tests - expect PASS**
+- [ ] **Step 5: Run the api tests, expect PASS**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test -p fermentool-core api::`
 Expected: the 4 new tests pass; existing `api::tests::*` still pass.
@@ -798,7 +798,7 @@ Expected: the 4 new tests pass; existing `api::tests::*` still pass.
 
 ```bash
 git add crates/fermentool-core/src/api.rs
-git commit -m "api: POST /api/serial/reconnect - persist + hot-swap the transport"
+git commit -m "api: POST /api/serial/reconnect, persist + hot-swap the transport"
 ```
 
 ---
@@ -807,9 +807,9 @@ git commit -m "api: POST /api/serial/reconnect - persist + hot-swap the transpor
 
 **Files:**
 - Modify: `crates/fermentool-core/src/main.rs`
-  - `build_engine` (~line 86) - use `fermentool_core::transport::open` + `set_transport_kind`
-  - `use` block (~line 25-26) - drop `SerialTransport` and `SimPump` (now unused); keep `Pump`, `Transport`
-  - `use std::time::Duration;` (~line 14) - drop if `cargo build` reports it unused after the change
+  - `build_engine` (~line 86), use `fermentool_core::transport::open` + `set_transport_kind`
+  - `use` block (~line 25-26), drop `SerialTransport` and `SimPump` (now unused); keep `Pump`, `Transport`
+  - `use std::time::Duration;` (~line 14), drop if `cargo build` reports it unused after the change
 
 **Interfaces:**
 - Consumes: `fermentool_core::transport::open` (Task 1), `Engine::set_transport_kind` (Task 2).
@@ -844,17 +844,17 @@ to:
 use fermentool_modbus::{Pump, Transport};
 ```
 
-- [ ] **Step 3: Build the binary - expect success, no warnings**
+- [ ] **Step 3: Build the binary, expect success, no warnings**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo build -p fermentool-core --bin fermentool-core 2>&1 | tail -20`
 Expected: `Finished`. If it warns `unused import: std::time::Duration` or similar, delete that `use` line and rebuild.
 
-- [ ] **Step 4: Full workspace test - expect PASS**
+- [ ] **Step 4: Full workspace test, expect PASS**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo test 2>&1 | tail -30`
 Expected: all crates' tests pass.
 
-- [ ] **Step 5: Clippy - expect clean**
+- [ ] **Step 5: Clippy, expect clean**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo clippy --all-targets 2>&1 | tail -20`
 Expected: no warnings in the changed files.
@@ -868,7 +868,7 @@ git commit -m "core/main: build_engine goes through transport::open"
 
 ---
 
-## Task 6: Settings page - Rescan, Connect now, "Connected to"
+## Task 6: Settings page, Rescan, Connect now, "Connected to"
 
 **Files:**
 - Modify: `ui/src/routes/Settings.svelte`
@@ -917,7 +917,7 @@ In `ui/src/routes/Settings.svelte`, replace lines 1-37 (`<script> … </script>`
         path: cfg.serial.path,
         baud: cfg.serial.baud,
       });
-      msg = r.connected ? `Connected - ${r.connected}` : 'Reconnected.';
+      msg = r.connected ? `Connected, ${r.connected}` : 'Reconnected.';
     } catch (e) {
       err = e.message;
     }
@@ -930,7 +930,7 @@ In `ui/src/routes/Settings.svelte`, replace lines 1-37 (`<script> … </script>`
     msg = null;
     try {
       const r = await put('/api/config', cfg);
-      msg = r.note ? `Saved - ${r.note}` : 'Saved.';
+      msg = r.note ? `Saved, ${r.note}` : 'Saved.';
     } catch (e) {
       err = e.message;
     }
@@ -956,7 +956,7 @@ Replace the single `<label class="field">` block for the serial port (lines 53-5
       <label class="field"><span>Serial port ("sim" for the simulator)</span>
         <input type="text" list="ports" bind:value={cfg.serial.path} />
         <datalist id="ports">
-          {#each ports as p}<option value={p.name}>{p.name} - {p.product ?? p.kind}</option>{/each}
+          {#each ports as p}<option value={p.name}>{p.name}, {p.product ?? p.kind}</option>{/each}
           <option value="sim">sim</option>
         </datalist>
         <div class="port-row">
@@ -964,7 +964,7 @@ Replace the single `<label class="field">` block for the serial port (lines 53-5
           <button type="button" class="btn-ghost" disabled={reconnecting} onclick={reconnect}>
             {reconnecting ? 'Connecting…' : 'Connect now'}
           </button>
-          <span class="port-now">Connected to: <b>{app.status?.transport ?? '-'}</b></span>
+          <span class="port-now">Connected to: <b>{app.status?.transport ?? ', '}</b></span>
         </div>
         {#if portErr}<div class="err" style="margin-top:8px">{portErr}</div>{/if}
       </label>
@@ -993,9 +993,9 @@ Expected: `vite build` completes; `ui/dist/` updated. (Run from a shell where `n
 - [ ] **Step 5: Manual smoke test**
 
 Run the daemon: `export PATH="$HOME/.cargo/bin:$PATH" && cargo run -p fermentool-core --bin fermentool-core` (leave it running in another shell), open `http://127.0.0.1:8730/`, go to **Settings**:
-- Click **Rescan** - the port list refreshes; if `/api/serial/ports` errors it shows under the field instead of silently doing nothing.
-- With no run active, type/pick `COM3` (or the port from Task-0 discovery), click **Connect now** - a green "Connected - serial port open: COM3" (or "could not open … simulator") message appears, and "Connected to:" updates.
-- Start a run, then **Connect now** - a red "a run is already active" message; the transport does not change.
+- Click **Rescan**, the port list refreshes; if `/api/serial/ports` errors it shows under the field instead of silently doing nothing.
+- With no run active, type/pick `COM3` (or the port from Task-0 discovery), click **Connect now**, a green "Connected, serial port open: COM3" (or "could not open … simulator") message appears, and "Connected to:" updates.
+- Start a run, then **Connect now**, a red "a run is already active" message; the transport does not change.
 
 - [ ] **Step 6: Commit**
 
@@ -1024,18 +1024,18 @@ git commit -m "ui/Settings: rescan ports + connect to a serial port without rest
 
 No gaps.
 
-**2. Placeholder scan** - no `TBD`/`TODO`/"handle edge cases"/"similar to Task N"; every code step has full code; the one conditional step (Task 5 Step 3, drop `Duration` import only if it warns) has an explicit trigger and action.
+**2. Placeholder scan**, no `TBD`/`TODO`/"handle edge cases"/"similar to Task N"; every code step has full code; the one conditional step (Task 5 Step 3, drop `Duration` import only if it warns) has an explicit trigger and action.
 
 **3. Type consistency**
 
-- `TransportKind` - defined `crate::transport` (Task 1); imported in `engine` (Task 2) and `control` (Task 3); `.label()` used in `Engine::status` (Task 2) and `current_status` (Task 3). ✓
-- `SwapTransport` - defined Task 1; bound added to `Engine` impl block (Task 2) and `spawn`/`control_loop`/`handle` (Task 3). `SimPump: SwapTransport` (Task 1) covers `engine()` test helper (`Engine<SimPump>`) and api/control test states. ✓
-- `open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>, TransportKind)` - same signature in Task 1 def, Task 1 `SwapTransport for Box` impl, Task 5 `build_engine`. ✓
-- `Engine::swap_transport(&mut self, serial: &SerialConfig, pump_addr: u8) -> Result<TransportKind>` - Task 2 def; called in Task 3 `handle` with `(&serial, pump_addr)`. `Result` is engine's alias `Result<T, EngineError>`. ✓
-- `Command::Reconnect { serial: SerialConfig, pump_addr: u8, reply: oneshot::Sender<Result<String, String>> }` - Task 3 def; constructed in Task 3 tests and Task 4 handler with the same field names. ✓
-- `EngineStatus { active, transport: String }` - Task 2; consumed in Task 3 `current_status` as `st.transport`. ✓
-- `DaemonStatus { app_version, active, has_pending_recovery, transport: String }` - Task 3; serialised to JSON, read by UI as `app.status.transport` (Task 6). ✓
-- `SerialConfig::use_simulator()` - Task 1; used in Task 1 `open`, Task 3 `handle` arm. ✓
-- API: `ReconnectReq { path: Option<String>, baud: Option<u32> }`, response `{ "connected": <string> }` - Task 4 def; UI posts `{path, baud}` and reads `r.connected` (Task 6). ✓
+- `TransportKind`, defined `crate::transport` (Task 1); imported in `engine` (Task 2) and `control` (Task 3); `.label()` used in `Engine::status` (Task 2) and `current_status` (Task 3). ✓
+- `SwapTransport`, defined Task 1; bound added to `Engine` impl block (Task 2) and `spawn`/`control_loop`/`handle` (Task 3). `SimPump: SwapTransport` (Task 1) covers `engine()` test helper (`Engine<SimPump>`) and api/control test states. ✓
+- `open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>, TransportKind)`, same signature in Task 1 def, Task 1 `SwapTransport for Box` impl, Task 5 `build_engine`. ✓
+- `Engine::swap_transport(&mut self, serial: &SerialConfig, pump_addr: u8) -> Result<TransportKind>`, Task 2 def; called in Task 3 `handle` with `(&serial, pump_addr)`. `Result` is engine's alias `Result<T, EngineError>`. ✓
+- `Command::Reconnect { serial: SerialConfig, pump_addr: u8, reply: oneshot::Sender<Result<String, String>> }`, Task 3 def; constructed in Task 3 tests and Task 4 handler with the same field names. ✓
+- `EngineStatus { active, transport: String }`, Task 2; consumed in Task 3 `current_status` as `st.transport`. ✓
+- `DaemonStatus { app_version, active, has_pending_recovery, transport: String }`, Task 3; serialised to JSON, read by UI as `app.status.transport` (Task 6). ✓
+- `SerialConfig::use_simulator()`, Task 1; used in Task 1 `open`, Task 3 `handle` arm. ✓
+- API: `ReconnectReq { path: Option<String>, baud: Option<u32> }`, response `{ "connected": <string> }`, Task 4 def; UI posts `{path, baud}` and reads `r.connected` (Task 6). ✓
 
 Consistent.

@@ -42,7 +42,7 @@
       .catch((e) => (err = e.message));
   });
 
-  // Clicking a row opens its read-only detail - except a still-running run,
+  // Clicking a row opens its read-only detail, except a still-running run,
   // which jumps to the live Overview instead.
   function pick(r) {
     if (r.status === 'running') {
@@ -54,7 +54,7 @@
 
   // The server caps one /ticks response at 50 000 rows (seq window), so a run
   // longer than ~14 h needs several pages. Walk seq from 0 until a window comes
-  // back that doesn't reach its own end - that's the last of the ticks.
+  // back that doesn't reach its own end, that's the last of the ticks.
   async function fetchAllTicks(id) {
     const SPAN = 50000; // must match the daemon's MAX_TICKS_SPAN
     const all = [];
@@ -107,7 +107,7 @@
   }
 
   // A 100 h run journals ~360k ticks; drawing them all is a 360k-segment SVG
-  // path that locks the tab. Downsample to a few thousand for the chart only -
+  // path that locks the tab. Downsample to a few thousand for the chart only,
   // the CSV export still uses the full set.
   const chartActual = $derived.by(() => {
     if (!sel) return [];

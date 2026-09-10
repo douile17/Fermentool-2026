@@ -1,4 +1,4 @@
-# Fermentool - Implementation Plan (Phase 1)
+# Fermentool, Implementation Plan (Phase 1)
 
 > Status: design agreed 2026-09-01. This document is the reference for the initial build.
 > Conversation language: French. Code, comments, logs, UI, and this doc: English.
@@ -27,7 +27,7 @@ PC ──USB── [isolated FTDI USB↔RS485 adapter] ──A/B/GND── LabQ 
   (e.g. Waveshare "USB TO RS485 (isolated)", DSD TECH SH-U12, FTDI USB-RS485-WE cable).
   Galvanic isolation matters in a wet lab over a 100 h run.
 - Serial line to pump: **8E1** (1 start, 8 data, 1 **even** parity, 1 stop), baud
-  1200/2400/4800/9600 - default **9600**. Pump slave address default **1**.
+  1200/2400/4800/9600, default **9600**. Pump slave address default **1**.
 - "Hold last setpoint on PC death" is inherent: once the pump has received `start` + a
   speed, it runs indefinitely with no further frames.
 
@@ -78,12 +78,12 @@ in isolation; the daemon wires them to serial + HTTP + storage.
 
 ### 4.2 Task layout
 
-- **engine task** - owns the run state machine and the tick loop; the *only* task that
+- **engine task**, owns the run state machine and the tick loop; the *only* task that
   talks to the pump (via an `mpsc` command queue so the API never touches serial).
-- **api task** - axum server on `127.0.0.1:<port>` (default 8730); serves embedded UI,
+- **api task**, axum server on `127.0.0.1:<port>` (default 8730); serves embedded UI,
   REST, and a WS broadcast channel fed by the engine.
-- **serial-health task** - folded into the engine: reopen with backoff on error.
-- **supervisor** - `main.rs` runs the engine loop inside `catch_unwind` + restart with
+- **serial-health task**, folded into the engine: reopen with backoff on error.
+- **supervisor**, `main.rs` runs the engine loop inside `catch_unwind` + restart with
   backoff; a panic is logged as an `event`, never a process exit. OS-level restart
   (systemd `Restart=always` / Windows Task Scheduler / launchd `KeepAlive`) is the outer
   safety net and is documented in `docs/service-install.md`.
@@ -104,7 +104,7 @@ Register map (decimal address; source = `LabQ Series MODBUS protocol.md`):
 | 1009 | Back-suction angle | u16 (06H) | 0–360° |
 
 Float encoding: IEEE-754, **big-endian word order** (`8.9 → 41 0E 66 66`). CRC-16
-`poly 0xA001, init 0xFFFF`, low byte then high byte - own implementation
+`poly 0xA001, init 0xFFFF`, low byte then high byte, own implementation
 (`fermentool_modbus::crc16`), no external MODBUS crate.
 
 **Byte-exact test vectors** (must match the doc):
@@ -146,10 +146,10 @@ struct Pump<T: Transport> { transport: T, address: u8 }   // impls PumpTransport
 ```
 
 `Transport` implementations:
-- `SimPump` - a real register-level model (regs 1000–1009) driven by real request
+- `SimPump`, a real register-level model (regs 1000–1009) driven by real request
   frames, with fault injection (`drop_next`, `next_exception`). Used by every engine
   test. Holds its last speed, exactly like the real pump on comms loss.
-- `serial::SerialTransport` (cargo feature `serial`, default on) - blocking
+- `serial::SerialTransport` (cargo feature `serial`, default on), blocking
   `serialport` at fixed 8E1; `serial::available_ports()` enumerates ports (name, USB
   VID:PID, manufacturer/product) for the `/api/serial/ports` picker and the
   Settings "choose port & Connect" flow. `--no-default-features` builds the pure
@@ -176,7 +176,7 @@ impl CurveSpec {
 }
 ```
 
-Implemented in milestone 2. `kind` is not a stored field - it is derived from
+Implemented in milestone 2. `kind` is not a stored field, it is derived from
 `params` so the two can never disagree.
 
 Let `p = clamp(elapsed / duration, 0.0, 1.0)`, `S = start`, `E = end`, `D = duration` (hours).
@@ -215,16 +215,16 @@ loop {
 
 - `TICK_INTERVAL` = **1 s, fixed** (not user-tunable). Far finer than any run needs
   (a 100 h profile moves the setpoint a tiny fraction per second) and far coarser than
-  one MODBUS transaction (~tens of ms) - ~10x headroom, no "slave busy" risk. Faster
+  one MODBUS transaction (~tens of ms), ~10x headroom, no "slave busy" risk. Faster
   would only bloat the journal/bus with no physical gain. Journal ≈ 360 k rows / 100 h.
 - Wall-clock elapsed (not an accumulator) so a paused/late/frozen process still computes
-  the *correct* setpoint for real time - this is what makes resume trivially correct.
+  the *correct* setpoint for real time, this is what makes resume trivially correct.
 - A missed/failed write is logged (`written_ok = 0`) and simply retried next tick; the
   pump holds its previous speed meanwhile.
 
-### 4.6 Persistence - SQLite (`store/`)
+### 4.6 Persistence, SQLite (`store/`)
 
-`PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;` - crash-safe, cost negligible at
+`PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;`, crash-safe, cost negligible at
 ~1 write / 10 s. DB path from config (default OS data dir: `%APPDATA%/Fermentool`,
 `~/.local/share/fermentool`, `~/Library/Application Support/Fermentool`).
 
@@ -271,7 +271,7 @@ CREATE TABLE events (
 CREATE TABLE app_state (key TEXT PRIMARY KEY, value TEXT);  -- schema_version, ...
 ```
 
-Migrations: hand-rolled - a `&[Migration { version, sql }]` slice (SQL via
+Migrations: hand-rolled, a `&[Migration { version, sql }]` slice (SQL via
 `include_str!`), applied in one transaction to any migration whose version exceeds
 `PRAGMA user_version`, then `user_version` is bumped. No migration-framework dependency.
 
@@ -290,8 +290,8 @@ On startup, after migrations:
    - `elapsed > duration + grace` → the curve finished while offline. Modal offers
      **[Finish (hold at end value / stop)] [Abort]**.
 4. **Resume** ⇒ re-run the full **start sequence** (direction, head/tubing, first
-   setpoint from `curve.value_at(elapsed)`, start) - the pump may have been
-   power-cycled while the PC was down - set `status='running'`, `event(resume)`, and the
+   setpoint from `curve.value_at(elapsed)`, start), the pump may have been
+   power-cycled while the PC was down, set `status='running'`, `event(resume)`, and the
    tick loop continues from `elapsed`. `started_at` is **unchanged** so timing stays
    absolute.
 5. Auto-resume option in config (`resume.prompt = true|false`); default **prompt**.
@@ -369,16 +369,16 @@ Charts: **uPlot** (tiny, fast time-series). No backend framework, just `fetch` +
 
 **Sections (phase 1):**
 
-1. **Top bar** - serial status ●, pump status ●, wall clock, run clock, app version.
-2. **New run** - form: name · control variable (rpm / ml·min⁻¹) · direction (CW/CCW) ·
+1. **Top bar**, serial status ●, pump status ●, wall clock, run clock, app version.
+2. **New run**, form: name · control variable (rpm / ml·min⁻¹) · direction (CW/CCW) ·
    duration · tick interval · curve kind · mode toggle (Endpoints / Physiological) ·
    dynamic parameter fields · min/max clamp · pump address · (head + tubing if ml/min).
    **Live preview chart** (calls `/api/preview` on change). "Start run" button.
-3. **Active run** - large current setpoint readout · elapsed / remaining / progress bar ·
+3. **Active run**, large current setpoint readout · elapsed / remaining / progress bar ·
    **planned curve vs. actual points** chart (uPlot, live via WS) · event log · "Stop".
-4. **History** - table of past runs → open one → chart + "Export CSV".
-5. **Resume modal** - shown on load when the daemon reports `crash_detected`.
-6. **Settings** - serial port picker (`/api/serial/ports`), baud, address, data dir,
+4. **History**, table of past runs → open one → chart + "Export CSV".
+5. **Resume modal**, shown on load when the daemon reports `crash_detected`.
+6. **Settings**, serial port picker (`/api/serial/ports`), baud, address, data dir,
    UI port, resume-prompt toggle; "Probe pump" diagnostic button.
 
 **Disabled/placeholder tabs** (visible, not clickable): *Sensors*, *Camera*, *Data export*.
@@ -389,18 +389,18 @@ restart loses nothing.
 
 ## 6. Testing strategy
 
-- **Unit (`fermentool-curves`)** - invariants in §4.4; property tests (`proptest`) for
+- **Unit (`fermentool-curves`)**, invariants in §4.4; property tests (`proptest`) for
   bounds/monotonicity; golden values for exp & sigmoid.
-- **Unit (`fermentool-modbus`)** - CRC vectors + byte-exact frame builders vs. the four
+- **Unit (`fermentool-modbus`)**, CRC vectors + byte-exact frame builders vs. the four
   doc examples; float encode/decode round-trips incl. `8.9 → 41 0E 66 66`.
-- **Engine integration** - against `SimPump`: run a compressed profile (tick 1 s,
+- **Engine integration**, against `SimPump`: run a compressed profile (tick 1 s,
   duration 300 s); mid-run `SIGKILL`/panic; restart; assert the resumed setpoint equals
   `curve.value_at(real_elapsed)` within tolerance and that `started_at` is unchanged.
-- **Comms-loss** - `SimPump` drops ACKs for N ticks: assert no crash, `written_ok=0`
+- **Comms-loss**, `SimPump` drops ACKs for N ticks: assert no crash, `written_ok=0`
   rows, recovery `event`s, pump still at last speed.
-- **Soak** - 100 h+ `SimPump` run (nightly / long local): assert flat RSS, no panics,
+- **Soak**, 100 h+ `SimPump` run (nightly / long local): assert flat RSS, no panics,
   `integrity_check = ok`, tick count == expected.
-- **Hardware bring-up** - `cargo run -- probe` against the real pump; a short real ramp
+- **Hardware bring-up**, `cargo run -- probe` against the real pump; a short real ramp
   with a beaker before the first real ferment.
 
 ## 7. Build & packaging
@@ -419,45 +419,45 @@ restart loses nothing.
 
 ## 8. Milestones (build order)
 
-1. **Scaffold** - workspace, three crates, `ui/` Vite app, CI, this doc wired to README. ✅
-2. **`fermentool-curves`** - all kinds + both modes + tests + `preview()` + `validate()`. ✅
+1. **Scaffold**, workspace, three crates, `ui/` Vite app, CI, this doc wired to README. ✅
+2. **`fermentool-curves`**, all kinds + both modes + tests + `preview()` + `validate()`. ✅
    (Design language captured in `docs/DESIGN.md` alongside this milestone.)
-3. **`fermentool-modbus`** - CRC + `f32` encoding + register map + `frame` builders/
+3. **`fermentool-modbus`**, CRC + `f32` encoding + register map + `frame` builders/
    parsers + `Transport`/`PumpTransport`/`Pump` + `SimPump` (fault injection) +
    `serial::SerialTransport` & `available_ports()`. ✅
-4. **`store/`** - SQLite (rusqlite bundled, WAL + synchronous=FULL), hand-rolled
+4. **`store/`**, SQLite (rusqlite bundled, WAL + synchronous=FULL), hand-rolled
    `user_version` migrations, `Store` with run/tick/event/app_state repos, one-running-run
    partial unique index, `integrity_check`. Timestamps via `jiff`. ✅
-5. **`engine/`** - `Engine<T: Transport>`: `start_run` (clamp∩pump-limits, validate,
+5. **`engine/`**, `Engine<T: Transport>`: `start_run` (clamp∩pump-limits, validate,
    pump start sequence, insert run), `tick(now)` (wall-clock elapsed → `value_at` → pump
    write → `append_tick`; write failure journalled, run continues; auto-finish at
    duration), `stop_run` / `abort_run`, `status()`. Time injected → 100 h run tested in
    ms. `run_blocking` real-time runner (supervised wrapper is m7). ✅
-6. **Recovery** - `Engine::pending_recovery(now, grace)` (read-only: finds a `running`
+6. **Recovery**, `Engine::pending_recovery(now, grace)` (read-only: finds a `running`
    run left by an unclean stop, computes elapsed + `resume_target` + `past_end`),
    `resume(now, grace)` (re-runs the full pump start sequence at `value_at(elapsed)`,
    continues ticking from `last_seq+1`; `started_at` unchanged; refused past
    `duration+grace`), `discard_recovery(now, terminal_status)`. `crash_detected` +
    `resume` events. Tested via a real tempfile DB across dropped `Engine`s. ✅
-7. **API + config** - `config.rs` (defaulted `config.toml`, load-or-create). `control.rs`:
+7. **API + config**, `config.rs` (defaulted `config.toml`, load-or-create). `control.rs`:
    the `Engine` lives on one dedicated OS thread; the async side sends `Command`s over a
    channel and awaits `oneshot` replies; `recv_timeout(next_tick)` keeps ticks on cadence;
-   every command/tick runs in `catch_unwind`. `api.rs`: axum REST on `127.0.0.1` -
+   every command/tick runs in `catch_unwind`. `api.rs`: axum REST on `127.0.0.1`,
    status / config (GET+PUT) / preview / runs (list, create=start, get, ticks, events,
    stop, abort) / recovery (get, resume, discard) / serial ports / shutdown. Simulator
    fallback (`serial.path = "sim"` or open failure). Rolling-file `tracing`. Port-in-use =
    single-instance guard. Graceful shutdown on ctrl-c or `POST /api/shutdown`. WS push +
    static-UI serving deferred to m8. ✅
-8. **UI** - (a) daemon side: `GET /api/ws` broadcasts `DaemonStatus` on every state
+8. **UI**, (a) daemon side: `GET /api/ws` broadcasts `DaemonStatus` on every state
    change; `rust-embed` bakes `ui/dist/` in, router fallback serves it (SPA). (b) Svelte
    app: nav rail + Overview (idle empty-state / active hero with Start→Now→Target band,
    live progress, planned-vs-actual chart, journal, Stop), New run (curve builder +
    debounced preview), History (list + detail + CSV), Settings (config form + shutdown),
    ResumeModal. Hand-rolled SVG `Chart`. White-dominant per `docs/DESIGN.md`. ✅
-9. **Package** - `ui/dist` committed so the crate builds without Node; still to do:
+9. **Package**, `ui/dist` committed so the crate builds without Node; still to do:
    per-OS release binaries, service files.
-10. **Soak + field test** - 100 h sim, then real pump bring-up.
-11. **Docs** - README, `wiring.md`, `service-install.md`.
+10. **Soak + field test**, 100 h sim, then real pump bring-up.
+11. **Docs**, README, `wiring.md`, `service-install.md`.
 
 ## 9. Reserved for later (design now, don't build)
 
@@ -467,10 +467,10 @@ restart loses nothing.
   *Camera* tab. (ESP32-S3 hub optional, out of the control path.)
 - Data export: Parquet/CSV bundles, run comparison overlay.
 - Multi-pump: RS485 multi-drop, per-run `pump_addr` already in the schema.
-- Native WebView shell - **done for Windows** (`src-tauri/`, Tauri v2: window +
+- Native WebView shell, **done for Windows** (`src-tauri/`, Tauri v2: window +
   tray, detached daemon, NSIS installer that registers an at-logon task). "No
   core changes" was relaxed to a single `CorsLayer` (the bundled UI is a
-  separate origin) - see
+  separate origin), see
   `docs/superpowers/specs/2026-09-10-tauri-webview-shell-design.md` and
   `docs/superpowers/plans/2026-09-10-tauri-desktop-shell.md`. Linux/macOS
   shells still open.

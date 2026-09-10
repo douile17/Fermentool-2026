@@ -14,7 +14,7 @@
   });
 
   // Fields this page owns. serial.path and pump.address live in the connection
-  // bar and may have changed there since this page loaded - merge our fields
+  // bar and may have changed there since this page loaded, merge our fields
   // onto the current server config instead of round-tripping a stale snapshot.
   async function save() {
     saving = true;
@@ -74,7 +74,7 @@
 
       <label class="field check">
         <input type="checkbox" bind:checked={cfg.serial.allow_simulator} />
-        <span>Allow runs on the pump simulator (bench testing - no real pump)</span>
+        <span>Allow runs on the pump simulator (bench testing, no real pump)</span>
       </label>
 
       <label class="field"><span>Resume grace (minutes)</span>

@@ -11,7 +11,7 @@
 
   const unit = $derived(unitFor(info.control_var));
   const digits = $derived(digitsFor(info.control_var));
-  // Resuming drives the pump, so it needs a live link - same gate as a new run.
+  // Resuming drives the pump, so it needs a live link, same gate as a new run.
   const blocked = $derived(!canStartRun(app.status));
 
   async function act(fn) {
@@ -51,7 +51,7 @@
     {#if err}<div class="err">{err}</div>{/if}
     {#if blocked && !info.past_end}
       <div class="err">
-        The pump link is down - resuming isn't possible until it's back (or simulator runs are
+        The pump link is down, resuming isn't possible until it's back (or simulator runs are
         enabled in Settings). You can still finish or abort the run.
       </div>
     {/if}
