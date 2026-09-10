@@ -4,6 +4,7 @@
   import { unitFor, digitsFor } from '../lib/fmt.js';
   import { app } from '../lib/state.svelte.js';
   import { canStartRun } from '../lib/link.js';
+  import ErrorText from './ErrorText.svelte';
 
   let { info, ondone } = $props();
   let busy = $state(false);
@@ -21,7 +22,7 @@
       await fn();
       ondone();
     } catch (e) {
-      err = e.message;
+      err = { message: e.message, hint: e.hint ?? null };
       busy = false;
     }
   }
@@ -48,7 +49,7 @@
       {/if}
     </p>
 
-    {#if err}<div class="err">{err}</div>{/if}
+    {#if err}<ErrorText message={err.message} hint={err.hint} />{/if}
     {#if blocked && !info.past_end}
       <div class="err">
         The pump link is down, resuming isn't possible until it's back (or simulator runs are

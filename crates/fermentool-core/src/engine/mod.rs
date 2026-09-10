@@ -50,14 +50,29 @@ pub enum EngineError {
     /// (`serial.allow_simulator`), starting/resuming a run would drive nothing.
     SimulatorNotAllowed,
     /// The pump answered a setpoint write with a MODBUS exception (typically
-    /// `0x03` illegal data value), the frame was fine, the pump refused the
-    /// value. On the LabQ this is almost always a ml/min setpoint with no
-    /// head / tubing calibration set on the pump itself.
+    /// `0x03`, illegal data value): the frame was well-formed, the pump refused
+    /// the value. On the LabQ this is a ml/min setpoint above the flow the
+    /// configured pump head + tubing can deliver (or with no head/tubing set at
+    /// all). The one-line [`Display`](std::fmt::Display) stays terse; the
+    /// actionable detail is in [`EngineError::hint`].
     PumpRejectedSetpoint {
         code: u8,
         control_var: ControlVar,
         value: f64,
     },
+}
+
+/// Structured error for the HTTP API: a one-line `message` (the [`Display`] of
+/// an [`EngineError`]), a stable `code` for the UI to switch on, and an
+/// optional longer `hint` it can reveal on demand.
+///
+/// [`Display`]: std::fmt::Display
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrDetail {
+    pub message: String,
+    pub code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 impl std::fmt::Display for EngineError {
@@ -87,23 +102,67 @@ impl std::fmt::Display for EngineError {
                 };
                 write!(
                     f,
-                    "the pump refused the {value:.3} {unit} setpoint (MODBUS exception 0x{code:02X}, {}).",
+                    "the pump refused the {value:.3} {unit} setpoint (MODBUS 0x{code:02X}: {})",
                     fermentool_modbus::exception_name(*code)
-                )?;
-                match control_var {
-                    ControlVar::MlMin => write!(
-                        f,
-                        " The LabQ only accepts a ml/min setpoint once a pump head and tubing size \
-                         are configured on the pump itself. Set them on the pump's panel, or run \
-                         this cycle in rpm."
-                    ),
-                    ControlVar::Rpm => write!(
-                        f,
-                        " The value is outside the range the pump accepts for its configured \
-                         head / tubing."
-                    ),
-                }
+                )
             }
+        }
+    }
+}
+
+impl EngineError {
+    /// Machine-stable identifier for this error kind (the API `code` field).
+    pub fn code(&self) -> &'static str {
+        match self {
+            EngineError::Pump(_) => "pump_error",
+            EngineError::Store(_) => "store_error",
+            EngineError::Config(_) => "invalid_config",
+            EngineError::Busy => "busy",
+            EngineError::Idle => "idle",
+            EngineError::SerialDown => "serial_down",
+            EngineError::SimulatorNotAllowed => "simulator_not_allowed",
+            EngineError::PumpRejectedSetpoint { .. } => "pump_setpoint_rejected",
+        }
+    }
+
+    /// A longer, operator-facing explanation, for the errors where the one-line
+    /// message is not enough to act on. `None` when the message already says
+    /// everything.
+    pub fn hint(&self) -> Option<String> {
+        let text = match self {
+            EngineError::PumpRejectedSetpoint { control_var, .. } => match control_var {
+                ControlVar::MlMin => {
+                    "That flow is outside the range the LabQ's configured pump head and tubing can \
+                     deliver. Read the maximum flow on the pump's own display, then lower the \
+                     target, fit larger tubing, or run this cycle in rpm. (The pump also rejects \
+                     every ml/min write when it has no head or tubing configured at all.)"
+                }
+                ControlVar::Rpm => {
+                    "That speed is outside the range the pump accepts. Use a value within the \
+                     pump's rated rpm."
+                }
+            },
+            EngineError::SerialDown => {
+                "Fermentool drives the pump over MODBUS on the configured serial port. Plug in the \
+                 USB-RS485 adapter and pick its port in the connection bar, or set the port to \
+                 \"sim\" to run against the built-in simulator."
+            }
+            EngineError::SimulatorNotAllowed => {
+                "The engine is on the in-process simulator, so a run would move nothing real. \
+                 Connect a pump and select its port, or tick \"Allow runs on the pump simulator\" \
+                 in Settings for bench testing."
+            }
+            _ => return None,
+        };
+        Some(text.to_string())
+    }
+
+    /// The full structured form for the HTTP API.
+    pub fn detail(&self) -> ErrDetail {
+        ErrDetail {
+            message: self.to_string(),
+            code: self.code(),
+            hint: self.hint(),
         }
     }
 }
@@ -1562,14 +1621,21 @@ mod tests {
             }
             other => panic!("wrong error variant: {other:?}"),
         }
-        let msg = EngineError::PumpRejectedSetpoint {
+        let err = EngineError::PumpRejectedSetpoint {
             code: 0x03,
             control_var: ControlVar::MlMin,
-            value: 10.0,
-        }
-        .to_string();
+            value: 80.0,
+        };
+        let msg = err.to_string();
+        // The one-line message names the value and the exception, and nothing more.
+        assert!(msg.contains("80.000 ml/min"), "got: {msg}");
         assert!(msg.contains("illegal data value"), "got: {msg}");
-        assert!(msg.contains("rpm"), "message should steer to rpm; got: {msg}");
+        assert!(!msg.contains("tubing"), "the message must stay one line; got: {msg}");
+        assert_eq!(err.code(), "pump_setpoint_rejected");
+        // The actionable detail is in the hint.
+        let hint = err.hint().expect("a ml/min reject carries a hint");
+        assert!(hint.to_lowercase().contains("flow"), "hint should explain the flow range; got: {hint}");
+        assert!(hint.contains("rpm"), "hint should offer rpm as a fallback; got: {hint}");
         assert!(e.store().list_runs(10).unwrap().is_empty());
     }
 

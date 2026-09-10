@@ -4,6 +4,7 @@
   import { num, dur, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { canStartRun } from '../lib/link.js';
   import Chart from '../components/Chart.svelte';
+  import ErrorText from '../components/ErrorText.svelte';
 
   let f = $state({
     name: '',
@@ -158,7 +159,7 @@
       });
       app.tab = 'overview';
     } catch (e) {
-      startErr = e.message;
+      startErr = { message: e.message, hint: e.hint ?? null };
       starting = false;
     }
   }
@@ -340,7 +341,11 @@
     {/if}
   </div>
 
-  {#if startErr}<div class="err" style="margin-top:16px">{startErr}</div>{/if}
+  {#if startErr}
+    <div style="margin-top:16px">
+      <ErrorText message={startErr.message} hint={startErr.hint} />
+    </div>
+  {/if}
 
   <div class="foot">
     <button class="btn-primary" disabled={starting || busy || cannotStart || !!previewErr || durationS <= 0} onclick={start}>

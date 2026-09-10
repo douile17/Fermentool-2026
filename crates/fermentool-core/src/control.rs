@@ -21,7 +21,7 @@ use fermentool_modbus::Transport;
 
 use crate::config::SerialConfig;
 use crate::engine::{
-    ActiveStatus, Engine, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome,
+    ActiveStatus, Engine, ErrDetail, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome,
     REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
 };
 use crate::store::{EventRow, RunRow, RunStatus, TickRow};
@@ -59,11 +59,11 @@ const CLOCK_STEP_LIMIT: Duration = Duration::from_secs(5);
 /// One request to the control thread. Each carries a `oneshot` reply channel.
 pub enum Command {
     Status(oneshot::Sender<DaemonStatus>),
-    StartRun(RunConfig, oneshot::Sender<Result<i64, String>>),
+    StartRun(RunConfig, oneshot::Sender<Result<i64, ErrDetail>>),
     StopRun(oneshot::Sender<Result<(), String>>),
     AbortRun(oneshot::Sender<Result<(), String>>),
     Recovery(oneshot::Sender<Result<Option<RecoveryInfo>, String>>),
-    Resume(oneshot::Sender<Result<i64, String>>),
+    Resume(oneshot::Sender<Result<i64, ErrDetail>>),
     DiscardRecovery(RunStatus, oneshot::Sender<Result<(), String>>),
     GetRun(i64, oneshot::Sender<Result<Option<RunRow>, String>>),
     ListRuns(i64, oneshot::Sender<Result<Vec<RunRow>, String>>),
@@ -462,7 +462,7 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             false
         }
         Command::StartRun(cfg, reply) => {
-            let _ = reply.send(engine.start_run(cfg, now).map_err(|e| e.to_string()));
+            let _ = reply.send(engine.start_run(cfg, now).map_err(|e| e.detail()));
             true
         }
         Command::StopRun(reply) => {
@@ -482,7 +482,7 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             false
         }
         Command::Resume(reply) => {
-            let _ = reply.send(engine.resume(now, grace).map_err(|e| e.to_string()));
+            let _ = reply.send(engine.resume(now, grace).map_err(|e| e.detail()));
             true
         }
         Command::DiscardRecovery(status, reply) => {
@@ -892,7 +892,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(err.to_lowercase().contains("simulator"), "got: {err}");
+        assert_eq!(err.code, "simulator_not_allowed");
+        assert!(err.message.to_lowercase().contains("simulator"), "got: {}", err.message);
+        assert!(err.hint.is_some());
 
         let st = handle.call(Command::Status).await.unwrap();
         assert!(st.simulator);

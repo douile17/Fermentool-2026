@@ -23,7 +23,7 @@ use fermentool_modbus::serial::available_ports;
 
 use crate::config::Config;
 use crate::control::{Command, ControlHandle, DaemonStatus};
-use crate::engine::RunConfig;
+use crate::engine::{ErrDetail, RunConfig};
 use crate::store::RunStatus;
 
 /// The built Svelte UI (`ui/dist/`), baked into the binary. The folder path is
@@ -97,10 +97,26 @@ enum ApiError {
     /// The engine refused (busy / idle / invalid config).
     Conflict(String),
     NotFound,
+    /// A structured engine refusal: one-line `message`, a `code`, and an
+    /// optional longer `hint` the UI reveals on demand.
+    Detail(ErrDetail),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::Detail(d) = self {
+            // Invalid input is 400; a hardware / lifecycle refusal is 409.
+            let status = if d.code == "invalid_config" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::CONFLICT
+            };
+            let mut body = json!({ "error": d.message, "code": d.code });
+            if let Some(h) = d.hint {
+                body["hint"] = json!(h);
+            }
+            return (status, Json(body)).into_response();
+        }
         let (code, msg) = match self {
             ApiError::Down => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -109,6 +125,7 @@ impl IntoResponse for ApiError {
             ApiError::Bad(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ApiError::Detail(_) => unreachable!("handled above"),
         };
         (code, Json(json!({ "error": msg }))).into_response()
     }
@@ -199,7 +216,7 @@ async fn create_run(State(s): State<AppState>, Json(cfg): Json<RunConfig>) -> Ap
         .call(|reply| Command::StartRun(cfg, reply))
         .await
         .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Bad)?;
+        .map_err(ApiError::Detail)?;
     Ok((StatusCode::CREATED, Json(json!({ "run_id": id }))).into_response())
 }
 
@@ -321,7 +338,7 @@ async fn resume(State(s): State<AppState>) -> ApiResult<Response> {
         .call(Command::Resume)
         .await
         .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?;
+        .map_err(ApiError::Detail)?;
     Ok(Json(json!({ "run_id": id })).into_response())
 }
 
@@ -561,6 +578,58 @@ mod tests {
         }
     }
 
+    /// Like [`test_state`] but with `serial.allow_simulator = false` applied to
+    /// the live engine, so `POST /api/runs` is refused with a hinted error.
+    fn test_state_no_sim_runs() -> AppState {
+        let mut engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        engine.set_serial(
+            crate::config::SerialConfig {
+                path: "sim".into(),
+                baud: 9600,
+                allow_simulator: false,
+            },
+            1,
+        );
+        let (events, _) = broadcast::channel(16);
+        AppState {
+            control: Arc::new(crate::control::spawn(
+                engine,
+                Duration::from_secs(300),
+                events.clone(),
+            )),
+            config: Arc::new(RwLock::new(Config::default())),
+            config_path: Arc::new(std::env::temp_dir().join("ft-api-test.toml")),
+            shutdown: Arc::new(Notify::new()),
+            events,
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_start_carries_a_code_and_a_hint() {
+        let app = router(test_state_no_sim_runs());
+        let req = post_json(
+            "/api/runs",
+            json!({
+                "name": "t", "control_var": "rpm", "direction": "cw",
+                "pump_addr": 1,
+                "curve": linear_curve()
+            }),
+        );
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = body_json(res).await;
+        assert_eq!(body["code"], "simulator_not_allowed");
+        assert!(body["error"].as_str().unwrap().to_lowercase().contains("simulator"));
+        assert!(
+            body["hint"].as_str().is_some_and(|h| h.contains("Settings")),
+            "hint should be present and actionable: {body}"
+        );
+    }
+
     async fn body_json(res: Response) -> serde_json::Value {
         let bytes = to_bytes(res.into_body(), 128 * 1024).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
@@ -657,7 +726,9 @@ mod tests {
             }),
         );
         let res = app.clone().oneshot(dup).await.unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        // "a run is already active" is a conflict, and carries a structured code.
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(res).await["code"], "busy");
 
         // stop
         let res = app
