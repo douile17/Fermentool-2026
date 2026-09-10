@@ -1,4 +1,4 @@
-//! Fermentool control daemon — library crate.
+//! Fermentool control daemon - library crate.
 //!
 //! The binary (`src/main.rs`) wires these together:
 //! [`config`] → [`store`] + [`engine`] on a [`control`] thread → the [`api`]

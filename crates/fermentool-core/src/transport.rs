@@ -6,11 +6,11 @@
 //! anything else is a real serial port, with the same "log the error and fall
 //! back to the simulator" behaviour the daemon has always had at boot.
 //!
-//! The daemon does not hold the opened transport directly — it holds a
+//! The daemon does not hold the opened transport directly - it holds a
 //! [`WatchdogTransport`], which runs the real port on a dedicated worker thread.
 //! A blocking `read()`/`write()` that never returns (a USB-serial adapter yanked
 //! mid-transaction: the OS ignores the port's own timeout) then wedges only that
-//! worker, not the control loop — so `/api/status` and *Stop* stay responsive
+//! worker, not the control loop - so `/api/status` and *Stop* stay responsive
 //! and the auto-recovery can spawn a fresh worker on a clean handle.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -34,7 +34,7 @@ const OPEN_TIMEOUT: Duration = Duration::from_millis(1500);
 pub(crate) const HARD_TXN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long a (re)spawn waits for the worker to report what it opened before
-/// giving up and returning "unknown" — the worker keeps trying in the
+/// giving up and returning "unknown" - the worker keeps trying in the
 /// background and the next recovery pass picks it up.
 pub(crate) const OPEN_WAIT: Duration = Duration::from_secs(3);
 
@@ -86,7 +86,7 @@ pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>,
 /// A live engine transport that can be rebuilt in place from a [`SerialConfig`].
 ///
 /// Implemented for the daemon's boxed transport (a real swap) and for [`SimPump`]
-/// (a no-op — `control.rs`'s simulator-backed tests build an `Engine<SimPump>`).
+/// (a no-op - `control.rs`'s simulator-backed tests build an `Engine<SimPump>`).
 pub trait SwapTransport {
     fn swap(&mut self, serial: &SerialConfig, pump_addr: u8) -> TransportKind;
 
@@ -139,7 +139,7 @@ impl SwapTransport for SimPump {
 }
 
 // ---------------------------------------------------------------------------
-// WatchdogTransport — run the real port on a worker thread so a stuck syscall
+// WatchdogTransport - run the real port on a worker thread so a stuck syscall
 // can't freeze the control loop (and therefore the whole HTTP API).
 // ---------------------------------------------------------------------------
 
@@ -153,7 +153,7 @@ enum Job {
 
 /// Opens the real transport (this runs *on the worker thread*, so a blocking
 /// open can't stall the caller either) and returns it plus what kind it is
-/// (`None` = a real port was wanted but wouldn't open — a `SimPump` no-op sink
+/// (`None` = a real port was wanted but wouldn't open - a `SimPump` no-op sink
 /// is in its place and the caller should keep retrying).
 type Opener = Box<dyn FnOnce() -> (Box<dyn Transport + Send>, Option<TransportKind>) + Send>;
 
@@ -169,7 +169,7 @@ fn spawn_worker(opener: Opener) -> (mpsc::Sender<Job>, JoinHandle<()>, Option<Tr
             // Blocks here on `real.transaction(..)`. If a `read()` never returns,
             // this thread stays parked until the OS finally errors the syscall
             // (device fully gone / re-enumerated); it then sees `job_rx` closed
-            // and exits, dropping `real` (closing the port). A bounded leak —
+            // and exits, dropping `real` (closing the port). A bounded leak -
             // one thread per wedge event.
             while let Ok(job) = job_rx.recv() {
                 match job {
@@ -195,7 +195,7 @@ fn spawn_worker(opener: Opener) -> (mpsc::Sender<Job>, JoinHandle<()>, Option<Tr
 pub struct WatchdogTransport {
     tx: mpsc::Sender<Job>,
     /// Handle to the *current* worker. Retired workers are detached (dropped),
-    /// never `join`ed — one of them may be stuck in a syscall forever.
+    /// never `join`ed - one of them may be stuck in a syscall forever.
     _worker: JoinHandle<()>,
     /// `true` once a transaction timed out: the worker is presumed stuck, so
     /// further transactions fail fast until a swap respawns it.
@@ -322,7 +322,7 @@ impl SwapTransport for WatchdogTransport {
 
 impl Drop for WatchdogTransport {
     fn drop(&mut self) {
-        // Ask the worker to close the port. Don't join — on process shutdown a
+        // Ask the worker to close the port. Don't join - on process shutdown a
         // stuck worker must not hold up exit; the OS reaps it.
         let _ = self.tx.send(Job::Shutdown);
     }
@@ -405,7 +405,7 @@ mod tests {
         }
     }
 
-    /// Echoes the request back — a trivially healthy transport.
+    /// Echoes the request back - a trivially healthy transport.
     struct EchoTransport;
     impl Transport for EchoTransport {
         fn transaction(&mut self, req: &[u8]) -> Result<Vec<u8>, TransportError> {
@@ -428,7 +428,7 @@ mod tests {
         let dt = t0.elapsed();
         assert!(dt >= HARD_TXN_TIMEOUT - Duration::from_millis(100), "returned too early: {dt:?}");
         assert!(dt < HARD_TXN_TIMEOUT + Duration::from_millis(500), "blocked past the deadline: {dt:?}");
-        // Subsequent calls fail fast — no piling onto the wedged worker.
+        // Subsequent calls fail fast - no piling onto the wedged worker.
         assert!(wd.is_stuck());
         let t1 = Instant::now();
         assert!(wd.transaction(b"y").is_err());

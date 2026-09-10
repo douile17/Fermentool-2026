@@ -1,6 +1,6 @@
 //! The control engine: run lifecycle + the tick loop.
 //!
-//! [`Engine::tick`] does exactly one tick's work — compute the setpoint for the
+//! [`Engine::tick`] does exactly one tick's work - compute the setpoint for the
 //! **real elapsed time** (`now - started_at`), write it to the pump, journal it,
 //! and finish the run when the curve is done. Time is injected, so a 100 h run
 //! is exercised in milliseconds by calling `tick` with synthetic timestamps
@@ -20,13 +20,13 @@ use crate::store::{
 };
 use crate::transport::{SwapTransport, TransportKind};
 
-/// Fixed **journal** cadence — not user-tunable.
+/// Fixed **journal** cadence - not user-tunable.
 ///
 /// [`Engine::tick`] fires once a second: it appends a journal row, owns run
 /// completion, and is the heartbeat that keeps writing the pump when the curve
 /// is flat. 1 s keeps the journal small over a 100 h run.
 ///
-/// The pump setpoint itself is refreshed faster — the control loop also calls
+/// The pump setpoint itself is refreshed faster - the control loop also calls
 /// [`Engine::apply_setpoint`] ~every 150 ms so a steep ramp steps the pump
 /// through each grid value ([`setpoint_grid`]) instead of jumping a whole
 /// second's worth; that write is skipped when the value hasn't moved, so the
@@ -43,14 +43,14 @@ pub enum EngineError {
     Busy,
     /// No run is active.
     Idle,
-    /// A real serial port is configured but not open — starting/resuming a run
+    /// A real serial port is configured but not open - starting/resuming a run
     /// would silently drive nothing.
     SerialDown,
     /// The engine is on the pump simulator and simulator runs aren't enabled
-    /// (`serial.allow_simulator`) — starting/resuming a run would drive nothing.
+    /// (`serial.allow_simulator`) - starting/resuming a run would drive nothing.
     SimulatorNotAllowed,
     /// The pump answered a setpoint write with a MODBUS exception (typically
-    /// `0x03` illegal data value) — the frame was fine, the pump refused the
+    /// `0x03` illegal data value) - the frame was fine, the pump refused the
     /// value. On the LabQ this is almost always a ml/min setpoint with no
     /// head / tubing calibration set on the pump itself.
     PumpRejectedSetpoint {
@@ -70,11 +70,11 @@ impl std::fmt::Display for EngineError {
             EngineError::Idle => write!(f, "no run is active"),
             EngineError::SerialDown => write!(
                 f,
-                "the pump link is down — connect the pump (or set serial.path to \"sim\") before starting a run"
+                "the pump link is down - connect the pump (or set serial.path to \"sim\") before starting a run"
             ),
             EngineError::SimulatorNotAllowed => write!(
                 f,
-                "running on the pump simulator — configure a real serial port, or enable simulator runs in Settings, before starting a run"
+                "running on the pump simulator - configure a real serial port, or enable simulator runs in Settings, before starting a run"
             ),
             EngineError::PumpRejectedSetpoint {
                 code,
@@ -146,7 +146,7 @@ pub struct RecoveryInfo {
     pub elapsed_s: f64,
     pub duration_s: i64,
     pub control_var: ControlVar,
-    /// The setpoint the curve prescribes for `elapsed_s` right now — where a
+    /// The setpoint the curve prescribes for `elapsed_s` right now - where a
     /// resume would put the pump.
     pub resume_target: f64,
     /// `elapsed` is past `duration + grace`: the curve finished while offline,
@@ -184,19 +184,19 @@ pub struct EngineStatus {
     /// `false` once the serial link to the pump is lost (the configured port
     /// won't reopen). The daemon keeps retrying; the UI should raise an alarm.
     pub serial_ok: bool,
-    /// Consecutive failed pump writes since the last success — a non-zero value
+    /// Consecutive failed pump writes since the last success - a non-zero value
     /// means the link is degrading even if not yet fully lost.
     pub write_fails: u32,
     /// `false` once the pump stops matching the commanded setpoint on readback
     /// (a stall / fault the writes alone don't reveal).
     pub pump_confirmed: bool,
     /// `false` once tick journalling has failed several times in a row (disk
-    /// full / unwritable). The pump keeps being driven — this is a data-loss
+    /// full / unwritable). The pump keeps being driven - this is a data-loss
     /// warning, not a control fault.
     pub journal_ok: bool,
     /// The engine is driving the in-process simulator, not a real serial port.
     pub simulator: bool,
-    /// `serial.allow_simulator` — simulator runs are explicitly enabled, so a
+    /// `serial.allow_simulator` - simulator runs are explicitly enabled, so a
     /// run may start even on the simulator.
     pub allow_simulator: bool,
 }
@@ -218,7 +218,7 @@ pub struct ActiveStatus {
     pub started_at: Timestamp,
     pub duration_s: i64,
     pub control_var: ControlVar,
-    /// Always [`TICK_INTERVAL`] in seconds — kept in the payload for display.
+    /// Always [`TICK_INTERVAL`] in seconds - kept in the payload for display.
     pub tick_interval_s: u32,
     pub last_seq: Option<i64>,
     pub last_target: Option<f64>,
@@ -244,7 +244,7 @@ pub struct Engine<T: Transport> {
     store: Store,
     app_version: String,
     active: Option<ActiveRun>,
-    /// Which transport the pump is currently driving — for the status frame.
+    /// Which transport the pump is currently driving - for the status frame.
     transport: TransportKind,
     /// A completed run the pump is still holding at its final setpoint.
     holding: Option<HoldingStatus>,
@@ -256,7 +256,7 @@ pub struct Engine<T: Transport> {
     write_fails: u32,
     /// The real port was configured but is not currently open.
     serial_lost: bool,
-    /// `serial.allow_simulator` — simulator runs are explicitly enabled. When
+    /// `serial.allow_simulator` - simulator runs are explicitly enabled. When
     /// false, [`start_run`](Self::start_run) / [`resume`](Self::resume) refuse
     /// while the engine is on the simulator instead of driving nothing.
     allow_simulator: bool,
@@ -318,7 +318,7 @@ impl<T: Transport> Engine<T> {
             write_fails: 0,
             serial_lost: false,
             // Permissive until `set_serial` applies the real config, matching
-            // the `serial: "sim"` placeholder above — the daemon always calls
+            // the `serial: "sim"` placeholder above - the daemon always calls
             // `set_serial` at boot, so this only affects bare in-process
             // engines (tests, embedding).
             allow_simulator: true,
@@ -380,7 +380,7 @@ impl<T: Transport> Engine<T> {
         self.pump_confirmed
     }
 
-    /// A real serial port is configured (not the simulator) — the control loop
+    /// A real serial port is configured (not the simulator) - the control loop
     /// keeps the link alive with a periodic probe even when no run is active.
     pub fn serial_is_real(&self) -> bool {
         !self.serial.use_simulator()
@@ -419,7 +419,7 @@ impl<T: Transport> Engine<T> {
     }
 
     /// Rebuild the pump transport in place from `serial` (simulator ⇄ real
-    /// port). Refused while a run is active — stop the run first. Returns the
+    /// port). Refused while a run is active - stop the run first. Returns the
     /// transport now in use (which may be the simulator if the port failed to
     /// open).
     pub fn swap_transport(
@@ -443,7 +443,7 @@ impl<T: Transport> Engine<T> {
 
         let now = Timestamp::now();
         if serial.use_simulator() {
-            // Intentional switch to the simulator — nothing to confirm.
+            // Intentional switch to the simulator - nothing to confirm.
             self.serial_lost = false;
         } else if kind == TransportKind::Sim {
             // Asked for a real port but `swap` fell back to the simulator: the
@@ -461,7 +461,7 @@ impl<T: Transport> Engine<T> {
                 )),
             });
         } else {
-            // The port opened — but only a live MODBUS read proves a pump is
+            // The port opened - but only a live MODBUS read proves a pump is
             // actually on the other end. `confirm_link` sets `serial_lost` and
             // logs the outcome; leave the *previous* `serial_lost` in place so
             // it can see the link was lost and journal `serial_recovered`.
@@ -473,7 +473,7 @@ impl<T: Transport> Engine<T> {
     /// Automatic serial recovery: reopen the configured port in place. Unlike
     /// [`swap_transport`](Self::swap_transport) this is allowed while a run is
     /// active (a mid-run adapter glitch is exactly when it's needed) and does
-    /// **not** fall back to the simulator — a failed reopen leaves a no-op sink
+    /// **not** fall back to the simulator - a failed reopen leaves a no-op sink
     /// so the pump keeps its last real setpoint and the caller retries.
     /// Returns `true` when the real port is (back) open.
     pub fn recover_serial(&mut self, now: Timestamp) -> bool
@@ -491,7 +491,7 @@ impl<T: Transport> Engine<T> {
         {
             Some(kind) => {
                 self.transport = kind;
-                // The port (re)opened — but "open" is not "connected". On
+                // The port (re)opened - but "open" is not "connected". On
                 // Windows a USB-RS485 COM port opens whether or not a pump is
                 // powered/wired at the other end. Only a real MODBUS round-trip
                 // clears the alarm; otherwise keep retrying so a port that opens
@@ -550,7 +550,7 @@ impl<T: Transport> Engine<T> {
     }
 
     /// One MODBUS read, used purely as a "is the pump actually there?" probe.
-    /// No state, no logging — the callers own that. Returns `false` without
+    /// No state, no logging - the callers own that. Returns `false` without
     /// touching the bus when the engine is on the simulator fallback (a
     /// successful read of the no-op `SimPump` would prove nothing about the
     /// real port).
@@ -650,7 +650,7 @@ impl<T: Transport> Engine<T> {
             return Err(EngineError::SerialDown);
         }
         // Same hazard when the engine is deliberately on the simulator but
-        // simulator runs weren't enabled — don't advance a cycle that drives
+        // simulator runs weren't enabled - don't advance a cycle that drives
         // nothing just because `config.toml` still has the shipped `path = "sim"`.
         if self.on_simulator() && !self.allow_simulator {
             return Err(EngineError::SimulatorNotAllowed);
@@ -671,7 +671,7 @@ impl<T: Transport> Engine<T> {
         let first = quantize(spec.value_at(Duration::ZERO), setpoint_grid(cfg.control_var));
 
         // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
-        // head-type / tubing-size registers are deliberately left untouched — see
+        // head-type / tubing-size registers are deliberately left untouched - see
         // the note in migrations/0001_init.sql.
         self.pump.set_direction(cfg.direction == Direction::Cw)?;
         write_setpoint(&mut self.pump, cfg.control_var, first)
@@ -738,7 +738,7 @@ impl<T: Transport> Engine<T> {
             self.write_fails.saturating_add(1)
         };
         if let Err(e) = &write {
-            // Diagnostics only — a failed journal write must never abort the
+            // Diagnostics only - a failed journal write must never abort the
             // tick's pump-control / completion logic below.
             let _ = self.store.log_event(&NewEvent {
                 run_id: Some(id),
@@ -803,7 +803,7 @@ impl<T: Transport> Engine<T> {
         };
 
         // The pump was already commanded above. A journal write that fails
-        // (disk full / unwritable) must not stop the run — crash-resume works
+        // (disk full / unwritable) must not stop the run - crash-resume works
         // off the immutable `started_at`, so a gap in the journal is survivable.
         // Track the streak so the UI can raise `journal_ok = false`.
         match self.store.append_tick(&NewTick {
@@ -833,12 +833,12 @@ impl<T: Transport> Engine<T> {
         }
 
         if elapsed_s >= duration_s as f64 {
-            // The pump is NOT stopped on natural completion — it keeps running
+            // The pump is NOT stopped on natural completion - it keeps running
             // at the curve's final setpoint (written just above) until the user
             // stops it via `stop_pump`.
             if let Err(e) = self.store.finish_run(id, RunStatus::Completed, now) {
                 // Couldn't record completion (disk full / unwritable). The pump
-                // is already holding the final setpoint — don't wedge the engine
+                // is already holding the final setpoint - don't wedge the engine
                 // or drop the completion: keep the run active and retry on the
                 // next tick. The journal-stall streak surfaces the disk problem
                 // through `journal_ok`.
@@ -896,7 +896,7 @@ impl<T: Transport> Engine<T> {
     /// Sub-second setpoint write between journal ticks: compute the setpoint for
     /// the **real elapsed time**, snap it to [`setpoint_grid`], and write it to
     /// the pump **only if it changed** since the last write. No journal row, no
-    /// completion check — [`Engine::tick`] owns those. Returns `true` when a new
+    /// completion check - [`Engine::tick`] owns those. Returns `true` when a new
     /// value was written.
     ///
     /// Called ~every 150 ms by the control loop so a steep ramp steps the pump
@@ -929,7 +929,7 @@ impl<T: Transport> Engine<T> {
             }
             Err(e) => {
                 // The next journal tick will journal the write state; here just
-                // note it. Keep the run going — a transient bus error recovers.
+                // note it. Keep the run going - a transient bus error recovers.
                 self.write_fails = self.write_fails.saturating_add(1);
                 self.store.log_event(&NewEvent {
                     run_id: Some(id),
@@ -992,7 +992,7 @@ impl<T: Transport> Engine<T> {
     // ---- crash recovery (docs/IMPLEMENTATION_PLAN.md §4.7) ----
 
     /// Inspect the journal for a run that was `running` when the process last
-    /// stopped. Read-only — safe to call repeatedly (e.g. from a polling UI).
+    /// stopped. Read-only - safe to call repeatedly (e.g. from a polling UI).
     /// Returns `None` if nothing needs recovering, or if this process is already
     /// running the run.
     pub fn pending_recovery(
@@ -1151,7 +1151,7 @@ fn write_setpoint<T: Transport>(
 }
 
 /// Classify a failed setpoint write. Only MODBUS `0x03` (illegal *data value*)
-/// means the pump received the frame and refused the *value* — the operator
+/// means the pump received the frame and refused the *value* - the operator
 /// actionable case (see [`EngineError::PumpRejectedSetpoint`]). `0x02` (illegal
 /// data *address*) is a register-map / firmware mismatch, not something the
 /// operator fixes by changing the setpoint, so it stays a plain
@@ -1181,7 +1181,7 @@ fn read_actual<T: Transport>(
 /// The pump's usable setpoint step for a control variable.
 ///
 /// `Rpm` snaps to the documented 0.1 rpm motor step. `MlMin` snaps to the pump's
-/// 3-decimal display resolution — its own firmware then collapses that onto a
+/// 3-decimal display resolution - its own firmware then collapses that onto a
 /// motor step, since Fermentool does not own the tube calibration and cannot do
 /// that conversion itself (see `docs/DESIGN.md`).
 fn setpoint_grid(control_var: ControlVar) -> f64 {
@@ -1586,7 +1586,7 @@ mod tests {
             EngineError::PumpRejectedSetpoint { code: 0x03, .. }
         ));
         // 0x02 (illegal data address) is a register-map fault, not a value the
-        // operator can fix — it must stay a plain pump error.
+        // operator can fix - it must stay a plain pump error.
         assert!(matches!(
             setpoint_error(
                 PumpError::Pdu(PduError::Exception(0x02)),
@@ -1609,7 +1609,7 @@ mod tests {
     #[test]
     fn confirm_link_latches_a_mute_pump_then_clears_when_it_answers() {
         // A real port that "opens" but whose pump answers nothing must read as
-        // NOT connected: runs refused, alarm latched — then cleared once the
+        // NOT connected: runs refused, alarm latched - then cleared once the
         // pump starts responding.
         let mut sim = SimPump::new(1);
         sim.drop_next = 2; // first confirm_link (read + retry) fails; then reads land
@@ -1650,7 +1650,7 @@ mod tests {
     #[test]
     fn recover_serial_reopen_alone_does_not_clear_the_alarm() {
         // `swap_strict` "succeeds" on the SimPump engine, but a bare reopen is
-        // not proof the pump is there — the alarm must stay latched until a
+        // not proof the pump is there - the alarm must stay latched until a
         // real MODBUS read confirms it.
         let mut e = engine();
         e.set_serial(
@@ -1914,7 +1914,7 @@ mod tests {
             let id = a.start_run(linear_cfg(), t0()).unwrap();
             a.tick(at(3601)).unwrap(); // past the 3600 s duration → Finished
             assert!(a.status().holding.is_some());
-            id // drop engine A — the pump keeps physically holding its setpoint
+            id // drop engine A - the pump keeps physically holding its setpoint
         };
 
         // Fresh engine on the same DB: the hold must come back so the UI still

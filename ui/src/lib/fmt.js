@@ -36,7 +36,7 @@ export function shortTime(iso) {
     : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
-/** "4 Sep 10:04" — date + time, for run stamps that can span days. */
+/** "4 Sep 10:04" - date + time, for run stamps that can span days. */
 export function stamp(iso) {
   if (!iso) return '–';
   const d = new Date(iso);
@@ -50,7 +50,7 @@ export function stamp(iso) {
       });
 }
 
-/** "4 Sep 2026, 10:04" — full stamp with year, for history where runs age. */
+/** "4 Sep 2026, 10:04" - full stamp with year, for history where runs age. */
 export function stampY(iso) {
   if (!iso) return '–';
   const d = new Date(iso);

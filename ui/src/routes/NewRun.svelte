@@ -164,7 +164,7 @@
   }
 
   const busy = $derived(app.status?.active != null);
-  // A run drives the pump, so it needs a live link — single gate in link.js.
+  // A run drives the pump, so it needs a live link - single gate in link.js.
   const cannotStart = $derived(!canStartRun(app.status));
 </script>
 

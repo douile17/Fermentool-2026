@@ -231,7 +231,7 @@ impl Store {
         Self::from_connection(Connection::open(path)?)
     }
 
-    /// An in-memory database — for tests.
+    /// An in-memory database - for tests.
     pub fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
@@ -265,7 +265,7 @@ impl Store {
         Ok(())
     }
 
-    /// `PRAGMA integrity_check` — `Ok(())` iff the database reports `ok`.
+    /// `PRAGMA integrity_check` - `Ok(())` iff the database reports `ok`.
     pub fn integrity_check(&self) -> Result<()> {
         let report: String = self
             .conn

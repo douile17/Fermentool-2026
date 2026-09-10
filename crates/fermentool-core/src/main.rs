@@ -64,7 +64,7 @@ fn resolve_paths(config_dir_override: Option<&str>) -> Paths {
     }
 }
 
-/// Best-effort: open `url` in the machine's default browser. Fire-and-forget —
+/// Best-effort: open `url` in the machine's default browser. Fire-and-forget -
 /// the daemon never waits on it and a failure only means the user opens the page
 /// themselves. On Windows `explorer.exe <url>` launches the browser without a
 /// console window flashing up.
@@ -132,7 +132,7 @@ fn init_tracing(level: &str, log_dir: &Path) -> anyhow::Result<WorkerGuard> {
 
     // The console layer only makes sense when there's a console: debug builds.
     // Release builds are windowless (`windows_subsystem = "windows"`), so writing
-    // to a detached stderr is pointless — the daily file is the record.
+    // to a detached stderr is pointless - the daily file is the record.
     let console = cfg!(debug_assertions)
         .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
 
@@ -157,7 +157,7 @@ fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<WatchdogTransp
     let mut engine = Engine::new(Pump::new(transport, cfg.pump.address), store, VERSION);
     engine.set_transport_kind(kind);
     engine.set_serial(cfg.serial.clone(), cfg.pump.address);
-    // No pump I/O on the startup path — a blocking MODBUS probe here would delay
+    // No pump I/O on the startup path - a blocking MODBUS probe here would delay
     // the HTTP server (and the auto-opened browser). `set_serial` already flags
     // a port that won't open; the control loop's idle probe confirms an
     // open-but-silent port within a few seconds and latches the alarm then.
@@ -212,11 +212,11 @@ async fn main() -> anyhow::Result<()> {
             // Log it too: a windowless release build has no console to print to,
             // and this is the usual "I double-clicked it twice" case.
             tracing::error!(
-                "port {} already in use — Fermentool may already be running",
+                "port {} already in use - Fermentool may already be running",
                 config.port
             );
             anyhow::bail!(
-                "port {} is already in use — another Fermentool instance may be running, \
+                "port {} is already in use - another Fermentool instance may be running, \
                  or change `port` in {}",
                 config.port,
                 paths.config.display()

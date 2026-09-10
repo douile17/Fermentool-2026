@@ -1,11 +1,11 @@
 # Copy to `config.toml` (git-ignored) and edit for this machine.
-# Consumed from milestone 7 onward — see docs/IMPLEMENTATION_PLAN.md §4.9.
+# Consumed from milestone 7 onward - see docs/IMPLEMENTATION_PLAN.md §4.9.
 
 port = 8730                     # local web UI / API (bound to 127.0.0.1 only)
 
 [serial]
 path = "sim"                    # "sim" = built-in pump simulator (no hardware).
-                               # Real port — Windows: "COM4" · Linux: "/dev/ttyUSB0" · macOS: "/dev/tty.usbserial-XXXX"
+                               # Real port - Windows: "COM4" · Linux: "/dev/ttyUSB0" · macOS: "/dev/tty.usbserial-XXXX"
                                # If a real port fails to open, the daemon falls back to the simulator with a loud warning.
 baud = 9600                    # 1200 | 2400 | 4800 | 9600
 # Frame is fixed at 8E1 (8 data bits, even parity, 1 stop) as required by the LabQ pump.

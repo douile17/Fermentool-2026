@@ -4,7 +4,7 @@
 //! lives on one dedicated OS thread. The async API talks to it over a command
 //! channel and gets replies through per-call `oneshot`s. The loop blocks on
 //! `recv_timeout(next_tick)` so a command is served immediately and ticks still
-//! fire on cadence. Each command / tick runs inside `catch_unwind` — a panic is
+//! fire on cadence. Each command / tick runs inside `catch_unwind` - a panic is
 //! logged and the loop continues; it never takes the process down.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -40,7 +40,7 @@ const WRITE_SETPOINT_INTERVAL: Duration = Duration::from_millis(150);
 /// the backoff then keeps a mid-run recovery attempt (a port close/reopen plus
 /// one or two blocking MODBUS confirm reads, ~0.5-1 s) from churning a marginal
 /// port every second and starving the 150 ms setpoint writes. The log stays
-/// quiet regardless — `maybe_recover_serial` reports only the down/up edges.
+/// quiet regardless - `maybe_recover_serial` reports only the down/up edges.
 const SERIAL_RETRY_MIN: Duration = Duration::from_secs(1);
 const SERIAL_RETRY_MAX: Duration = Duration::from_secs(15);
 
@@ -118,11 +118,11 @@ pub struct DaemonStatus {
     pub journal_ok: bool,
     /// The engine is driving the in-process simulator, not a real serial port.
     pub simulator: bool,
-    /// `serial.allow_simulator` — simulator runs are explicitly enabled.
+    /// `serial.allow_simulator` - simulator runs are explicitly enabled.
     pub allow_simulator: bool,
 }
 
-/// Sending / receiving on the control channel failed — the thread is gone.
+/// Sending / receiving on the control channel failed - the thread is gone.
 #[derive(Debug)]
 pub struct ControlDown;
 
@@ -217,19 +217,19 @@ fn control_loop<T: Transport + SwapTransport>(
     tracing::info!("control loop started");
     // Two absolute deadlines while a run is active, each advanced by whole steps
     // from its own previous value (never `now + interval`) so the phase stays
-    // locked to the run start — command traffic between them can't shift the
+    // locked to the run start - command traffic between them can't shift the
     // cadence and no timing error accumulates over a long run:
     //
-    //   * `next_journal` (+= TICK_INTERVAL, 1 s): `Engine::tick` — writes the
+    //   * `next_journal` (+= TICK_INTERVAL, 1 s): `Engine::tick` - writes the
     //     pump, appends a journal row, owns run completion. Also the heartbeat
     //     that keeps writing when the curve is flat.
     //   * `next_write` (+= WRITE_SETPOINT_INTERVAL, 150 ms): `Engine::apply_setpoint`
-    //     — writes the pump only when the setpoint has moved by a pump step,
+    //     - writes the pump only when the setpoint has moved by a pump step,
     //     so a steep ramp steps through every grid value instead of jumping.
     let mut next_journal: Option<Instant> = None;
     let mut next_write: Option<Instant> = None;
     // (run's wall `started_at`, monotonic anchor, run's elapsed time when that
-    // anchor was taken, run id) — lets a tick detect a system-clock step and use
+    // anchor was taken, run id) - lets a tick detect a system-clock step and use
     // monotonic time instead. The elapsed-at-anchor term is ~0 for a fresh run
     // but carries the pre-restart elapsed on a resume, so the expected
     // wall-vs-monotonic gap after a resume isn't mistaken for a clock step.
@@ -304,7 +304,7 @@ fn control_loop<T: Transport + SwapTransport>(
                 }
                 maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
                 next_journal = Some(advance_past(journal_due, TICK_INTERVAL));
-                // The journal tick just wrote the pump — hold the next sub-second
+                // The journal tick just wrote the pump - hold the next sub-second
                 // write a full interval off so we don't write twice in a row.
                 next_write = Some(Instant::now() + WRITE_SETPOINT_INTERVAL);
                 continue;
@@ -362,7 +362,7 @@ fn control_loop<T: Transport + SwapTransport>(
     tracing::info!("control loop stopped");
 }
 
-/// Advance `deadline` by whole `step`s until it is in the future — keeps the
+/// Advance `deadline` by whole `step`s until it is in the future - keeps the
 /// cadence phase-locked while a slow tick / long stall doesn't trigger a burst
 /// of makeup work.
 fn advance_past(mut deadline: Instant, step: Duration) -> Instant {
@@ -377,7 +377,7 @@ fn advance_past(mut deadline: Instant, step: Duration) -> Instant {
 
 /// The timestamp to hand a tick. Normally wall-clock `now`, but if the wall
 /// clock has drifted from the monotonic clock by more than [`CLOCK_STEP_LIMIT`]
-/// since the run started, it stepped — pin the run's elapsed time to the
+/// since the run started, it stepped - pin the run's elapsed time to the
 /// monotonic anchor for this tick so the pump doesn't jump on the curve.
 ///
 /// `mono_secs` is the run's elapsed time estimated along the monotonic path:
@@ -508,14 +508,14 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
                 .unwrap_or(false);
             let status = engine.status();
             let res = if status.active.is_some() {
-                Err("a run is active — stop it before clearing history".to_string())
+                Err("a run is active - stop it before clearing history".to_string())
             } else if status.holding.is_some() {
                 // the pump is still driving a completed run's final setpoint;
                 // deleting that run's row would orphan what the pump is doing.
-                Err("the pump is holding a completed run — stop the pump before clearing history"
+                Err("the pump is holding a completed run - stop the pump before clearing history"
                     .to_string())
             } else if pending {
-                Err("a crash recovery is pending — resolve it before clearing history".to_string())
+                Err("a crash recovery is pending - resolve it before clearing history".to_string())
             } else {
                 engine.store().clear_history().map_err(|e| e.to_string())
             };
@@ -569,18 +569,18 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
                 Ok(kind) => {
                     // `swap_transport` has just run a live probe read for a real
                     // port, so `serial_ok` now reflects whether a pump actually
-                    // answered — not merely that the COM port opened.
+                    // answered - not merely that the COM port opened.
                     let pump_responding = engine.status().serial_ok;
                     Ok(match kind {
                         TransportKind::Serial(name) if pump_responding => {
-                            format!("connected to {name} — pump responding")
+                            format!("connected to {name} - pump responding")
                         }
                         TransportKind::Serial(name) => format!(
-                            "{name} opened, but the pump is not responding — check power, \
+                            "{name} opened, but the pump is not responding - check power, \
                              wiring, MODBUS address and baud"
                         ),
                         TransportKind::Sim if wanted_serial => {
-                            format!("could not open {path} — running on the pump simulator")
+                            format!("could not open {path} - running on the pump simulator")
                         }
                         TransportKind::Sim => "running on the pump simulator".to_string(),
                     })
@@ -806,7 +806,7 @@ mod tests {
             Store::open_in_memory().unwrap(),
             "test",
         );
-        // Kind first, so set_serial doesn't pre-flag the link — detection here
+        // Kind first, so set_serial doesn't pre-flag the link - detection here
         // must come from the probe streak, not the boot check.
         engine.set_transport_kind(TransportKind::Serial("NOPE_NOT_A_REAL_PORT_99999".into()));
         engine.set_serial(
@@ -904,7 +904,7 @@ mod tests {
 
     /// A resume adopts a run whose `started_at` is minutes/hours in the past, so
     /// the monotonic anchor is taken with a large elapsed-at-anchor. `run_now`
-    /// must treat that as normal and keep returning real wall-clock time — not
+    /// must treat that as normal and keep returning real wall-clock time - not
     /// mistake the wall/monotonic gap for a clock step and rewind the curve.
     #[test]
     fn run_now_after_resume_keeps_real_elapsed() {

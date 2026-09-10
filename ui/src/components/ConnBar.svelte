@@ -4,7 +4,7 @@
   import ConnectControl from './ConnectControl.svelte';
 
   // The big bar only shows when there's something to act on. Once the pump is
-  // connected and healthy it disappears — the persistent cue is the small pump
+  // connected and healthy it disappears - the persistent cue is the small pump
   // line in the sidebar foot. For a non-connection condition (pump not tracking,
   // journal stalled) it shows just the status line, not the port picker.
   const link = $derived(linkState(app.status, app.connected));

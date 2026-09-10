@@ -3,7 +3,7 @@
 // In a Tauri window the UI is bundled into the app, so it runs on a different
 // origin (http://tauri.localhost) from the daemon and must use an absolute URL.
 // In the browser (Vite dev proxy, or the daemon serving ui/dist itself) it is
-// same-origin, so BASE is '' and every path stays relative — unchanged.
+// same-origin, so BASE is '' and every path stays relative - unchanged.
 const BASE =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
     ? 'http://127.0.0.1:8730'

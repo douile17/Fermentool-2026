@@ -139,7 +139,7 @@ async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiRe
         .map_err(|e| ApiError::Bad(e.to_string()))?;
     *s.config.write().await = new.clone();
     // `serial.allow_simulator` gates Start/Resume in the live engine, so a save
-    // that flips it must reach the control thread — otherwise the Settings
+    // that flips it must reach the control thread - otherwise the Settings
     // checkbox looks broken until the next reconnect.
     let _ = s
         .control
@@ -450,7 +450,7 @@ async fn static_handler(uri: Uri) -> Response {
             .into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            "UI not built — run `npm run build` in ui/",
+            "UI not built - run `npm run build` in ui/",
         )
             .into_response(),
     }
@@ -506,7 +506,7 @@ async fn serial_reconnect(
         cfg.pump.address = a;
     }
 
-    // Swap first — a refused reconnect (e.g. a run is active) must not touch
+    // Swap first - a refused reconnect (e.g. a run is active) must not touch
     // `config.toml`, so the file always matches the live transport.
     let serial = cfg.serial.clone();
     let pump_addr = cfg.pump.address;
@@ -815,7 +815,7 @@ mod tests {
     }
 
     // The Svelte UI, bundled into the Tauri window, calls this API from the
-    // `http://tauri.localhost` origin — cross-origin, so it needs CORS.
+    // `http://tauri.localhost` origin - cross-origin, so it needs CORS.
 
     #[tokio::test]
     async fn cors_echoes_the_tauri_origin() {
@@ -859,7 +859,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
-        // Still served — CORS is browser-enforced — but with no allow-origin echo.
+        // Still served - CORS is browser-enforced - but with no allow-origin echo.
         assert_eq!(res.status(), StatusCode::OK);
         assert!(res.headers().get("access-control-allow-origin").is_none());
     }

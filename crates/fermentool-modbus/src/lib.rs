@@ -2,14 +2,14 @@
 //!
 //! Layers, bottom to top:
 //!
-//! * [`crc16`] / [`with_crc`] / [`f32_be`] — wire primitives, checked byte-for-byte
+//! * [`crc16`] / [`with_crc`] / [`f32_be`] - wire primitives, checked byte-for-byte
 //!   against the vendor examples in `LabQ Series MODBUS protocol.md`.
-//! * [`frame`] — pure request builders and response parsers (`Vec<u8>` in/out,
+//! * [`frame`] - pure request builders and response parsers (`Vec<u8>` in/out,
 //!   no I/O).
-//! * [`Transport`] — a blocking request→response byte channel. Implemented by
+//! * [`Transport`] - a blocking request→response byte channel. Implemented by
 //!   [`SimPump`] (a full register-level simulator with fault injection) and, with
 //!   the `serial` feature, [`serial::SerialTransport`] over a real RS-485 adapter.
-//! * [`PumpTransport`] / [`Pump`] — pump-level operations (set speed, start, …)
+//! * [`PumpTransport`] / [`Pump`] - pump-level operations (set speed, start, …)
 //!   built on any [`Transport`].
 //!
 //! The control path is deliberately **synchronous**: one transaction every few
@@ -18,21 +18,21 @@
 
 /// LabQ holding-register addresses (decimal).
 pub mod reg {
-    /// Pump head type — `u16`, function code `06H`. See Chart 1 (KT15 = 0).
+    /// Pump head type - `u16`, function code `06H`. See Chart 1 (KT15 = 0).
     pub const PUMP_HEAD_TYPE: u16 = 1000;
-    /// Tubing size — `u16`, `06H`.
+    /// Tubing size - `u16`, `06H`.
     pub const TUBING_SIZE: u16 = 1001;
-    /// Motor speed, 0.1..=350 rpm — `f32` (2 registers), function code `10H`.
+    /// Motor speed, 0.1..=350 rpm - `f32` (2 registers), function code `10H`.
     pub const MOTOR_SPEED: u16 = 1002;
-    /// Flow rate, 0..=99999 ml/min — `f32` (2 registers), `10H`.
+    /// Flow rate, 0..=99999 ml/min - `f32` (2 registers), `10H`.
     pub const FLOW_RATE: u16 = 1004;
-    /// Start/stop — `u16`, `06H`. `1` = start, `0` = stop.
+    /// Start/stop - `u16`, `06H`. `1` = start, `0` = stop.
     pub const START_STOP: u16 = 1006;
-    /// Direction — `u16`, `06H`. `1` = clockwise, `0` = counter-clockwise.
+    /// Direction - `u16`, `06H`. `1` = clockwise, `0` = counter-clockwise.
     pub const DIRECTION: u16 = 1007;
-    /// Full-speed run — `u16`, `06H`. `1` = start, `0` = stop.
+    /// Full-speed run - `u16`, `06H`. `1` = start, `0` = stop.
     pub const FULL_SPEED: u16 = 1008;
-    /// Back-suction angle, 0..=360° — `u16`, `06H`.
+    /// Back-suction angle, 0..=360° - `u16`, `06H`.
     pub const BACK_SUCTION_ANGLE: u16 = 1009;
 }
 
@@ -412,7 +412,7 @@ impl<T: Transport> Pump<T> {
     /// One transaction, retried once on any failure.
     ///
     /// The LabQ silently discards a frame that lands inside its inter-frame gap,
-    /// and an RS-485 line picks up the occasional glitch — both surface here as a
+    /// and an RS-485 line picks up the occasional glitch - both surface here as a
     /// timeout or a bad frame. A single re-send (already spaced by the
     /// transport's own inter-frame gap) clears almost all of them, so a
     /// long run doesn't accumulate one-off `write_fail`s.
@@ -505,11 +505,11 @@ pub struct SimPump {
     /// Answer the next transaction with this exception code instead of acting.
     pub next_exception: Option<u8>,
     /// When true, every `10H` write to `MOTOR_SPEED` / `FLOW_RATE` is answered
-    /// with exception `0x03` (illegal data value) — models a LabQ that refuses a
+    /// with exception `0x03` (illegal data value) - models a LabQ that refuses a
     /// setpoint (e.g. ml/min with no head/tubing calibration set on the pump).
     pub reject_setpoint_writes: bool,
     /// When set, a read of MOTOR_SPEED / FLOW_RATE reports this value instead of
-    /// what was written — models a pump that stops tracking the setpoint.
+    /// what was written - models a pump that stops tracking the setpoint.
     pub frozen_readback: Option<f32>,
     /// Number of transactions seen (successful or dropped).
     pub transactions: usize,
@@ -586,7 +586,7 @@ impl Transport for SimPump {
         }
         let (body, crc) = request.split_at(request.len() - 2);
         if crc16(body) != u16::from_le_bytes([crc[0], crc[1]]) {
-            // A real device ignores a corrupt frame — caller sees a timeout.
+            // A real device ignores a corrupt frame - caller sees a timeout.
             return Err(TransportError::Timeout);
         }
         if self.drop_next > 0 {
@@ -735,7 +735,7 @@ pub mod serial {
         timeout: Duration,
         /// Minimum silence between the end of one transaction and the start of
         /// the next. The LabQ pump silently drops a request that lands too soon
-        /// after its previous reply, so we hold this gap ourselves — otherwise
+        /// after its previous reply, so we hold this gap ourselves - otherwise
         /// the daemon fires the start sequence (direction, speed, start)
         /// back-to-back and the pump answers only the first frame, failing the
         /// run with "serial transaction timed out". Bench-measured on an FTDI
@@ -971,7 +971,7 @@ mod tests {
     #[test]
     fn a_single_dropped_frame_is_transparently_retried() {
         let mut pump = Pump::new(SimPump::new(1), 1);
-        pump.transport_mut().drop_next = 1; // one drop — the built-in retry clears it
+        pump.transport_mut().drop_next = 1; // one drop - the built-in retry clears it
         pump.set_speed_rpm(50.0).unwrap();
         assert!((pump.transport().speed_rpm() - 50.0).abs() < 1e-3);
     }
@@ -1021,7 +1021,7 @@ mod tests {
             pump.set_speed_rpm(50.0),
             Err(PumpError::Pdu(PduError::Exception(0x03)))
         ));
-        // start/stop and direction still work — only the value registers are refused.
+        // start/stop and direction still work - only the value registers are refused.
         pump.start().unwrap();
         assert!(pump.transport().running());
     }

@@ -64,7 +64,7 @@ Data: (High bit) The fourth byte   The third byte   The second byte   The first 
 
 
 
-# P <u><mark>EE</mark></u> ~~<mark>TTP</mark> —~~ 
+# P <u><mark>EE</mark></u> ~~<mark>TTP</mark> -~~ 
 
 
 
@@ -207,7 +207,7 @@ Chart 1 Number of Pump head & tubing
 
 
 
-#### —— **7. Appendix 1 CRC Check C Language Code** 
+#### -- **7. Appendix 1 CRC Check C Language Code** 
 
 #### **CRC generation process:** 
 

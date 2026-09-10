@@ -1,6 +1,6 @@
 # Wiring
 
-> Stub — expanded during hardware bring-up (milestone 10).
+> Stub - expanded during hardware bring-up (milestone 10).
 
 ```
 ┌────────┐   USB    ┌───────────────────────────┐   RS485 (twisted pair)   ┌───────────┐
@@ -13,7 +13,7 @@
 
 - Isolated, **FT232-based**, automatic TX/RX direction control.
   Examples: Waveshare "USB TO RS485 (isolated)", DSD TECH SH-U12, FTDI USB-RS485-WE cable.
-- Galvanic isolation is intended — a wet lab bench over a 100 h run.
+- Galvanic isolation is intended - a wet lab bench over a 100 h run.
 
 ## RS485 bus
 

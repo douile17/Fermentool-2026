@@ -6,7 +6,7 @@
   // `compact` = the single-line bar pinned at the top of the app.
   // Default (false) = the stacked block shown inline where a run is started.
   // `controls` = show the port picker + Connect button. Set false for a
-  // condition a reconnect can't fix (pump not tracking, journal stalled) — the
+  // condition a reconnect can't fix (pump not tracking, journal stalled) - the
   // status line alone is then shown.
   let { compact = false, controls = true } = $props();
 
@@ -43,13 +43,13 @@
       .catch(() => {});
   }
 
-  // `true` once the user picks something themselves — after that we stop
+  // `true` once the user picks something themselves - after that we stop
   // steering the field from config/rescan.
   let touched = $state(false);
   let addrTouched = $state(false);
 
   // Keep the <select> pointed at the configured port. If that port isn't among
-  // the ones actually present, don't add a phantom "(not detected)" row — offer
+  // the ones actually present, don't add a phantom "(not detected)" row - offer
   // it through the custom field instead, so the list stays uncluttered. A port
   // that shows up on a later rescan is then promoted out of the custom field.
   function syncSelection() {

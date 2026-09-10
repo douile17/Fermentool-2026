@@ -1,4 +1,4 @@
-# Alimentation exponentielle — mode « rate µ »
+# Alimentation exponentielle - mode « rate µ »
 
 Fiche de référence pour construire une courbe d'alimentation fed-batch dans
 Fermentool (*New run* → Curve **Exponential** → mode **rate µ**).
@@ -52,7 +52,7 @@ Repère le plus parlant : **doublement tous les `ln(2)/µ ≈ 0,693/µ` heures**
 | **rate µ**      | `Start`, `µ`, durée   | le End : `End = Start · e^(µ · durée_h)` |
 
 En mode **rate µ** tu pilotes l'agressivité de la montée ; le point d'arrivée
-en **découle** (et peut être énorme — voir §6).
+en **découle** (et peut être énorme - voir §6).
 
 ---
 
@@ -71,7 +71,7 @@ Dans Fermentool : panneau dépliable **« Fed-batch F₀ from strain parameters 
 | **Y_{x/s}** | rendement biomasse/substrat (g/g) | littérature souche+substrat, ou ΔX/ΔS mesuré en batch. Glucose/E. coli ≈ 0,45 |
 | **S_f**     | substrat limitant **dans le flacon de feed** (g/L) | tu l'as préparé → connu (ex. 500 g/L glucose) |
 | **m_s** *(option)* | coefficient de maintenance (g substrat · g biomasse⁻¹ · h⁻¹) | littérature souche. E. coli/glucose ≈ 0,02–0,04. Vide → forme croissance seule |
-| **V_max** *(option)* | volume max du réacteur (L) | fiche réacteur — sert au `t_max` |
+| **V_max** *(option)* | volume max du réacteur (L) | fiche réacteur - sert au `t_max` |
 
 ### 4.2 Formule
 
@@ -114,7 +114,7 @@ pour *Duration*. (En pratique le **kLa / transfert d'O₂** limite souvent avant
 | S_f       | 500 g/L |
 | V_max     | 3 L |
 
-**F₀** (`m_s` laissé vide — forme croissance seule)
+**F₀** (`m_s` laissé vide - forme croissance seule)
 
 ```
 F₀ = (0,15 / 0,45) × 3 × 1,5 / 500

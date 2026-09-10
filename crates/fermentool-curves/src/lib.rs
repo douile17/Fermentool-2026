@@ -1,7 +1,7 @@
 //! Pure, I/O-free time-profile math for Fermentool.
 //!
 //! A [`CurveSpec`] maps elapsed time to a pump setpoint (rpm or ml/min). It is a
-//! pure function of elapsed time — feed it the real wall-clock elapsed after a
+//! pure function of elapsed time - feed it the real wall-clock elapsed after a
 //! restart and it returns exactly where the pump should be, which is what makes
 //! crash-resume correct (`docs/IMPLEMENTATION_PLAN.md` §4.4, §4.7).
 //!
@@ -11,9 +11,9 @@
 //!
 //! Non-trivial shapes take their shape constant in one of two [`ParamMode`]s:
 //!
-//! * [`ParamMode::Endpoints`] — you give `start`, `end`, `duration`; the shape
+//! * [`ParamMode::Endpoints`] - you give `start`, `end`, `duration`; the shape
 //!   constant is derived so the curve passes through both endpoints.
-//! * [`ParamMode::Physio`] — you give `start`, `duration` and a physiological
+//! * [`ParamMode::Physio`] - you give `start`, `duration` and a physiological
 //!   rate (µ, slope, k); `end` is derived. Read it back with
 //!   [`CurveSpec::effective_end`] / [`CurveSpec::resolved`].
 
@@ -23,7 +23,7 @@ use std::time::Duration;
 /// Default dimensionless steepness for an endpoints-mode sigmoid.
 pub const DEFAULT_SIGMOID_STEEPNESS: f64 = 8.0;
 
-/// Family of time profile — mirrors the `runs.curve_kind` column and the UI select.
+/// Family of time profile - mirrors the `runs.curve_kind` column and the UI select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CurveKind {
@@ -170,7 +170,7 @@ pub struct CurveSpec {
     /// Setpoint at `elapsed = 0`.
     pub start: f64,
     /// Setpoint at `elapsed = duration`. In [`ParamMode::Physio`] for linear and
-    /// exponential this is *derived* — use [`CurveSpec::effective_end`].
+    /// exponential this is *derived* - use [`CurveSpec::effective_end`].
     pub end: f64,
     #[serde(with = "duration_secs")]
     pub duration: Duration,
@@ -333,7 +333,7 @@ impl CurveSpec {
         // (`s + inf·0`), and a NaN setpoint must never leave this function.
         // Fall back to `start`, a known-good value.
         let raw = if raw.is_nan() { s } else { raw };
-        // Not `f64::clamp` — it panics if a bound is NaN or `min > max`.
+        // Not `f64::clamp` - it panics if a bound is NaN or `min > max`.
         // `validate()` forbids both, but a spec that skipped validation (e.g.
         // straight into `preview`) must still get a number, not a panic: treat a
         // non-finite or inverted bound as "no limit on that side".
@@ -383,7 +383,7 @@ impl CurveSpec {
         // never reach the pump layer.
         if !self.effective_end().is_finite() {
             return Err(
-                "the derived end value is not finite — the physiological rate is too large for this duration"
+                "the derived end value is not finite - the physiological rate is too large for this duration"
                     .into(),
             );
         }
@@ -876,7 +876,7 @@ mod tests {
         assert!(bad_custom.validate().is_err());
 
         // A finite µ / rate that still overflows `end` to ±inf over a long run
-        // must be rejected — otherwise `value_at` can emit NaN.
+        // must be rejected - otherwise `value_at` can emit NaN.
         let exp_overflow = CurveSpec::exponential_physio(2.0, 20.0, hours(100));
         assert!(!exp_overflow.effective_end().is_finite());
         assert!(exp_overflow.validate().is_err());

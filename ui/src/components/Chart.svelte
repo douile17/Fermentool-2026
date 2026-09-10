@@ -157,7 +157,7 @@
 <style>
   .chart-wrap { overflow-x: hidden; }
   /* Box matches the viewBox aspect so it fills the full width with no
-     letterboxing — lines up edge to edge with the progress bar. */
+     letterboxing - lines up edge to edge with the progress bar. */
   svg { width: 100%; aspect-ratio: 960 / 240; height: auto; display: block; }
   .axl { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
   .progress { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--green-500) 55%, transparent)); }

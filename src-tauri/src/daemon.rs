@@ -44,7 +44,7 @@ pub fn shutdown() -> bool {
 /// Start the daemon so it keeps running after this process exits.
 ///
 /// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, no job object, and the
-/// [`std::process::Child`] handle is dropped immediately — a ~100 h run must
+/// [`std::process::Child`] handle is dropped immediately - a ~100 h run must
 /// survive the window closing (or the shell being killed).
 #[cfg(windows)]
 pub fn spawn_detached(exe: &Path) -> io::Result<()> {

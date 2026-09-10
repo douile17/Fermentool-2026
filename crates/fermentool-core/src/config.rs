@@ -1,4 +1,4 @@
-//! `config.toml` — machine-local settings (`docs/IMPLEMENTATION_PLAN.md` §4.9).
+//! `config.toml` - machine-local settings (`docs/IMPLEMENTATION_PLAN.md` §4.9).
 //!
 //! Every field has a default, so a missing or partial file still loads. On first
 //! run the file is written out with the defaults.
@@ -61,8 +61,8 @@ pub struct SerialConfig {
     pub baud: u32,
     /// Permit starting / resuming a run while the engine is on the pump
     /// simulator (no real port). Off by default: a machine that was never wired
-    /// to a pump — or whose `config.toml` still carries the shipped
-    /// `path = "sim"` — then refuses to run a cycle that would silently drive
+    /// to a pump - or whose `config.toml` still carries the shipped
+    /// `path = "sim"` - then refuses to run a cycle that would silently drive
     /// nothing. Turn it on for bench testing against the simulator.
     #[serde(default)]
     pub allow_simulator: bool,

@@ -25,8 +25,8 @@ adapter (verified: `COM3`, FTDI `0403:6001`).
 
 From the Settings page, with the daemon running and **no active run**:
 
-1. **Rescan** — refetch the port list on demand; surface fetch errors.
-2. **Connect** — switch the live `Engine` transport (sim → `COM3`, or port →
+1. **Rescan** - refetch the port list on demand; surface fetch errors.
+2. **Connect** - switch the live `Engine` transport (sim → `COM3`, or port →
    port) without restarting the daemon, persisting the choice to `config.toml`.
 3. See which transport is actually connected.
 
@@ -60,9 +60,9 @@ pub trait SwapTransport {
 }
 ```
 
-- `impl SwapTransport for Box<dyn Transport + Send>` — `*self = transport::open(..)`.
+- `impl SwapTransport for Box<dyn Transport + Send>` - `*self = transport::open(..)`.
   Assigning drops the old value; `SerialTransport`'s `Drop` closes the port.
-- `impl SwapTransport for SimPump` — no-op returning `TransportKind::Sim`.
+- `impl SwapTransport for SimPump` - no-op returning `TransportKind::Sim`.
   `Engine<T: Transport>` holds `pump: Pump<T>`, and `control.rs`'s tests build
   `Engine::new(Pump::new(SimPump::new(1), 1), ...)`, i.e. `T = SimPump`, so this
   impl is what keeps `spawn` / `control_loop` compiling there. Only these two
@@ -89,7 +89,7 @@ Command::Reconnect {
 ```
 
 Handler (control thread): call `engine.swap_transport`, map the result to a
-human string — `"serial port open: COM3"` / `"COM3 unavailable — running on the
+human string - `"serial port open: COM3"` / `"COM3 unavailable - running on the
 simulator"` / the run-active error.
 
 `POST /api/serial/reconnect`, body `{ "path"?: string, "baud"?: number }`:
@@ -104,11 +104,11 @@ simulator"` / the run-active error.
 
 ### 4. Status frame
 
-Add `transport: String` to the top-level `DaemonStatus` (not `ActiveStatus` —
+Add `transport: String` to the top-level `DaemonStatus` (not `ActiveStatus` -
 it's meaningful when idle too). Value: `"sim"` or the open port name, from the
 `TransportKind` the `Engine` stores. Populated in `current_status`.
 
-### 5. UI — `Settings.svelte`
+### 5. UI - `Settings.svelte`
 
 - Extract the port fetch into a `rescan()` function; call it from `$effect` and
   from a new **Rescan** button next to the port field. Replace `.catch(() => {})`
