@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Baseline window capability. The bundled UI uses no Tauri JS API (plain fetch / WebSocket to the daemon); all shell logic is in Rust.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

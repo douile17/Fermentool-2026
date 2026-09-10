@@ -3,6 +3,11 @@
 **/*.rs.bk
 # Cargo.lock IS committed — fermentool-core is an application, not a library.
 
+# Tauri shell: build output and the daemon sidecar copied in at package time.
+/src-tauri/target
+/src-tauri/gen
+/src-tauri/binaries/*.exe
+
 # Node / web UI
 node_modules/
 # ui/dist/ IS committed — rust-embed bakes it into the daemon binary, so the
