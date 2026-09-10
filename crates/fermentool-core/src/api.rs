@@ -64,7 +64,25 @@ pub fn router(state: AppState) -> Router {
         .route("/api/shutdown", post(shutdown))
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
+        .layer(cors_layer())
         .with_state(state)
+}
+
+/// The Svelte UI bundled into the Tauri desktop shell runs on the
+/// `http://tauri.localhost` origin and calls this API cross-origin. The
+/// listener is already `127.0.0.1`-only, so an explicit allow-list of the
+/// Tauri origins is the whole exposure. Browser / curl / same-origin callers
+/// are unaffected (CORS headers only matter to a browser enforcing them).
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{Any, CorsLayer};
+    CorsLayer::new()
+        .allow_origin([
+            "http://tauri.localhost".parse().unwrap(),
+            "https://tauri.localhost".parse().unwrap(),
+            "tauri://localhost".parse().unwrap(),
+        ])
+        .allow_methods(Any)
+        .allow_headers(Any)
 }
 
 // ---------------------------------------------------------------------------
@@ -794,5 +812,55 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert!(res.status().is_client_error(), "got: {}", res.status());
+    }
+
+    // The Svelte UI, bundled into the Tauri window, calls this API from the
+    // `http://tauri.localhost` origin — cross-origin, so it needs CORS.
+
+    #[tokio::test]
+    async fn cors_echoes_the_tauri_origin() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("origin", "http://tauri.localhost")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("http://tauri.localhost"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_is_answered() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/config")
+            .header("origin", "http://tauri.localhost")
+            .header("access-control-request-method", "PUT")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert!(res.status().is_success(), "got: {}", res.status());
+        assert!(res.headers().contains_key("access-control-allow-methods"));
+    }
+
+    #[tokio::test]
+    async fn cors_does_not_echo_an_unknown_origin() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("origin", "http://evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        // Still served — CORS is browser-enforced — but with no allow-origin echo.
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().get("access-control-allow-origin").is_none());
     }
 }
