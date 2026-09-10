@@ -26,7 +26,8 @@ use fermentool_core::config::Config;
 use fermentool_core::control;
 use fermentool_core::engine::Engine;
 use fermentool_core::store::Store;
-use fermentool_modbus::{Pump, Transport};
+use fermentool_core::transport::WatchdogTransport;
+use fermentool_modbus::Pump;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -148,9 +149,11 @@ fn init_tracing(level: &str, log_dir: &Path) -> anyhow::Result<WorkerGuard> {
     Ok(guard)
 }
 
-fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<Box<dyn Transport + Send>>> {
+fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<WatchdogTransport>> {
     let store = Store::open(db).context("open journal")?;
-    let (transport, kind) = fermentool_core::transport::open(&cfg.serial, cfg.pump.address);
+    // The port runs on a worker thread (see `transport` module docs): a stuck
+    // serial syscall then wedges only that worker, never the control loop / API.
+    let (transport, kind) = WatchdogTransport::spawn(&cfg.serial, cfg.pump.address);
     let mut engine = Engine::new(Pump::new(transport, cfg.pump.address), store, VERSION);
     engine.set_transport_kind(kind);
     engine.set_serial(cfg.serial.clone(), cfg.pump.address);
