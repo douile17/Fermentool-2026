@@ -34,8 +34,16 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/fermentool-core"],
+    "resources": {
+      "installer/fermentool-task.xml": "fermentool-task.xml",
+      "installer/setup-task.ps1": "setup-task.ps1",
+      "installer/remove-task.ps1": "remove-task.ps1"
+    },
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" }
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installerHooks": "installer/hooks.nsh"
+      }
     }
   }
 }

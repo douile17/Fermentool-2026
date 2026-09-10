@@ -30,11 +30,32 @@ WantedBy=multi-user.target
 `~/Library/LaunchAgents/com.fermentool.core.plist` with `KeepAlive = true` and
 `RunAtLoad = true`, then `launchctl load` it.
 
-## Windows
+## Windows — the Fermentool app (recommended)
 
-- **Task Scheduler**: "At log on" trigger, action = the binary, settings →
-  "If the task fails, restart every 1 minute".
-- or **NSSM** (`nssm install Fermentool ...`) to run it as a real service.
+The installer (`Fermentool_<version>_x64-setup.exe`, built with `cargo tauri
+build`) does the service side for you:
+
+- installs `fermentool.exe` (the window + tray) and `fermentool-core.exe`
+  (the daemon);
+- registers a scheduled task **Fermentool** — trigger "at log on", run level
+  highest available, `RestartOnFailure` every 1 min up to 3 times.
+
+So after a reboot the daemon is back within seconds and — if a run was
+interrupted — the app shows the resume prompt when you open it. Closing the
+window leaves the daemon running; use the tray menu's *Shut down daemon &
+quit* to stop it. Uninstalling removes the task and stops the daemon.
+
+Manual check: `schtasks /query /tn Fermentool`.
+
+The notes below are only for a **headless** machine with no interactive
+login (the app's scheduled task is per-user, `onlogon`).
+
+## Windows — headless (Task Scheduler / NSSM)
+
+- **Task Scheduler**: "At startup" trigger, action = `fermentool-core.exe`,
+  settings → "If the task fails, restart every 1 minute".
+- or **NSSM** (`nssm install Fermentool <path>\fermentool-core.exe`) to run it
+  as a real service under a service account.
 
 After a restart the daemon reads the journal and, if a run was active, shows the
 resume prompt in the web UI.

@@ -467,5 +467,11 @@ restart loses nothing.
   *Camera* tab. (ESP32-S3 hub optional, out of the control path.)
 - Data export: Parquet/CSV bundles, run comparison overlay.
 - Multi-pump: RS485 multi-drop, per-run `pump_addr` already in the schema.
-- Optional native WebView shell (Tauri/Wails) — no core changes.
+- Native WebView shell — **done for Windows** (`src-tauri/`, Tauri v2: window +
+  tray, detached daemon, NSIS installer that registers an at-logon task). "No
+  core changes" was relaxed to a single `CorsLayer` (the bundled UI is a
+  separate origin) — see
+  `docs/superpowers/specs/2026-09-10-tauri-webview-shell-design.md` and
+  `docs/superpowers/plans/2026-09-10-tauri-desktop-shell.md`. Linux/macOS
+  shells still open.
 ```

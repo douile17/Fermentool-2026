@@ -64,6 +64,22 @@ npm run dev      # dev server on :5173, proxies /api to the daemon on :8730
 npm run build    # production build embedded by the daemon
 ```
 
+### Windows desktop app (Tauri)
+
+A native window + tray shell over the same UI, with an installer that also
+registers the daemon to start at log on. Needs `cargo install tauri-cli`
+(v2) and the MSVC build tools.
+
+```powershell
+npm --prefix ui ci ; npm --prefix ui run build
+./src-tauri/scripts/copy-sidecar.ps1     # builds ui/dist + stages the daemon sidecar
+cargo tauri build                        # -> target/release/bundle/nsis/Fermentool_<version>_x64-setup.exe
+```
+
+`cargo tauri dev` runs it against a live daemon (run `copy-sidecar.ps1` first).
+The installer is unsigned — Windows SmartScreen warns on first run; code signing
+is a follow-up. Design: `docs/superpowers/specs/2026-09-10-tauri-webview-shell-design.md`.
+
 ## License
 
 MIT.
