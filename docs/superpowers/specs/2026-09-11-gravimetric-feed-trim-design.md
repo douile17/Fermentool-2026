@@ -1,7 +1,7 @@
 # Gravimetric feed trim (balance-corrected feed pump)
 
 **Date:** 2026-09-11
-**Status:** approved, ready for implementation plan (pending Step 0 spike result)
+**Status:** approved, Step 0 spike confirmed (SICS), ready for implementation plan
 
 ## Problem
 
@@ -87,6 +87,28 @@ determines, for the operator's actual Ranger 7000:
 This determines which driver (§1 below) gets built for real, and whether a
 second one is worth it. **Do not write the `SicsScale`/`OhausContinuousScale`
 drivers until this comes back.**
+
+### Spike result: SICS confirmed
+
+Run against the real Ranger 7000 (USB, FT230X USB-serial bridge -> Windows
+picked it up as a plain COM port with the in-box driver, no Ohaus CD needed),
+factory settings, no configuration changed on the balance:
+
+```
+--port <COMn> --baud 9600 (8N1)
+S\r\n   ->  S S      740.5 g\r\n
+SI\r\n  ->  S S      740.6 g\r\n
+```
+
+- MT-SICS works out of the box; `S` and `SI` both reply in the standard
+  `<cmd-echo> <status> <value> <unit>` shape, status `S` = stable.
+- Framing is `\r\n` (CRLF), not bare `\r`.
+- Resolution is **0.1 g** (one decimal digit) at these factory settings, unit
+  always `g`.
+- Continuous-output mode was never needed. **Driver to build: `SicsScale`
+  only.** `OhausContinuousScale` is dropped from scope (§1, §9 unaffected:
+  still generic over any `Transport` impl, so adding it later if a different
+  balance model needs it is still just a new small driver, not a redesign).
 
 ## Design
 
