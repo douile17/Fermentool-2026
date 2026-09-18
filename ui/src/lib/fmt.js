@@ -77,3 +77,10 @@ export const unitFor = (cv) => (cv === 'ml_min' ? 'ml/min' : 'rpm');
 /** Display precision the pump uses for a control variable: ml/min shows 3
  *  decimals, rpm shows 1 (its 0.1 motor step). */
 export const digitsFor = (cv) => (cv === 'ml_min' ? 3 : 1);
+
+/** A commanded-volume total, mL: "482.3 mL" below 1 L, "1.204 L" at or above
+ *  it, so the readout never grows into an unwieldy number of digits. */
+export function vol(ml) {
+  if (ml == null || Number.isNaN(ml)) return '–';
+  return Math.abs(ml) >= 1000 ? `${num(ml / 1000, 3)} L` : `${num(ml, 1)} mL`;
+}

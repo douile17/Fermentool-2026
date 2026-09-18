@@ -1,5 +1,5 @@
 <script>
-  import { num } from '../lib/fmt.js';
+  import { num, vol } from '../lib/fmt.js';
 
   /**
    * @type {{
@@ -9,9 +9,10 @@
    *   durationS: number,
    *   unit?: string,
    *   digits?: number,
+   *   nowVolumeMl?: number | null,
    * }}
    */
-  let { planned = [], actual = [], nowS = null, durationS, unit = 'rpm', digits = 1 } = $props();
+  let { planned = [], actual = [], nowS = null, durationS, unit = 'rpm', digits = 1, nowVolumeMl = null } = $props();
 
   const W = 960;
   const H = 240;
@@ -70,24 +71,42 @@
       : ''
   );
   const nowX = $derived(nowS == null ? null : x(nowS));
-  // Value on the planned curve at `nowS`, linearly interpolated between the two
-  // bracketing samples so the marker glides continuously instead of snapping
-  // from one of the 200 preview points to the next.
-  const nowV = $derived.by(() => {
-    if (nowS == null || planned.length === 0) return null;
-    if (nowS <= planned[0][0]) return planned[0][1];
+
+  // Value on the planned curve at any time `t`, linearly interpolated between
+  // the two bracketing samples so the marker glides continuously instead of
+  // snapping from one of the 200 preview points to the next.
+  function curveValueAt(t) {
+    if (planned.length === 0) return null;
+    if (t <= planned[0][0]) return planned[0][1];
     const last = planned[planned.length - 1];
-    if (nowS >= last[0]) return last[1];
+    if (t >= last[0]) return last[1];
     for (let i = 1; i < planned.length; i++) {
       const [t1, v1] = planned[i];
-      if (t1 >= nowS) {
+      if (t1 >= t) {
         const [t0, v0] = planned[i - 1];
-        const f = t1 === t0 ? 0 : (nowS - t0) / (t1 - t0);
+        const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
         return v0 + (v1 - v0) * f;
       }
     }
     return last[1];
-  });
+  }
+  const nowV = $derived(nowS == null ? null : curveValueAt(nowS));
+
+  // The live volume label rides the "now" marker.
+  // Horizontally: flips to the left of the dot once it gets close to the
+  // right edge, so it never runs off the chart.
+  const nowLabelFlip = $derived(nowX != null && nowX > W - 90);
+  const nowLabelX = $derived(nowX == null ? null : nowX + (nowLabelFlip ? -10 : 10));
+  // Vertically: sits above the dot while it's in the lower half of the plot
+  // (plenty of headroom up there), flips below once the dot itself climbs
+  // into the upper half, otherwise there's too little room left above it
+  // before the top edge. A generous offset matters more than which side:
+  // a curve that spends most of a long run settled near-flat close to one
+  // edge (e.g. a decelerostat holding near its floor for tens of hours)
+  // barely clears its own line at a small offset regardless of side.
+  const plotMidY = padT + (H - padT - padB) / 2;
+  const nowLabelBelow = $derived(nowV == null ? false : y(nowV) < plotMidY);
+  const nowLabelOffset = 22;
 
   // Journalled setpoints drawn as one continuous trace rather than a dot per tick.
   const actualLine = $derived(
@@ -149,6 +168,11 @@
       {#if nowV != null}
         <circle cx={nowX} cy={y(nowV)} r="4" fill="var(--surface)"
                 stroke="var(--teal-700)" stroke-width="2" />
+        {#if nowVolumeMl != null}
+          <text x={nowLabelX} y={clampY(y(nowV) + (nowLabelBelow ? nowLabelOffset : -nowLabelOffset))}
+                text-anchor={nowLabelFlip ? 'end' : 'start'}
+                class="axl now-vol">{vol(nowVolumeMl)}</text>
+        {/if}
       {/if}
     {/if}
   </svg>
@@ -160,5 +184,6 @@
      letterboxing, lines up edge to edge with the progress bar. */
   svg { width: 100%; aspect-ratio: 960 / 240; height: auto; display: block; }
   .axl { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+  .now-vol { fill: var(--ink); font-weight: 600; }
   .progress { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--green-500) 55%, transparent)); }
 </style>

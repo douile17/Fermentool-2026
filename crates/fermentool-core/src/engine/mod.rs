@@ -269,6 +269,13 @@ pub struct HoldingStatus {
     /// The setpoint the pump is holding (curve's final, quantised value).
     pub value: f64,
     pub finished_at: Timestamp,
+    /// Commanded volume delivered over the run's planned duration, mL, frozen
+    /// at the moment the curve completed. `Some` only for `ControlVar::MlMin`.
+    /// The pump keeps running at `value` after this, the UI adds
+    /// `value * (now - finished_at)` on top to show a running total, no
+    /// further engine-side accounting needed since the rate is constant.
+    #[serde(default)]
+    pub volume_added_ml: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -281,6 +288,10 @@ pub struct ActiveStatus {
     pub tick_interval_s: u32,
     pub last_seq: Option<i64>,
     pub last_target: Option<f64>,
+    /// Commanded volume delivered so far, mL. `Some` only for
+    /// `ControlVar::MlMin`. An open-loop estimate (trapezoid integral of the
+    /// setpoint the daemon wrote), not a measured flow.
+    pub volume_added_ml: Option<f64>,
 }
 
 struct ActiveRun {
@@ -295,6 +306,31 @@ struct ActiveRun {
     /// Setpoint last written to the pump, already snapped to [`setpoint_grid`].
     /// [`Engine::apply_setpoint`] compares against this to skip no-op writes.
     last_write_q: Option<f64>,
+    /// `elapsed_s` of the last sample folded into `volume_added_ml`, the left
+    /// edge of the next trapezoid slice.
+    vol_elapsed_s: f64,
+    /// The target value at `vol_elapsed_s`, the left edge of the next
+    /// trapezoid slice. Deliberately separate from `last_target`: that field
+    /// is also written by `Engine::apply_setpoint` every ~150 ms between
+    /// journal ticks, so reusing it here would silently pull in whatever
+    /// setpoint was last written just before the *next* tick rather than the
+    /// one that was true at `vol_elapsed_s`, inflating every slice of a
+    /// moving curve (not just the last one).
+    vol_target: f64,
+    /// Commanded volume delivered so far, mL: a trapezoid integral of the
+    /// applied setpoint over elapsed time. `Some` only for `ControlVar::MlMin`
+    /// (a `Rpm` run has no head/tubing calibration to turn speed into volume,
+    /// see the rpm-only convention). This is what the daemon *told* the pump
+    /// to do, not a measured flow, there is no flow meter in this loop, see
+    /// `docs/superpowers/specs/2026-09-11-gravimetric-feed-trim-design.md`.
+    volume_added_ml: Option<f64>,
+}
+
+/// Trapezoid slice of a commanded-volume integral between two
+/// `(elapsed_s, target_ml_min)` samples, in mL.
+fn volume_slice(prev: (f64, f64), next: (f64, f64)) -> f64 {
+    let dt_min = (next.0 - prev.0).max(0.0) / 60.0;
+    (prev.1 + next.1) / 2.0 * dt_min
 }
 
 /// Owns the pump and the journal for the lifetime of the process.
@@ -678,6 +714,7 @@ impl<T: Transport> Engine<T> {
                 tick_interval_s: TICK_INTERVAL.as_secs() as u32,
                 last_seq: (a.next_seq > 0).then_some(a.next_seq - 1),
                 last_target: a.last_target,
+                volume_added_ml: a.volume_added_ml,
             }),
             transport: self.transport.label(),
             holding: self.holding.clone(),
@@ -766,6 +803,9 @@ impl<T: Transport> Engine<T> {
             next_seq: 0,
             last_target: Some(first),
             last_write_q: Some(first),
+            vol_elapsed_s: 0.0,
+            vol_target: first,
+            volume_added_ml: (cfg.control_var == ControlVar::MlMin).then_some(0.0),
         });
         Ok(id)
     }
@@ -786,8 +826,22 @@ impl<T: Transport> Engine<T> {
         );
         let seq = active.next_seq;
         active.next_seq += 1;
+        if let Some(vol) = active.volume_added_ml {
+            // The finishing tick can land a little past `duration_s` (the
+            // control loop hits its 1s deadline "at or after", never exactly
+            // on it); `target` is already clamped to the curve's end value by
+            // `value_at`, but without clamping this slice's time bound too,
+            // that overshoot gets counted as extra time at the final rate,
+            // inflating the frozen run-end total by a few tenths of a mL.
+            let te = elapsed_s.min(duration_s as f64);
+            active.volume_added_ml =
+                Some(vol + volume_slice((active.vol_elapsed_s, active.vol_target), (te, target)));
+        }
+        active.vol_elapsed_s = elapsed_s;
+        active.vol_target = target;
         active.last_target = Some(target);
         active.last_write_q = Some(target);
+        let volume_added_ml = active.volume_added_ml;
 
         let write = write_setpoint(&mut self.pump, control_var, target);
         let written_ok = write.is_ok();
@@ -941,6 +995,7 @@ impl<T: Transport> Engine<T> {
                 control_var,
                 value: target,
                 finished_at: now,
+                volume_added_ml,
             }));
             self.active = None;
             return Ok(TickOutcome::Finished { seq, target });
@@ -1119,6 +1174,12 @@ impl<T: Transport> Engine<T> {
         self.pump.start()?;
 
         let next_seq = self.store.last_tick(run.id)?.map_or(0, |t| t.seq + 1);
+        let volume_added_ml = if run.control_var == ControlVar::MlMin {
+            let start = quantize(run.curve.value_at(Duration::ZERO), setpoint_grid(run.control_var));
+            Some(self.reconstruct_volume_ml(run.id, start, run.duration_s, elapsed_s, target)?)
+        } else {
+            None
+        };
         self.store.log_event(&NewEvent {
             run_id: Some(run.id),
             wall_time: now,
@@ -1140,8 +1201,44 @@ impl<T: Transport> Engine<T> {
             next_seq,
             last_target: Some(target),
             last_write_q: Some(target),
+            vol_elapsed_s: elapsed_s,
+            vol_target: target,
+            volume_added_ml,
         });
         Ok(run.id)
+    }
+
+    /// Reconstruct `volume_added_ml` after a crash: the in-memory accumulator
+    /// from before the restart is gone, but every tick's `(elapsed_s, target)`
+    /// is already journalled, trapezoid-integrate straight from those rows
+    /// (seeded at `(0, start)`), then fold in the gap between the last
+    /// journalled tick and this resume moment (`resume_elapsed_s`,
+    /// `resume_target`), the pump kept running at whatever it was last told
+    /// for however long the daemon was down.
+    fn reconstruct_volume_ml(
+        &self,
+        run_id: i64,
+        start: f64,
+        duration_s: i64,
+        resume_elapsed_s: f64,
+        resume_target: f64,
+    ) -> Result<f64> {
+        // Clamp every time bound to `duration_s`, same reasoning as `tick`'s
+        // finishing-slice clamp: a resume can land minutes into the grace
+        // window past the curve's end, and a persisted tick can itself carry
+        // a touch of scheduling overshoot, neither should count as extra time
+        // at the (already curve-clamped) final rate.
+        let d = duration_s as f64;
+        let ticks = self.store.ticks(run_id, 0, i64::MAX)?;
+        let mut total = 0.0;
+        let mut prev = (0.0, start);
+        for t in &ticks {
+            let te = t.elapsed_s.min(d);
+            total += volume_slice(prev, (te, t.target));
+            prev = (te, t.target);
+        }
+        total += volume_slice(prev, (resume_elapsed_s.min(d), resume_target));
+        Ok(total)
     }
 
     /// End the interrupted run without resuming it: stop the pump and mark it
@@ -1326,6 +1423,36 @@ mod tests {
     }
 
     #[test]
+    fn commanded_volume_accumulates_as_trapezoid_integral() {
+        // F(t) = t_min ml/min on this line, so the exact integral from 0 to
+        // t_min is a clean t_min^2 / 2, checkable by hand at every tick.
+        let mut e = engine();
+        let cfg = RunConfig {
+            control_var: ControlVar::MlMin,
+            curve: CurveSpec::linear(0.0, 60.0, Duration::from_secs(3600)),
+            ..linear_cfg()
+        };
+        e.start_run(cfg, t0()).unwrap();
+        assert_eq!(e.status().active.unwrap().volume_added_ml, Some(0.0));
+
+        e.tick(at(600)).unwrap(); // 10 min in, target = 10 ml/min
+        let v = e.status().active.unwrap().volume_added_ml.unwrap();
+        assert!((v - 50.0).abs() < 1e-6, "got {v}"); // 10^2 / 2
+
+        e.tick(at(1200)).unwrap(); // 20 min in, target = 20 ml/min
+        let v = e.status().active.unwrap().volume_added_ml.unwrap();
+        assert!((v - 200.0).abs() < 1e-6, "got {v}"); // 20^2 / 2
+    }
+
+    #[test]
+    fn commanded_volume_is_none_for_an_rpm_run() {
+        let mut e = engine();
+        e.start_run(linear_cfg(), t0()).unwrap();
+        e.tick(at(600)).unwrap();
+        assert_eq!(e.status().active.unwrap().volume_added_ml, None);
+    }
+
+    #[test]
     fn second_start_is_busy() {
         let mut e = engine();
         e.start_run(linear_cfg(), t0()).unwrap();
@@ -1351,11 +1478,82 @@ mod tests {
         assert_eq!(h.name, "r");
         assert_eq!(h.control_var, ControlVar::Rpm);
         assert!((h.value - 100.0).abs() < 1e-6); // curve end, quantised
+        assert_eq!(h.volume_added_ml, None); // rpm run, no calibrated volume
 
         assert_eq!(
             e.store().run(id).unwrap().unwrap().status,
             RunStatus::Completed
         );
+    }
+
+    #[test]
+    fn holding_freezes_the_commanded_volume_at_completion() {
+        // Same F(t) = t_min ml/min line as the other commanded-volume tests:
+        // exact integral over the full hour is 60^2 / 2 = 1800.
+        let mut e = engine();
+        let cfg = RunConfig {
+            control_var: ControlVar::MlMin,
+            curve: CurveSpec::linear(0.0, 60.0, Duration::from_secs(3600)),
+            ..linear_cfg()
+        };
+        e.start_run(cfg, t0()).unwrap();
+        e.tick(at(1800)).unwrap();
+        assert!(matches!(
+            e.tick(at(3600)).unwrap(),
+            TickOutcome::Finished { .. }
+        ));
+        let h = e.status().holding.expect("holding set after completion");
+        let v = h.volume_added_ml.expect("ml/min run freezes a volume");
+        assert!((v - 1800.0).abs() < 1e-6, "got {v}");
+    }
+
+    #[test]
+    fn holding_volume_is_not_inflated_by_a_late_finishing_tick() {
+        // The control loop hits its 1s deadline "at or after", never exactly
+        // on it, so the finishing tick can land a bit past `duration_s` (here
+        // 3 s late). 100 -> 200 ml/min over 120 s averages 150 ml/min, exact
+        // volume is 300.0 mL; without clamping the last slice to duration_s,
+        // the extra 3 s at the (curve-clamped) 200 ml/min end rate would
+        // inflate this to 310.0 mL.
+        let mut e = engine();
+        let cfg = RunConfig {
+            control_var: ControlVar::MlMin,
+            curve: CurveSpec::linear(100.0, 200.0, Duration::from_secs(120)),
+            ..linear_cfg()
+        };
+        e.start_run(cfg, t0()).unwrap();
+        e.tick(at(60)).unwrap();
+        assert!(matches!(
+            e.tick(at(123)).unwrap(), // 3 s past the 120 s duration
+            TickOutcome::Finished { .. }
+        ));
+        let h = e.status().holding.expect("holding set after completion");
+        let v = h.volume_added_ml.expect("ml/min run freezes a volume");
+        assert!((v - 300.0).abs() < 1e-6, "got {v}, late tick overshot the true total");
+    }
+
+    #[test]
+    fn commanded_volume_is_not_contaminated_by_apply_setpoint_between_ticks() {
+        // Real runs interleave `apply_setpoint` (~every 150 ms) between
+        // journal ticks (1 s), and `apply_setpoint` writes `last_target` too.
+        // If the volume trapezoid reused `last_target` as its "previous"
+        // corner (instead of its own `vol_target`), a single intervening
+        // `apply_setpoint` call would pull in a too-recent value and inflate
+        // the slice: on this F(t) = t_min ml/min line, a naive reuse of
+        // `last_target` gives 225.0 mL for what must be exactly 200.0
+        // (10^2/2 + trapezoid from (10,10) to (20,20) = 50 + 150).
+        let mut e = engine();
+        let cfg = RunConfig {
+            control_var: ControlVar::MlMin,
+            curve: CurveSpec::linear(0.0, 60.0, Duration::from_secs(3600)),
+            ..linear_cfg()
+        };
+        e.start_run(cfg, t0()).unwrap();
+        e.tick(at(600)).unwrap(); // 10 min in, target = 10 ml/min
+        e.apply_setpoint(at(900)).unwrap(); // 15 min in, writes last_target = 15
+        e.tick(at(1200)).unwrap(); // 20 min in, target = 20 ml/min
+        let v = e.status().active.unwrap().volume_added_ml.unwrap();
+        assert!((v - 200.0).abs() < 1e-6, "got {v}, contaminated by the intervening apply_setpoint");
     }
 
     #[test]
@@ -2065,6 +2263,56 @@ mod tests {
             .collect();
         assert!(kinds.contains(&"crash_detected".to_string()));
         assert!(kinds.contains(&"resume".to_string()));
+    }
+
+    #[test]
+    fn commanded_volume_is_reconstructed_after_a_simulated_crash() {
+        // Same F(t) = t_min ml/min line as commanded_volume_accumulates_...,
+        // so every partial sum below is checkable by hand, and (trapezoid on
+        // a straight line is exact for any partition) the reconstructed
+        // total across a sparse post-crash tick history stays exact too.
+        let db = TempDb::new();
+        let ml_cfg = RunConfig {
+            control_var: ControlVar::MlMin,
+            curve: CurveSpec::linear(0.0, 60.0, Duration::from_secs(3600)),
+            ..linear_cfg()
+        };
+        let id = {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let id = a.start_run(ml_cfg, t0()).unwrap();
+            a.tick(at(600)).unwrap(); // target 10 ml/min
+            a.tick(at(1200)).unwrap(); // target 20 ml/min
+            id // drop engine A -> "crash", in-memory accumulator lost
+        };
+
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        assert_eq!(b.resume(at(1800), grace()).unwrap(), id);
+        // Reconstructed from the journalled ticks (0,0)->(600,10)->(1200,20),
+        // plus the gap to this resume moment at (1800,30): 50 + 150 + 250.
+        let v = b.status().active.unwrap().volume_added_ml.unwrap();
+        assert!((v - 450.0).abs() < 1e-6, "got {v}");
+
+        // Accumulation continues normally from the resumed anchor.
+        b.tick(at(1810)).unwrap();
+        let v2 = b.status().active.unwrap().volume_added_ml.unwrap();
+        assert!(v2 > v, "volume must keep climbing after resume, got {v2}");
+
+        assert!(matches!(
+            b.tick(at(3600)).unwrap(),
+            TickOutcome::Finished { .. }
+        ));
+        // Run finished; the completed run's volume no longer appears on
+        // `active` (it is None once the run is holding, see HoldingStatus),
+        // recompute it straight from the full journal to check the total
+        // matches the curve's exact integral, 60^2 / 2.
+        let full = b.store().ticks(id, 0, i64::MAX).unwrap();
+        let mut total = 0.0;
+        let mut prev = (0.0, 0.0);
+        for t in &full {
+            total += volume_slice(prev, (t.elapsed_s, t.target));
+            prev = (t.elapsed_s, t.target);
+        }
+        assert!((total - 1800.0).abs() < 0.01, "got {total}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
-  import { num, dur, shortTime, stamp, unitFor, digitsFor } from '../lib/fmt.js';
+  import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
 
@@ -106,6 +106,15 @@
   // Off the smooth clock so the progress bar fills continuously, not per tick.
   const pct = $derived(run && run.duration_s ? Math.min(100, (elapsedAnim / run.duration_s) * 100) : 0);
 
+  // The pump holds at a constant rate after natural completion, so the volume
+  // delivered since then is just rate * elapsed, no curve integration needed.
+  // Ticks off the 1 Hz `now` clock, same as the rest of this "complete" card.
+  const holdVolumeSinceMl = $derived.by(() => {
+    if (!complete || !holding?.finished_at || holding.value == null) return 0;
+    const sinceMs = now - Date.parse(holding.finished_at);
+    return sinceMs > 0 ? (holding.value * sinceMs) / 60000 : 0;
+  });
+
   // Current setpoint read off the planned curve at the smooth clock, so the
   // displayed value climbs continuously instead of jumping once per tick.
   function valueAt(series, t) {
@@ -207,7 +216,20 @@
         <div><div class="k">Direction</div><div class="v mono">{run.direction === 'cw' ? 'clockwise' : 'counter-cw'}</div></div>
         <div><div class="k">Started</div><div class="v mono">{stamp(run.started_at)}</div></div>
         <div><div class="k">Finished</div><div class="v mono">{stamp(holding.finished_at)}</div></div>
-        <div><div class="k">Setpoint clamp</div><div class="v mono">{num(run.curve.clamp_min, digits)}–{num(run.curve.clamp_max, 0)}</div></div>
+        {#if run.control_var === 'ml_min' && holding.volume_added_ml != null}
+          <div>
+            <div class="k" title="Commanded volume over the run's planned duration, frozen at completion. Estimated, not measured.">
+              Volume at run end
+            </div>
+            <div class="v mono">{vol(holding.volume_added_ml)}</div>
+          </div>
+          <div>
+            <div class="k" title="Above, plus what the pump has kept delivering at its holding rate since the run ended. Keeps climbing until you stop the pump.">
+              Total volume (pump still running)
+            </div>
+            <div class="v mono">{vol(holding.volume_added_ml + holdVolumeSinceMl)}</div>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -259,7 +281,12 @@
 
       <div class="progress">
         <div class="bar"><span style="width:{pct}%"></span></div>
-        <div class="cap mono"><span>{dur(elapsed)} elapsed · {pct.toFixed(0)}%</span></div>
+        <div class="cap mono">
+          <span>{dur(elapsed)} elapsed · {pct.toFixed(0)}%</span>
+          {#if run.control_var === 'ml_min' && active?.volume_added_ml != null}
+            <span>{vol(active.volume_added_ml)} delivered</span>
+          {/if}
+        </div>
       </div>
 
       <Chart
@@ -269,13 +296,20 @@
         durationS={run.duration_s}
         {unit}
         {digits}
+        nowVolumeMl={run.control_var === 'ml_min' ? active?.volume_added_ml : null}
       />
 
       <div class="meta">
         <div><div class="k">Direction</div><div class="v mono">{run.direction === 'cw' ? 'clockwise' : 'counter-cw'}</div></div>
-        <div><div class="k">Tick cadence</div><div class="v mono">{run.tick_interval_s} s</div></div>
-        <div><div class="k">Setpoint clamp</div><div class="v mono">{num(run.curve.clamp_min, digits)}–{num(run.curve.clamp_max, 0)}</div></div>
         <div><div class="k">Started</div><div class="v mono">{stamp(run.started_at)}</div></div>
+        {#if run.control_var === 'ml_min' && active?.volume_added_ml != null}
+          <div>
+            <div class="k" title="Integrated from the commanded setpoint, not a measured flow, actual delivered volume can drift over a long run.">
+              Volume added (live, est.)
+            </div>
+            <div class="v mono">{vol(active.volume_added_ml)}</div>
+          </div>
+        {/if}
       </div>
 
       <div class="foot">
