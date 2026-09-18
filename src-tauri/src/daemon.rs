@@ -54,6 +54,10 @@ pub fn spawn_detached(exe: &Path) -> io::Result<()> {
     let child = Command::new(exe)
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
+        // The Tauri window is already going to show the UI, a browser tab on
+        // top of it would be a second, redundant surface pointing at the same
+        // daemon.
+        .env("FERMENTOOL_NO_BROWSER", "1")
         .spawn()?;
     drop(child); // never wait on it
     Ok(())
@@ -61,7 +65,9 @@ pub fn spawn_detached(exe: &Path) -> io::Result<()> {
 
 #[cfg(not(windows))]
 pub fn spawn_detached(exe: &Path) -> io::Result<()> {
-    let child = Command::new(exe).spawn()?;
+    let child = Command::new(exe)
+        .env("FERMENTOOL_NO_BROWSER", "1")
+        .spawn()?;
     drop(child);
     Ok(())
 }

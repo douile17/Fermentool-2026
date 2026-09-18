@@ -227,9 +227,19 @@ async fn main() -> anyhow::Result<()> {
     let url = format!("http://{addr}");
     tracing::info!("API listening on {url}");
 
-    // Release builds have no console, so pop the UI in the default browser.
+    // Release builds have no console, so pop the UI in the default browser,
+    // unless a native window is already going to show it: the Tauri shell
+    // sets `FERMENTOOL_NO_BROWSER` when it spawns this exe as its detached
+    // sidecar, and the "start at log on" scheduled task passes `--no-browser`
+    // (Task Scheduler's XML has no way to set an env var on the launched
+    // process). Without this, a reboot or a Tauri-window launch pops a
+    // browser tab the operator never asked for, on top of the app window.
     #[cfg(not(debug_assertions))]
-    open_in_browser(&url);
+    if std::env::var_os("FERMENTOOL_NO_BROWSER").is_none()
+        && !std::env::args().any(|a| a == "--no-browser")
+    {
+        open_in_browser(&url);
+    }
 
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal(shutdown))

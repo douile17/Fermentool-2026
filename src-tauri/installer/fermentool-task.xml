@@ -41,6 +41,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>{{EXE}}</Command>
+      <Arguments>--no-browser</Arguments>
     </Exec>
   </Actions>
 </Task>
