@@ -26,3 +26,10 @@ dir = ""                        # empty = OS default data dir
 dir = ""                        # empty = <storage>/logs
 level = "info"                  # error | warn | info | debug | trace
 retain_days = 30
+
+[scale]
+path = ""                     # empty = no scale; e.g. Windows: "COM5"
+baud = 9600                    # match the balance's own Communications menu
+density_g_per_ml = 1.0         # feed density; water ~1.0, 500 g/L glucose ~1.18
+# MT-SICS only for now (send "S"/"SI", parse "S <status> <value> g"). A
+# balance without SICS needs its own small driver alongside SicsScale.

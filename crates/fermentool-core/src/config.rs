@@ -50,6 +50,7 @@ pub struct Config {
     pub resume: ResumeConfig,
     pub storage: StorageConfig,
     pub log: LogConfig,
+    pub scale: ScaleConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +94,19 @@ pub struct StorageConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ScaleConfig {
+    /// Serial device path. Empty = no scale configured; automatic
+    /// (gravimetric-trim) runs are unavailable until this is set.
+    pub path: String,
+    /// Whatever baud the scale's own Communications menu is set to.
+    pub baud: u32,
+    /// Feed density (g/mL), used to convert a measured mass rate to a volume
+    /// rate. Water ~= 1.0; a 500 g/L glucose feed ~= 1.18.
+    pub density_g_per_ml: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LogConfig {
     /// Empty = `<storage>/logs`.
     pub dir: String,
@@ -110,6 +124,7 @@ impl Default for Config {
             resume: ResumeConfig::default(),
             storage: StorageConfig::default(),
             log: LogConfig::default(),
+            scale: ScaleConfig::default(),
         }
     }
 }
@@ -128,6 +143,22 @@ impl SerialConfig {
     /// `true` when this points at the pump simulator rather than a real port.
     pub fn use_simulator(&self) -> bool {
         self.path.eq_ignore_ascii_case("sim") || self.path.is_empty()
+    }
+}
+
+impl Default for ScaleConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            baud: 9600,
+            density_g_per_ml: 1.0,
+        }
+    }
+}
+
+impl ScaleConfig {
+    pub fn configured(&self) -> bool {
+        !self.path.trim().is_empty()
     }
 }
 
@@ -264,5 +295,23 @@ mod tests {
         let mut cfg = Config::default();
         cfg.resume.grace_minutes = 5;
         assert_eq!(cfg.grace(), std::time::Duration::from_secs(300));
+    }
+
+    #[test]
+    fn scale_defaults_to_unconfigured() {
+        let cfg = Config::default();
+        assert_eq!(cfg.scale.path, "");
+        assert!(!cfg.scale.configured());
+        assert_eq!(cfg.scale.baud, 9600);
+        assert_eq!(cfg.scale.density_g_per_ml, 1.0);
+    }
+
+    #[test]
+    fn scale_config_round_trips_through_toml() {
+        let toml = "[scale]\npath = \"COM5\"\nbaud = 9600\ndensity_g_per_ml = 1.18\n";
+        let cfg = Config::from_toml(toml).unwrap();
+        assert!(cfg.scale.configured());
+        assert_eq!(cfg.scale.path, "COM5");
+        assert_eq!(cfg.scale.density_g_per_ml, 1.18);
     }
 }
