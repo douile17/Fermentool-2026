@@ -5,6 +5,7 @@
   import NewRun from './routes/NewRun.svelte';
   import History from './routes/History.svelte';
   import Settings from './routes/Settings.svelte';
+  import TubingCalibration from './routes/TubingCalibration.svelte';
   import PumpHead from './components/PumpHead.svelte';
   import ConnBar from './components/ConnBar.svelte';
   import ResumeModal from './components/ResumeModal.svelte';
@@ -20,6 +21,7 @@
   const pumpTabs = [
     ['overview', 'Overview'],
     ['history', 'History'],
+    ['calibration', 'Tubing calibration'],
   ];
 
   const running = $derived(!!app.status?.active);
@@ -196,6 +198,8 @@
           <NewRun />
         {:else if app.tab === 'history'}
           <History />
+        {:else if app.tab === 'calibration'}
+          <TubingCalibration />
         {:else}
           <Overview />
         {/if}

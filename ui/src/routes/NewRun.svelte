@@ -1,7 +1,7 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
-  import { num, dur, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
+  import { num, dur, stamp, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { canStartRun } from '../lib/link.js';
   import Chart from '../components/Chart.svelte';
   import ErrorText from '../components/ErrorText.svelte';
@@ -28,6 +28,10 @@
     fb_ms: null, // maintenance coefficient, optional
     fb_vmax: null,
     gravimetric_trim: false,
+    // tubing calibration picker (only with the gravimetric trim)
+    tubing_lot_id: '',
+    tubing_size: '',
+    tubing_calibration_id: null,
   });
 
   // "Run again" from History drops a seed here; apply it once, then clear.
@@ -148,6 +152,39 @@
     return () => clearTimeout(debounce);
   });
 
+  // Tubing calibrations for this lot / size, newest first. Only those made in
+  // the run's own unit can seed it (the daemon refuses the others).
+  let calibrations = $state([]);
+  let calTimer;
+  $effect(() => {
+    if (!f.gravimetric_trim) {
+      calibrations = [];
+      return;
+    }
+    const q = new URLSearchParams();
+    if (f.tubing_lot_id.trim()) q.set('lot_id', f.tubing_lot_id.trim());
+    if (f.tubing_size.trim()) q.set('size', f.tubing_size.trim());
+    clearTimeout(calTimer);
+    calTimer = setTimeout(() => {
+      get(`/api/calibrations?${q}`)
+        .then((rows) => (calibrations = rows ?? []))
+        .catch(() => (calibrations = []));
+    }, 250);
+    return () => clearTimeout(calTimer);
+  });
+  const calMatches = $derived(calibrations.filter((c) => c.control_var === f.control_var));
+  // Drop a selection that no longer matches the lot, size or unit.
+  $effect(() => {
+    const id = f.tubing_calibration_id;
+    if (id != null && !calMatches.some((c) => c.id === id)) f.tubing_calibration_id = null;
+  });
+  const needsCalibration = $derived(
+    f.gravimetric_trim && f.control_var === 'rpm' && f.tubing_calibration_id == null,
+  );
+  const calLabel = (c) =>
+    `#${c.id} · ${stamp(c.created_at)} · CV ${num(c.cv_pct, 1)} %` +
+    (c.control_var === 'ml_min' ? ` · c₀ ${num(c.c0, 3)}` : ` · ${num(c.mean_measured_ml_min / c.setpoint, 3)} ml/min per rpm`);
+
   let starting = $state(false);
   let startErr = $state(null);
 
@@ -162,6 +199,7 @@
         pump_addr: pumpAddr,
         curve: curveSpec(),
         gravimetric_trim: f.gravimetric_trim,
+        tubing_calibration_id: f.gravimetric_trim ? f.tubing_calibration_id : null,
       });
       app.tab = 'overview';
     } catch (e) {
@@ -244,6 +282,40 @@
           </label>
         {/if}
       </div>
+      {#if f.gravimetric_trim}
+        <div class="cal">
+          <div class="cal-fields">
+            <label class="field"><span>Tubing lot</span>
+              <input type="text" bind:value={f.tubing_lot_id} placeholder="e.g. LOT-2409" />
+            </label>
+            <label class="field"><span>Tubing size</span>
+              <input type="text" bind:value={f.tubing_size} placeholder="e.g. 1.6 mm" />
+            </label>
+          </div>
+          {#if calMatches.length}
+            <label class="field"><span>Tubing calibration</span>
+              <select bind:value={f.tubing_calibration_id}>
+                <option value={null}>{f.control_var === 'rpm' ? 'Choose a calibration' : 'None, start the trim at 1.0'}</option>
+                {#each calMatches as c (c.id)}
+                  <option value={c.id}>{calLabel(c)}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
+          {#if needsCalibration}
+            <p class="cal-note bad">
+              {calMatches.length ? 'Choose a calibration:' : `No ${unit} calibration for this lot and size:`}
+              the trim cannot start in rpm without one.
+              <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
+            </p>
+          {:else if f.control_var === 'ml_min' && f.tubing_calibration_id == null}
+            <p class="cal-note">
+              Starting without a calibration: the trim starts at 1.0 and corrects from there.
+              <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
+            </p>
+          {/if}
+        </div>
+      {/if}
     </div>
 
     <div class="pane pane-profile">
@@ -361,7 +433,7 @@
   {/if}
 
   <div class="foot">
-    <button class="btn-primary" disabled={starting || busy || cannotStart || !!previewErr || durationS <= 0} onclick={start}>
+    <button class="btn-primary" disabled={starting || busy || cannotStart || needsCalibration || !!previewErr || durationS <= 0} onclick={start}>
       {starting ? 'Starting…' : 'Start run'}
     </button>
   </div>
@@ -406,6 +478,20 @@
     .group.row > .pane { padding-block: var(--s-3); }
   }
   .pane-profile { flex: 1 1 320px; }
+  .cal { margin-top: var(--s-4); display: grid; gap: var(--s-3); max-width: 420px; }
+  .cal-fields { display: flex; gap: var(--s-3); }
+  .cal-fields .field { flex: 1; min-width: 0; }
+  .cal-note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
+  .cal-note.bad { color: var(--danger); }
+  .linkish {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--teal-700);
+    text-decoration: underline;
+    cursor: pointer;
+  }
   .pane-profile .grid { display: flex; flex-wrap: wrap; gap: var(--s-4); }
   .pane-profile .field { flex: 0 1 140px; }
   .pane-profile .field .seg { align-self: flex-start; }
