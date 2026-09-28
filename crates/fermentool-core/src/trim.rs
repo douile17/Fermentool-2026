@@ -44,6 +44,142 @@ pub fn theil_sen_slope(points: &[(f64, f64)]) -> Option<f64> {
     })
 }
 
+pub const PERTURBATION_MIN_G: f64 = 5.0;
+pub const REFILL_THRESHOLD_G: f64 = 50.0;
+pub const REFILL_SETTLE_VARIANCE_G: f64 = 0.5;
+pub const REFILL_SETTLE_SECONDS: f64 = 10.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScaleState {
+    Normal,
+    Perturbation,
+    RefillPending,
+    RefillSettling,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StateInput {
+    pub weight_g: f64,
+    pub prev_weight_g: f64,
+    pub recent_variance_g: f64,
+    pub seconds_in_settling: f64,
+    pub manual_refill_mode: bool,
+    pub manual_refill_done: bool,
+}
+
+/// Learning (the trim update, Task 6) is only allowed while this returns
+/// `Normal`: every condition in the synthese_chemostat doc's "conditions
+/// d'autorisation de l'apprentissage" checklist (pump running, scale stable,
+/// no tank handling, no refill in progress, no active alarm) is implied by
+/// "currently Normal" here, so callers check one thing, not a checklist.
+pub fn next_state(current: ScaleState, input: &StateInput) -> ScaleState {
+    let jump = (input.weight_g - input.prev_weight_g).abs();
+    match current {
+        ScaleState::Normal | ScaleState::Perturbation => {
+            if input.manual_refill_mode || jump > REFILL_THRESHOLD_G {
+                ScaleState::RefillPending
+            } else if jump > PERTURBATION_MIN_G {
+                ScaleState::Perturbation
+            } else {
+                ScaleState::Normal
+            }
+        }
+        ScaleState::RefillPending => {
+            if input.manual_refill_done || input.recent_variance_g < REFILL_SETTLE_VARIANCE_G {
+                ScaleState::RefillSettling
+            } else {
+                ScaleState::RefillPending
+            }
+        }
+        ScaleState::RefillSettling => {
+            if input.seconds_in_settling >= REFILL_SETTLE_SECONDS {
+                ScaleState::Normal
+            } else {
+                ScaleState::RefillSettling
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    fn input(weight: f64, prev: f64) -> StateInput {
+        StateInput {
+            weight_g: weight,
+            prev_weight_g: prev,
+            recent_variance_g: 0.0,
+            seconds_in_settling: 0.0,
+            manual_refill_mode: false,
+            manual_refill_done: false,
+        }
+    }
+
+    #[test]
+    fn small_jump_stays_normal() {
+        assert_eq!(next_state(ScaleState::Normal, &input(100.2, 100.0)), ScaleState::Normal);
+    }
+
+    #[test]
+    fn moderate_jump_is_a_perturbation() {
+        assert_eq!(next_state(ScaleState::Normal, &input(120.0, 100.0)), ScaleState::Perturbation);
+    }
+
+    #[test]
+    fn perturbation_returns_to_normal_once_the_jump_settles() {
+        assert_eq!(next_state(ScaleState::Perturbation, &input(120.0, 120.0)), ScaleState::Normal);
+    }
+
+    #[test]
+    fn big_jump_is_refill_pending() {
+        assert_eq!(next_state(ScaleState::Normal, &input(700.0, 100.0)), ScaleState::RefillPending);
+    }
+
+    #[test]
+    fn manual_refill_mode_forces_refill_pending_even_without_a_jump() {
+        let mut i = input(100.0, 100.0);
+        i.manual_refill_mode = true;
+        assert_eq!(next_state(ScaleState::Normal, &i), ScaleState::RefillPending);
+    }
+
+    #[test]
+    fn refill_pending_moves_to_settling_once_variance_is_low() {
+        let mut i = input(700.0, 700.0);
+        i.recent_variance_g = 0.1;
+        assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillSettling);
+    }
+
+    #[test]
+    fn refill_pending_stays_pending_while_the_operator_is_still_handling_the_bottle() {
+        let mut i = input(700.0, 690.0);
+        i.recent_variance_g = 5.0;
+        assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillPending);
+    }
+
+    #[test]
+    fn settling_returns_to_normal_after_the_extra_delay() {
+        let mut i = input(700.0, 700.0);
+        i.seconds_in_settling = REFILL_SETTLE_SECONDS + 1.0;
+        assert_eq!(next_state(ScaleState::RefillSettling, &i), ScaleState::Normal);
+    }
+
+    #[test]
+    fn settling_stays_settling_before_the_delay_elapses() {
+        let mut i = input(700.0, 700.0);
+        i.seconds_in_settling = REFILL_SETTLE_SECONDS - 1.0;
+        assert_eq!(next_state(ScaleState::RefillSettling, &i), ScaleState::RefillSettling);
+    }
+
+    #[test]
+    fn manual_refill_done_forces_settling_from_pending() {
+        let mut i = input(700.0, 700.0);
+        i.recent_variance_g = 5.0;
+        i.manual_refill_done = true;
+        assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillSettling);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
