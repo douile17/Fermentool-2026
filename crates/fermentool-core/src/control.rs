@@ -239,6 +239,9 @@ fn control_loop<T: Transport + SwapTransport>(
     let mut next_serial_retry: Option<(Instant, Duration)> = None;
     // Idle-time link probe deadline.
     let mut next_probe: Option<Instant> = None;
+    // Gravimetric-trim scale probe deadline, only scheduled while the active
+    // run has `gravimetric_trim` set (see `ActiveStatus::gravimetric_trim`).
+    let mut next_scale_probe: Option<Instant> = None;
 
     loop {
         // Keep the monotonic run epoch in sync with what the engine is running.
@@ -257,6 +260,7 @@ fn control_loop<T: Transport + SwapTransport>(
         if engine.tick_interval().is_none() {
             next_journal = None;
             next_write = None;
+            next_scale_probe = None;
             // No run: keep the serial link's health current so a cable pulled
             // between runs still trips the alarm and the auto-reopen.
             if engine.serial_is_real() {
@@ -326,6 +330,25 @@ fn control_loop<T: Transport + SwapTransport>(
                 maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
                 next_write = Some(advance_past(write_due, WRITE_SETPOINT_INTERVAL));
                 continue;
+            }
+
+            let wants_scale = engine
+                .status()
+                .active
+                .is_some_and(|a| a.gravimetric_trim);
+            if wants_scale {
+                let scale_probe_due =
+                    *next_scale_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
+                if Instant::now() >= scale_probe_due {
+                    let now = run_now(run_epoch);
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        engine.scale_tick(now)
+                    }));
+                    next_scale_probe = Some(advance_past(scale_probe_due, LINK_PROBE_INTERVAL));
+                    continue;
+                }
+            } else {
+                next_scale_probe = None;
             }
         }
 
@@ -619,6 +642,7 @@ mod tests {
             direction: Direction::Cw,
             pump_addr: 1,
             curve: CurveSpec::linear(0.0, 100.0, Duration::from_secs(3600)),
+            gravimetric_trim: false,
         }
     }
 
@@ -681,6 +705,7 @@ mod tests {
             pump_addr: 1,
             // 0 → 350 rpm in 60 s ⇒ ~5.8 rpm/s: a 0.1 grid step every ~17 ms.
             curve: CurveSpec::linear(0.0, 350.0, Duration::from_secs(60)),
+            gravimetric_trim: false,
         };
         handle
             .call(|reply| Command::StartRun(cfg, reply))
@@ -757,6 +782,7 @@ mod tests {
             direction: Direction::Cw,
             pump_addr: 1,
             curve: CurveSpec::linear(10.0, 20.0, Duration::from_secs(1)),
+            gravimetric_trim: false,
         };
         handle
             .call(|reply| Command::StartRun(cfg, reply))

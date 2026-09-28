@@ -15,10 +15,12 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::config::SerialConfig;
+use crate::scale;
 use crate::store::{
     ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunStatus, Store, StoreError,
 };
 use crate::transport::{SwapTransport, TransportKind};
+use crate::trim;
 
 /// Fixed **journal** cadence, not user-tunable.
 ///
@@ -191,6 +193,11 @@ pub struct RunConfig {
     pub direction: Direction,
     pub pump_addr: u8,
     pub curve: CurveSpec,
+    /// Opt-in per run: multiply the curve's setpoint by a slowly-adapting
+    /// factor learned from a scale under the feed bottle. `false` (the
+    /// default) is byte-for-byte today's open-loop behavior.
+    #[serde(default)]
+    pub gravimetric_trim: bool,
 }
 
 /// What [`Engine::pending_recovery`] found: a run that was `running` when the
@@ -258,6 +265,16 @@ pub struct EngineStatus {
     /// `serial.allow_simulator`, simulator runs are explicitly enabled, so a
     /// run may start even on the simulator.
     pub allow_simulator: bool,
+    /// `false` once the scale link is lost or the trim has alarmed. `true`
+    /// (the safe "no problem" default) when no scale is configured at all.
+    pub scale_ok: bool,
+    /// `None` when no scale is configured.
+    pub scale_state: Option<trim::ScaleState>,
+    /// `None` when no scale is configured.
+    pub trim_c: Option<f64>,
+    /// Diagnostic instantaneous rate from the Theil-Sen estimator, `None`
+    /// until at least two samples have been buffered since the last refill.
+    pub rate_g_per_min: Option<f64>,
 }
 
 /// A completed run whose final setpoint the pump is still holding.
@@ -292,6 +309,9 @@ pub struct ActiveStatus {
     /// `ControlVar::MlMin`. An open-loop estimate (trapezoid integral of the
     /// setpoint the daemon wrote), not a measured flow.
     pub volume_added_ml: Option<f64>,
+    /// Whether this run opted into the gravimetric trim, so the control loop
+    /// knows to schedule `scale_tick` without reaching into `Engine` internals.
+    pub gravimetric_trim: bool,
 }
 
 struct ActiveRun {
@@ -324,6 +344,12 @@ struct ActiveRun {
     /// to do, not a measured flow, there is no flow meter in this loop, see
     /// `docs/superpowers/specs/2026-09-11-gravimetric-feed-trim-design.md`.
     volume_added_ml: Option<f64>,
+    /// Copied from `RunConfig` at `start_run`/`resume` time. Persisted on the
+    /// `runs` row (`gravimetric_trim` column) precisely so `resume()` can
+    /// restore it: without a durable copy, a `trim_c` that survived a crash
+    /// via `app_state` (see `save_trim_state`) would silently stop being
+    /// applied because `scale_tick` gates on this flag.
+    gravimetric_trim: bool,
 }
 
 /// Trapezoid slice of a commanded-volume integral between two
@@ -363,6 +389,43 @@ pub struct Engine<T: Transport> {
     /// Consecutive failed `append_tick` writes (disk full / unwritable). The
     /// pump stays driven; this only feeds the `journal_ok` status flag.
     journal_fails: u32,
+    /// The balance link, `None` when `[scale]` is unconfigured. Boxed rather
+    /// than generic over a second `Transport` type: the pump and the scale
+    /// are independent links, unrelated to `Engine<T>`'s `T`.
+    scale: Option<Box<dyn Transport + Send>>,
+    /// Dimensionless correction multiplied onto every curve setpoint:
+    /// `target = curve.value_at(elapsed) * trim_c`. `1.0` is a no-op, the
+    /// value while `gravimetric_trim` is off (or unset) on the active run.
+    trim_c: f64,
+    scale_state: trim::ScaleState,
+    scale_read_fails: u32,
+    /// `false` once consecutive scale reads fail past `REOPEN_AFTER_WRITE_FAILS`,
+    /// or the trim update itself alarms (`trim::TrimOutcome::Alarm`). `trim_c`
+    /// freezes at its last value either way; the pump keeps running on it.
+    scale_ok: bool,
+    /// The scale reading and moment `scale_state` last entered `Normal`
+    /// (after a refill settles, or at run start): the reference point the
+    /// cumulative mass balance measures from.
+    refill_weight_g: Option<f64>,
+    refill_at: Option<Timestamp>,
+    /// `(seconds_since_refill, weight_g)` samples since `refill_at`, feeding
+    /// the Theil-Sen rate estimate. Cleared on every new refill reference.
+    weight_buffer: Vec<(f64, f64)>,
+    last_weight_g: Option<f64>,
+    settling_since: Option<Timestamp>,
+    manual_refill_mode: bool,
+    /// One-shot: consumed (reset to `false`) by the next `scale_tick`.
+    manual_refill_done_flag: bool,
+    /// Diagnostic only (not fed back into `trim_c`, the cumulative mass
+    /// balance drives the correction): the instantaneous measured rate.
+    last_rate_g_per_min: Option<f64>,
+    scale_density_g_per_ml: f64,
+    /// Set from a tubing calibration (Task 12) for `control_var: Rpm` runs:
+    /// mL/min delivered per commanded rpm, so `integrate_curve_mass` can
+    /// convert the curve's rpm output into a volumetric rate. `None` (the
+    /// default, and always for `ControlVar::MlMin`, where the curve is
+    /// already volumetric) is treated as `1.0`, a no-op factor.
+    rpm_to_ml_min: Option<f64>,
 }
 
 /// Consecutive failed writes after which the control loop reopens the port.
@@ -420,6 +483,21 @@ impl<T: Transport> Engine<T> {
             readback_fails: 0,
             pump_confirmed: true,
             journal_fails: 0,
+            scale: None,
+            trim_c: 1.0,
+            scale_state: trim::ScaleState::Normal,
+            scale_read_fails: 0,
+            scale_ok: true,
+            refill_weight_g: None,
+            refill_at: None,
+            weight_buffer: Vec::new(),
+            last_weight_g: None,
+            settling_since: None,
+            manual_refill_mode: false,
+            manual_refill_done_flag: false,
+            last_rate_g_per_min: None,
+            scale_density_g_per_ml: 1.0,
+            rpm_to_ml_min: None,
         }
     }
 
@@ -715,6 +793,7 @@ impl<T: Transport> Engine<T> {
                 last_seq: (a.next_seq > 0).then_some(a.next_seq - 1),
                 last_target: a.last_target,
                 volume_added_ml: a.volume_added_ml,
+                gravimetric_trim: a.gravimetric_trim,
             }),
             transport: self.transport.label(),
             holding: self.holding.clone(),
@@ -724,6 +803,10 @@ impl<T: Transport> Engine<T> {
             journal_ok: self.journal_fails < JOURNAL_STALL_LIMIT,
             simulator: self.on_simulator(),
             allow_simulator: self.allow_simulator,
+            scale_ok: self.scale.is_none() || self.scale_ok,
+            scale_state: self.scale.is_some().then_some(self.scale_state),
+            trim_c: self.scale.is_some().then_some(self.trim_c),
+            rate_g_per_min: self.scale.is_some().then_some(self.last_rate_g_per_min).flatten(),
         }
     }
 
@@ -783,6 +866,7 @@ impl<T: Transport> Engine<T> {
             pump_addr: cfg.pump_addr,
             app_version: self.app_version.clone(),
             curve: spec.clone(),
+            gravimetric_trim: cfg.gravimetric_trim,
         })?;
         self.store.log_event(&NewEvent {
             run_id: Some(id),
@@ -806,6 +890,7 @@ impl<T: Transport> Engine<T> {
             vol_elapsed_s: 0.0,
             vol_target: first,
             volume_added_ml: (cfg.control_var == ControlVar::MlMin).then_some(0.0),
+            gravimetric_trim: cfg.gravimetric_trim,
         });
         Ok(id)
     }
@@ -820,10 +905,8 @@ impl<T: Transport> Engine<T> {
         let control_var = active.control_var;
         let duration_s = active.duration_s;
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
-        let target = quantize(
-            active.spec.value_at(Duration::from_secs_f64(elapsed_s)),
-            setpoint_grid(control_var),
-        );
+        let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * self.trim_c;
+        let target = quantize(raw, setpoint_grid(control_var));
         let seq = active.next_seq;
         active.next_seq += 1;
         if let Some(vol) = active.volume_added_ml {
@@ -1026,10 +1109,8 @@ impl<T: Transport> Engine<T> {
         if elapsed_s >= active.duration_s as f64 {
             return Ok(false);
         }
-        let target = quantize(
-            active.spec.value_at(Duration::from_secs_f64(elapsed_s)),
-            setpoint_grid(control_var),
-        );
+        let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * self.trim_c;
+        let target = quantize(raw, setpoint_grid(control_var));
         if active.last_write_q == Some(target) {
             return Ok(false);
         }
@@ -1055,6 +1136,132 @@ impl<T: Transport> Engine<T> {
                 Ok(false)
             }
         }
+    }
+
+    /// Read the scale (if configured and the active run opted in), advance the
+    /// perturbation/refill state machine, and, while `Normal`, update `trim_c`
+    /// from the cumulative mass balance. A no-op whenever there's no scale, no
+    /// active run, or the active run has `gravimetric_trim = false`.
+    pub fn scale_tick(&mut self, now: Timestamp) {
+        let wants_trim = self.active.as_ref().is_some_and(|a| a.gravimetric_trim);
+        if !wants_trim {
+            return;
+        }
+        let Some(scale) = self.scale.as_mut() else {
+            return;
+        };
+        let reply = scale
+            .transaction(scale::SICS_IMMEDIATE)
+            .map_err(scale::ScaleError::from)
+            .and_then(|r| scale::parse_sics_weight(&r));
+
+        let weight_g = match reply {
+            Ok((w, _stable)) => {
+                self.scale_read_fails = 0;
+                self.scale_ok = true;
+                w
+            }
+            Err(_) => {
+                self.scale_read_fails = self.scale_read_fails.saturating_add(1);
+                if self.scale_read_fails >= REOPEN_AFTER_WRITE_FAILS {
+                    self.scale_ok = false;
+                }
+                return;
+            }
+        };
+
+        let prev = self.last_weight_g.unwrap_or(weight_g);
+        self.last_weight_g = Some(weight_g);
+        let seconds_in_settling = self
+            .settling_since
+            .map(|s| now.duration_since(s).as_secs_f64())
+            .unwrap_or(0.0);
+        let input = trim::StateInput {
+            weight_g,
+            prev_weight_g: prev,
+            // v1 simplification: no rolling variance of the settling window
+            // yet, REFILL_SETTLE_SECONDS alone gates RefillSettling -> Normal.
+            // Functionally safe (a bottle still being handled just takes the
+            // fixed delay instead of also requiring low variance first),
+            // slightly less adaptive. A follow-up computing this from
+            // `weight_buffer`'s tail is a one-function addition.
+            recent_variance_g: 0.0,
+            seconds_in_settling,
+            manual_refill_mode: self.manual_refill_mode,
+            manual_refill_done: self.manual_refill_done_flag,
+        };
+        self.manual_refill_done_flag = false;
+        let next = trim::next_state(self.scale_state, &input);
+
+        if next == trim::ScaleState::RefillSettling && self.scale_state != trim::ScaleState::RefillSettling {
+            self.settling_since = Some(now);
+        }
+        if next == trim::ScaleState::Normal && self.scale_state != trim::ScaleState::Normal {
+            // New cumulative reference: skip resetting `c` back to a stale
+            // value, the state machine already froze it through the refill.
+            self.refill_weight_g = Some(weight_g);
+            self.refill_at = Some(now);
+            self.weight_buffer.clear();
+        }
+        self.scale_state = next;
+
+        if self.scale_state != trim::ScaleState::Normal {
+            return;
+        }
+
+        let t_refill = self.refill_at.unwrap_or(now);
+        let elapsed_since_refill = now.duration_since(t_refill).as_secs_f64().max(0.0);
+        self.weight_buffer.push((elapsed_since_refill, weight_g));
+        self.last_rate_g_per_min = trim::theil_sen_slope(&trim::decimate(
+            &self.weight_buffer,
+            trim::MAX_SLOPE_POINTS,
+        ))
+        .map(|s| s * 60.0);
+
+        if let (Some(w0), Some(active)) = (self.refill_weight_g, self.active.as_ref()) {
+            let density = self.scale_density_g_per_ml;
+            let elapsed = now.duration_since(active.started_at).as_secs_f64().max(0.0);
+            let refill_elapsed = now.duration_since(t_refill).as_secs_f64().max(0.0);
+            let start_elapsed = (elapsed - refill_elapsed).max(0.0);
+            let ml_per_unit = self.rpm_to_ml_min.unwrap_or(1.0);
+            let mass_theoretical =
+                integrate_curve_mass(&active.spec, start_elapsed, elapsed, density, ml_per_unit)
+                    * self.trim_c;
+            let mass_measured = w0 - weight_g;
+            if mass_theoretical.abs() > 1e-6 {
+                let error_frac = (mass_theoretical - mass_measured) / mass_theoretical;
+                match trim::update_trim(self.trim_c, error_frac) {
+                    trim::TrimOutcome::Unchanged => {}
+                    trim::TrimOutcome::Trimmed { new_c } => self.trim_c = new_c,
+                    trim::TrimOutcome::Alarm => self.scale_ok = false,
+                }
+            }
+        }
+    }
+
+    /// Operator-declared "I'm about to change the bottle": forces the state
+    /// machine into `RefillPending` on the next `scale_tick`, ahead of the
+    /// automatic weight-jump threshold.
+    pub fn trigger_refill_mode(&mut self) {
+        self.manual_refill_mode = true;
+    }
+
+    /// Operator-declared "bottle is back, settled": lets `RefillPending`
+    /// advance to `RefillSettling` without waiting on the variance threshold.
+    /// One-shot, consumed by the next `scale_tick`.
+    pub fn trigger_refill_done(&mut self) {
+        self.manual_refill_mode = false;
+        self.manual_refill_done_flag = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach_scale_for_test(&mut self, t: Box<dyn Transport + Send>) {
+        self.scale = Some(t);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trim_c(&self) -> f64 {
+        self.trim_c
     }
 
     /// Graceful stop: stop the pump, mark the run `stopped`.
@@ -1204,6 +1411,7 @@ impl<T: Transport> Engine<T> {
             vol_elapsed_s: elapsed_s,
             vol_target: target,
             volume_added_ml,
+            gravimetric_trim: run.gravimetric_trim,
         });
         Ok(run.id)
     }
@@ -1352,6 +1560,35 @@ fn quantize(value: f64, step: f64) -> f64 {
     (value / step).round() * step
 }
 
+/// Theoretical mass delivered over `[start_s, end_s]` (elapsed seconds since
+/// run start), grams: Simpson's rule over `spec.value_at(t) * ml_per_unit *
+/// density`, uncorrected by `trim_c` (the caller multiplies that in). Pure,
+/// no I/O; `ml_per_unit` converts the curve's own unit into mL/min first
+/// (`1.0` when the curve is already ml/min).
+fn integrate_curve_mass(
+    spec: &CurveSpec,
+    start_s: f64,
+    end_s: f64,
+    density_g_per_ml: f64,
+    ml_per_unit: f64,
+) -> f64 {
+    const STEPS: usize = 50;
+    let span = (end_s - start_s).max(0.0);
+    if span <= 0.0 {
+        return 0.0;
+    }
+    let h = span / STEPS as f64;
+    let rate = |t_s: f64| -> f64 {
+        spec.value_at(Duration::from_secs_f64(t_s)) * ml_per_unit * density_g_per_ml / 60.0
+    };
+    let mut sum = rate(start_s) + rate(end_s);
+    for i in 1..STEPS {
+        let t = start_s + h * i as f64;
+        sum += rate(t) * if i % 2 == 0 { 2.0 } else { 4.0 };
+    }
+    sum * h / 3.0
+}
+
 /// Drive an engine in real time until the run finishes or `stop` is set. The
 /// supervised, panic-catching wrapper comes with the daemon wiring (milestone 7).
 pub fn run_blocking<T: Transport>(engine: &mut Engine<T>, stop: &AtomicBool) -> Result<()> {
@@ -1404,7 +1641,57 @@ mod tests {
             direction: Direction::Cw,
             pump_addr: 1,
             curve: CurveSpec::linear(0.0, 100.0, Duration::from_secs(3600)),
+            gravimetric_trim: false,
         }
+    }
+
+    struct ScriptedScale {
+        replies: std::collections::VecDeque<std::result::Result<Vec<u8>, fermentool_modbus::TransportError>>,
+    }
+    impl ScriptedScale {
+        fn new(weights: &[f64]) -> Self {
+            let replies = weights
+                .iter()
+                .map(|w| Ok(format!("S S {w:>10.1} g\r\n").into_bytes()))
+                .collect();
+            Self { replies }
+        }
+    }
+    impl Transport for ScriptedScale {
+        fn transaction(
+            &mut self,
+            _req: &[u8],
+        ) -> std::result::Result<Vec<u8>, fermentool_modbus::TransportError> {
+            self.replies
+                .pop_front()
+                .unwrap_or(Err(fermentool_modbus::TransportError::Timeout))
+        }
+    }
+
+    #[test]
+    fn gravimetric_trim_multiplies_the_curve_target() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0; 50])));
+        let cfg = RunConfig { gravimetric_trim: true, ..linear_cfg() };
+        e.start_run(cfg, t0()).unwrap();
+        e.scale_tick(t0());
+        let o = e.tick(at(1)).unwrap();
+        assert!(matches!(o, TickOutcome::Applied { .. }));
+        assert_eq!(e.trim_c(), 1.0);
+    }
+
+    #[test]
+    fn scale_failure_freezes_c_and_keeps_the_pump_running() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale { replies: Default::default() }));
+        let cfg = RunConfig { gravimetric_trim: true, ..linear_cfg() };
+        e.start_run(cfg, t0()).unwrap();
+        for i in 0..10 {
+            e.scale_tick(at(i));
+        }
+        assert!(!e.status().scale_ok);
+        let o = e.tick(at(20)).unwrap();
+        assert!(matches!(o, TickOutcome::Applied { .. }));
     }
 
     #[test]

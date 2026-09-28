@@ -18,10 +18,16 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("migrations/0001_init.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("migrations/0002_gravimetric_trim.sql"),
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -145,6 +151,7 @@ pub struct NewRun {
     pub pump_addr: u8,
     pub app_version: String,
     pub curve: CurveSpec,
+    pub gravimetric_trim: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -162,6 +169,7 @@ pub struct RunRow {
     pub pump_addr: u8,
     pub app_version: String,
     pub curve: CurveSpec,
+    pub gravimetric_trim: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +226,8 @@ pub struct Store {
 }
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
-     direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version";
+     direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
+     gravimetric_trim";
 
 const TICK_COLS: &str = "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note";
 
@@ -290,9 +299,9 @@ impl Store {
             "INSERT INTO runs
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
-                pump_addr, app_version)
+                pump_addr, app_version, gravimetric_trim)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 r.name,
                 created,
@@ -306,6 +315,7 @@ impl Store {
                 curve_json,
                 r.pump_addr as i64,
                 r.app_version,
+                r.gravimetric_trim as i64,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -519,6 +529,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         curve: parse_curve(row.get(10)?)?,
         pump_addr: row.get::<_, i64>(11)? as u8,
         app_version: row.get(12)?,
+        gravimetric_trim: row.get::<_, i64>(13)? != 0,
     })
 }
 
@@ -567,11 +578,12 @@ mod tests {
             app_version: "0.1.0".into(),
             curve: CurveSpec::exponential_physio(2.0, 0.15, Duration::from_secs(100 * 3600))
                 .with_clamp(0.1, 350.0),
+            gravimetric_trim: false,
         }
     }
 
     #[test]
-    fn migrate_creates_schema_at_version_1() {
+    fn migrate_creates_schema_at_the_latest_version() {
         let s = Store::open_in_memory().unwrap();
         let tables: i64 = s
             .conn
@@ -587,7 +599,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
     }
 
     #[test]
@@ -599,7 +611,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
     }
 
     #[test]
