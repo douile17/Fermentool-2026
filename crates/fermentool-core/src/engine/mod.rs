@@ -985,6 +985,9 @@ impl<T: Transport> Engine<T> {
                 ControlVar::Rpm => self.rpm_to_ml_min = Some(calibration_ml_per_rpm(cal)),
             }
         }
+        // Persist the fresh state now: a crash before anything else changes
+        // would otherwise restore the previous run's c and baseline.
+        self.save_trim_state();
 
         // A new run supersedes any completed-run hold.
         self.set_holding(None);
@@ -1351,8 +1354,8 @@ impl<T: Transport> Engine<T> {
         };
 
         // Snapshot so the (at most once per call) persistence write only
-        // happens when `trim_c`/`scale_state` actually move.
-        let before = (self.trim_c, self.scale_state);
+        // happens when `trim_c`, `scale_state` or the baseline actually move.
+        let before = (self.trim_c, self.scale_state, self.refill_weight_g);
 
         let prev = self.last_weight_g.unwrap_or(weight_g);
         self.last_weight_g = Some(weight_g);
@@ -1396,7 +1399,7 @@ impl<T: Transport> Engine<T> {
         self.scale_state = next;
 
         if self.scale_state != trim::ScaleState::Normal {
-            if (self.trim_c, self.scale_state) != before {
+            if (self.trim_c, self.scale_state, self.refill_weight_g) != before {
                 self.save_trim_state();
             }
             return;
@@ -1446,7 +1449,7 @@ impl<T: Transport> Engine<T> {
             }
         }
 
-        if (self.trim_c, self.scale_state) != before {
+        if (self.trim_c, self.scale_state, self.refill_weight_g) != before {
             self.save_trim_state();
         }
     }
@@ -2176,6 +2179,29 @@ mod tests {
         assert!(e.status().scale_ok);
         assert_eq!(e.trim_c(), 1.0);
         assert_eq!(e.weight_buffer_len(), 0);
+    }
+
+    #[test]
+    fn a_crash_early_in_a_new_run_does_not_restore_the_previous_runs_trim() {
+        // Run A learns c = 1.15 and persists it. Run B starts fresh (c = 1.0,
+        // no baseline) and the daemon dies before anything in B changes c:
+        // the restart must come back with B's state, not A's.
+        let db = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0])));
+            a.start_run(trim_cfg(), t0()).unwrap();
+            a.scale_tick(t0());
+            a.set_trim_c_for_test(1.15);
+            a.save_trim_state();
+            a.stop_run(at(10)).unwrap();
+            a.attach_scale_for_test(Box::new(ScriptedScale::new(&[800.0])));
+            a.start_run(trim_cfg(), at(20)).unwrap();
+            a.scale_tick(at(20)); // seeds B's baseline at 800 g, c unchanged
+        }
+        let b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        assert_eq!(b.trim_c(), 1.0, "restored the previous run's c");
+        assert_eq!(b.refill_weight_g, Some(800.0), "lost the new run's baseline");
     }
 
     #[test]
