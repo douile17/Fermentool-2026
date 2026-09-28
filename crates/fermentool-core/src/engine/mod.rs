@@ -65,6 +65,9 @@ pub enum EngineError {
     },
     /// The run asked for the gravimetric trim but no scale is attached.
     ScaleUnavailable,
+    /// A gravimetric-trim run in rpm without a tubing calibration: nothing
+    /// turns its rpm curve into the volume the mass balance needs.
+    GravimetricTrimNeedsCalibration,
 }
 
 /// Structured error for the HTTP API: a one-line `message` (the [`Display`] of
@@ -91,6 +94,10 @@ impl std::fmt::Display for EngineError {
             EngineError::ScaleUnavailable => write!(
                 f,
                 "gravimetric trim needs a scale, and none is connected"
+            ),
+            EngineError::GravimetricTrimNeedsCalibration => write!(
+                f,
+                "gravimetric trim in rpm needs a tubing calibration"
             ),
             EngineError::SerialDown => write!(
                 f,
@@ -132,6 +139,7 @@ impl EngineError {
             EngineError::SimulatorNotAllowed => "simulator_not_allowed",
             EngineError::PumpRejectedSetpoint { .. } => "pump_setpoint_rejected",
             EngineError::ScaleUnavailable => "scale_unavailable",
+            EngineError::GravimetricTrimNeedsCalibration => "trim_needs_calibration",
         }
     }
 
@@ -162,6 +170,12 @@ impl EngineError {
                  balance's serial port under [scale] in config.toml and check its cable (a \
                  configured scale that is unplugged is retried in the background), or start \
                  this run without the gravimetric trim."
+            }
+            EngineError::GravimetricTrimNeedsCalibration => {
+                "The trim compares the mass that left the bottle with the volume the curve asked \
+                 for. In rpm there is no volume behind the curve until this tube has been \
+                 calibrated. Calibrate it (Tubing calibration), pick that calibration for the run, \
+                 or run in ml/min, where a calibration is optional."
             }
             EngineError::SimulatorNotAllowed => {
                 "The engine is on the in-process simulator, so a run would move nothing real. \
@@ -909,6 +923,28 @@ impl<T: Transport> Engine<T> {
             return Err(EngineError::SimulatorNotAllowed);
         }
 
+        // The chosen tubing calibration, checked before anything changes.
+        let calibration = match cfg.tubing_calibration_id {
+            Some(cal_id) => {
+                let cal = self.store.calibration(cal_id)?.ok_or_else(|| {
+                    EngineError::Config(format!("tubing calibration {cal_id} does not exist"))
+                })?;
+                if cal.control_var != cfg.control_var {
+                    return Err(EngineError::Config(format!(
+                        "tubing calibration {cal_id} was made in {}, this run is in {}",
+                        cal.control_var.as_str(),
+                        cfg.control_var.as_str()
+                    )));
+                }
+                Some(cal)
+            }
+            None => None,
+        };
+        // In rpm the mass balance has no volume to compare against without
+        // a calibration; in ml/min the curve is already volumetric.
+        if cfg.gravimetric_trim && cfg.control_var == ControlVar::Rpm && calibration.is_none() {
+            return Err(EngineError::GravimetricTrimNeedsCalibration);
+        }
         // Without a scale nothing would ever read the balance or correct c,
         // and the UI would show no trim indicator: refuse rather than run a
         // trim that silently does nothing.
@@ -935,6 +971,16 @@ impl<T: Transport> Engine<T> {
         self.manual_refill_mode = false;
         self.manual_refill_done_flag = false;
         self.last_rate_g_per_min = None;
+        self.rpm_to_ml_min = None;
+        if let Some(cal) = &calibration {
+            match cfg.control_var {
+                // Dimensionless: seeds the trim, within its usual bounds.
+                ControlVar::MlMin => self.trim_c = cal.c0.clamp(trim::TRIM_MIN, trim::TRIM_MAX),
+                // rpm per (ml/min), not a trim factor: at the calibrated
+                // setpoint the conversion is exact, so c starts at 1.0.
+                ControlVar::Rpm => self.rpm_to_ml_min = Some(calibration_ml_per_rpm(cal)),
+            }
+        }
 
         // A new run supersedes any completed-run hold.
         self.set_holding(None);
@@ -1564,8 +1610,18 @@ impl<T: Transport> Engine<T> {
                 "run is past its end plus grace; finish or abort instead".into(),
             ));
         }
-        // `trim_c` was restored from `app_state` by `Engine::new`; it only
-        // applies if this run opted in, same gate as `tick`/`apply_setpoint`.
+        // `trim_c` was restored from `app_state` by `Engine::new`; the rpm
+        // conversion is not persisted there, rebuild it from the run's own
+        // calibration. A calibration deleted since is no reason to refuse a
+        // crash resume: the pump keeps its curve, the trim alarms and freezes.
+        self.rpm_to_ml_min = None;
+        if run.control_var == ControlVar::Rpm {
+            if let Some(cal_id) = run.tubing_calibration_id {
+                self.rpm_to_ml_min = self.store.calibration(cal_id)?.map(|c| calibration_ml_per_rpm(&c));
+            }
+        }
+        // `trim_c` only applies if this run opted in, same gate as
+        // `tick`/`apply_setpoint`.
         let c = if run.gravimetric_trim { self.trim_c } else { 1.0 };
         let target = quantize(
             run.curve.value_at(Duration::from_secs_f64(elapsed_s)) * c,
@@ -1754,6 +1810,11 @@ fn setpoint_grid(control_var: ControlVar) -> f64 {
     }
 }
 
+/// ml/min delivered per commanded rpm, from an rpm-mode tubing calibration.
+fn calibration_ml_per_rpm(cal: &crate::store::CalibrationRow) -> f64 {
+    cal.mean_measured_ml_min / cal.setpoint
+}
+
 /// Snap `value` to the nearest multiple of `step`.
 fn quantize(value: f64, step: f64) -> f64 {
     (value / step).round() * step
@@ -1874,7 +1935,7 @@ mod tests {
     fn gravimetric_trim_multiplies_the_curve_target() {
         let mut e = engine();
         e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0; 50])));
-        let cfg = RunConfig { gravimetric_trim: true, ..linear_cfg() };
+        let cfg = trim_cfg();
         e.start_run(cfg, t0()).unwrap();
         e.scale_tick(t0());
         let o = e.tick(at(1)).unwrap();
@@ -1886,7 +1947,7 @@ mod tests {
     fn scale_failure_freezes_c_and_keeps_the_pump_running() {
         let mut e = engine();
         e.attach_scale_for_test(Box::new(ScriptedScale { replies: Default::default() }));
-        let cfg = RunConfig { gravimetric_trim: true, ..linear_cfg() };
+        let cfg = trim_cfg();
         e.start_run(cfg, t0()).unwrap();
         for i in 0..10 {
             e.scale_tick(at(i));
@@ -1902,7 +1963,7 @@ mod tests {
         {
             let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
             a.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0])));
-            let cfg = RunConfig { gravimetric_trim: true, ..linear_cfg() };
+            let cfg = trim_cfg();
             a.start_run(cfg, t0()).unwrap();
             a.scale_tick(t0());
             a.set_trim_c_for_test(1.05);
@@ -2275,6 +2336,168 @@ mod tests {
         assert!(!e.scale_link_down());
         assert!(e.recover_scale());
         assert!(!e.status().scale_ok, "recover_scale must not clear an alarm it didn't cause");
+    }
+
+    // ---- tubing calibration gate (Task 12) ----
+
+    /// Record a calibration of `setpoint` (in `control_var`'s unit) from three
+    /// finished 5-minute bursts that each delivered `weight_g` grams.
+    fn seed_calibration(
+        store: &Store,
+        control_var: ControlVar,
+        setpoint: f64,
+        weight_g: f64,
+    ) -> i64 {
+        let mut runs = [0; 3];
+        for (i, run) in runs.iter_mut().enumerate() {
+            let started = at(-3600 + 600 * i as i64);
+            *run = store
+                .insert_run(&NewRun {
+                    name: "cal".into(),
+                    started_at: started,
+                    control_var,
+                    direction: Direction::Cw,
+                    tick_interval_s: 1,
+                    pump_addr: 1,
+                    app_version: "test".into(),
+                    curve: CurveSpec::linear(setpoint, setpoint, Duration::from_secs(600)),
+                    gravimetric_trim: false,
+                    kind: RunKind::Calibration,
+                    tubing_calibration_id: None,
+                })
+                .unwrap();
+            store
+                .finish_run(*run, RunStatus::Stopped, started + SignedDuration::from_mins(5))
+                .unwrap();
+        }
+        store
+            .insert_calibration(&crate::store::NewCalibration {
+                tubing_lot_id: "LOT".into(),
+                tubing_size: "1.6mm".into(),
+                control_var,
+                setpoint,
+                density_g_per_ml: 1.0,
+                run_ids: runs,
+                weights_g: [weight_g; 3],
+                operator: None,
+                note: None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn rpm_mode_trim_without_a_calibration_is_refused() {
+        let mut e = engine();
+        let cfg = RunConfig {
+            control_var: ControlVar::Rpm,
+            gravimetric_trim: true,
+            tubing_calibration_id: None,
+            ..linear_cfg()
+        };
+        let err = e.start_run(cfg, t0()).unwrap_err();
+        assert!(matches!(err, EngineError::GravimetricTrimNeedsCalibration), "got {err:?}");
+        assert!(err.hint().is_some());
+        assert!(e.status().active.is_none());
+    }
+
+    #[test]
+    fn ml_min_mode_trim_without_a_calibration_still_starts() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig { tubing_calibration_id: None, ..trim_cfg() };
+        assert!(e.start_run(cfg, t0()).is_ok());
+        assert_eq!(e.trim_c(), 1.0);
+    }
+
+    #[test]
+    fn an_ml_min_calibration_seeds_trim_c_with_its_c0() {
+        let mut e = engine();
+        // 10 ml/min commanded, 45 g in 5 min = 9 ml/min: c0 = 10/9.
+        let cal = seed_calibration(&e.store, ControlVar::MlMin, 10.0, 45.0);
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig { tubing_calibration_id: Some(cal), ..trim_cfg() };
+        let id = e.start_run(cfg, t0()).unwrap();
+        assert!((e.trim_c() - 10.0 / 9.0).abs() < 1e-9, "got {}", e.trim_c());
+        assert_eq!(e.store.run(id).unwrap().unwrap().tubing_calibration_id, Some(cal));
+    }
+
+    #[test]
+    fn a_calibration_c0_outside_the_trim_bounds_is_clamped() {
+        let mut e = engine();
+        // 10 ml/min commanded, 25 g in 5 min = 5 ml/min: c0 = 2.0.
+        let cal = seed_calibration(&e.store, ControlVar::MlMin, 10.0, 25.0);
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig { tubing_calibration_id: Some(cal), ..trim_cfg() };
+        e.start_run(cfg, t0()).unwrap();
+        assert_eq!(e.trim_c(), trim::TRIM_MAX);
+    }
+
+    #[test]
+    fn an_rpm_calibration_converts_the_curve_for_the_mass_balance() {
+        // Calibrated at 50 rpm -> 600 g in 5 min = 120 ml/min, i.e. 2.4 ml/min
+        // per rpm. A flat 50 rpm run is then 120 ml/min = 2 g/s at 1 g/mL.
+        // A bottle losing exactly that must leave c at 1.0 without alarming;
+        // treating rpm as ml/min would expect 50/60 g/s and alarm at once.
+        // (Whole grams per second: the scripted scale reports 0.1 g.)
+        let mut e = engine();
+        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig {
+            control_var: ControlVar::Rpm,
+            gravimetric_trim: true,
+            tubing_calibration_id: Some(cal),
+            curve: CurveSpec::linear(50.0, 50.0, Duration::from_secs(36_000)),
+            ..linear_cfg()
+        };
+        e.start_run(cfg, t0()).unwrap();
+        assert_eq!(e.trim_c(), 1.0, "an rpm c0 is not a trim factor");
+        let mut w = 4_000.0;
+        for i in 0..120 {
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            w -= 2.0 * e.trim_c();
+        }
+        assert!(e.status().scale_ok, "the rpm curve was not converted to volume");
+        assert!((e.trim_c() - 1.0).abs() < 1e-9, "got {}", e.trim_c());
+    }
+
+    #[test]
+    fn a_calibration_for_the_other_unit_or_an_unknown_id_is_refused() {
+        let mut e = engine();
+        let rpm_cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 100.0);
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig { tubing_calibration_id: Some(rpm_cal), ..trim_cfg() };
+        assert!(matches!(e.start_run(cfg, t0()), Err(EngineError::Config(_))));
+        let cfg = RunConfig { tubing_calibration_id: Some(9999), ..trim_cfg() };
+        assert!(matches!(e.start_run(cfg, t0()), Err(EngineError::Config(_))));
+        assert!(e.status().active.is_none());
+    }
+
+    #[test]
+    fn a_resumed_rpm_trim_run_keeps_its_volume_conversion() {
+        let db = TempDb::new();
+        let cfg_for = |cal| RunConfig {
+            control_var: ControlVar::Rpm,
+            gravimetric_trim: true,
+            tubing_calibration_id: Some(cal),
+            curve: CurveSpec::linear(50.0, 50.0, Duration::from_secs(36_000)),
+            ..linear_cfg()
+        };
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let cal = seed_calibration(&a.store, ControlVar::Rpm, 50.0, 600.0);
+            a.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+            a.start_run(cfg_for(cal), t0()).unwrap();
+        }
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        b.resume(at(10), grace()).unwrap();
+        let mut w = 4_000.0;
+        for i in 10..130 {
+            b.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            b.scale_tick(at(i));
+            w -= 2.0 * b.trim_c();
+        }
+        assert!(b.status().scale_ok, "resume lost the rpm-to-volume conversion");
     }
 
     #[test]
