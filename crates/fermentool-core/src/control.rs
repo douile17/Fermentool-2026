@@ -129,7 +129,7 @@ pub struct DaemonStatus {
     /// (the safe "no problem" default) when no scale is configured.
     pub scale_ok: bool,
     /// `None` when no scale is configured.
-    pub scale_state: Option<String>,
+    pub scale_state: Option<crate::trim::ScaleState>,
     /// `None` when no scale is configured.
     pub trim_c: Option<f64>,
     /// Diagnostic instantaneous rate, `None` until enough samples are buffered.
@@ -197,7 +197,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         simulator: st.simulator,
         allow_simulator: st.allow_simulator,
         scale_ok: st.scale_ok,
-        scale_state: st.scale_state.map(|s| format!("{s:?}")),
+        scale_state: st.scale_state,
         trim_c: st.trim_c,
         rate_g_per_min: st.rate_g_per_min,
     }

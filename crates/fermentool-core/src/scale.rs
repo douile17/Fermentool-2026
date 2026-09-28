@@ -94,7 +94,7 @@ pub fn parse_sics_weight(reply: &[u8]) -> Result<(f64, bool), ScaleError> {
         .map_err(|e| ScaleError::Parse(e.to_string()))?
         .trim();
     let parts: Vec<&str> = text.split_whitespace().collect();
-    if parts.len() < 3 {
+    if parts.len() < 4 {
         return Err(ScaleError::Parse(format!("too few fields: {text:?}")));
     }
     let stable = match parts[1] {
@@ -105,6 +105,21 @@ pub fn parse_sics_weight(reply: &[u8]) -> Result<(f64, bool), ScaleError> {
     let value: f64 = parts[2]
         .parse()
         .map_err(|_| ScaleError::Parse(format!("bad numeric value: {:?}", parts[2])))?;
+    // Rust's f64 parser accepts "nan"/"inf"/"infinity" (case-insensitive) as
+    // valid floats. A garbled reply that happens to parse to one of those
+    // would otherwise poison weight_buffer and panic theil_sen_slope's
+    // partial_cmp on the first NaN comparison.
+    if !value.is_finite() {
+        return Err(ScaleError::Parse(format!("non-finite value: {value}")));
+    }
+    // The balance's Communications menu can be set to kg; silently accepting
+    // that would feed a value 1000x too small straight into the control loop.
+    if parts[3] != "g" {
+        return Err(ScaleError::Parse(format!(
+            "unexpected unit {:?}, expected \"g\"",
+            parts[3]
+        )));
+    }
     Ok((value, stable))
 }
 
@@ -130,6 +145,28 @@ mod tests {
     fn rejects_a_malformed_reply() {
         assert!(parse_sics_weight(b"garbage\r\n").is_err());
         assert!(parse_sics_weight(b"").is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_gram_unit() {
+        // A balance left in kg would otherwise read 1000x light with no error.
+        assert!(parse_sics_weight(b"S S      0.740 kg
+").is_err());
+        // A reply with no unit at all is not trustworthy either.
+        assert!(parse_sics_weight(b"S S      740.5
+").is_err());
+    }
+
+    #[test]
+    fn rejects_non_finite_values() {
+        // Rust's f64 parser accepts these tokens; the scale never sends them,
+        // but a garbled line must not be allowed to poison downstream math.
+        assert!(parse_sics_weight(b"S S      NaN g
+").is_err());
+        assert!(parse_sics_weight(b"S S      inf g
+").is_err());
+        assert!(parse_sics_weight(b"S S      -inf g
+").is_err());
     }
 
     #[test]

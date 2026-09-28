@@ -50,6 +50,7 @@ pub const REFILL_SETTLE_VARIANCE_G: f64 = 0.5;
 pub const REFILL_SETTLE_SECONDS: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScaleState {
     Normal,
     Perturbation,
@@ -104,6 +105,15 @@ pub fn next_state(current: ScaleState, input: &StateInput) -> ScaleState {
 #[cfg(test)]
 mod state_tests {
     use super::*;
+
+    #[test]
+    fn scale_state_serializes_as_snake_case_like_the_rest_of_the_api() {
+        assert_eq!(serde_json::to_string(&ScaleState::Normal).unwrap(), "\"normal\"");
+        assert_eq!(
+            serde_json::to_string(&ScaleState::RefillPending).unwrap(),
+            "\"refill_pending\""
+        );
+    }
 
     fn input(weight: f64, prev: f64) -> StateInput {
         StateInput {
