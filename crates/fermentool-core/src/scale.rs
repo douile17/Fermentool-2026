@@ -3,8 +3,10 @@
 //!
 //! Deliberately NOT built on fermentool_modbus::serial::SerialTransport: that
 //! type hardcodes 8E1 framing and reads a caller-known fixed byte count,
-//! neither of which fits a variable-length ASCII line at whatever parity the
-//! balance's own Communications menu is set to.
+//! neither of which fits a variable-length ASCII line. This driver reads a
+//! variable-length line instead, but its framing is fixed at 8-N-1 (the tested
+//! Ranger 7000's default); a balance set to e.g. 7-E-1 cannot talk to
+//! Fermentool yet, `ScaleConfig` would need `parity`/`data_bits` fields.
 
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -12,8 +14,31 @@ use std::time::{Duration, Instant};
 use fermentool_modbus::{Transport, TransportError};
 use serialport::{DataBits, Parity, StopBits};
 
-pub const SICS_STABLE: &[u8] = b"S\r\n";
+use crate::config::ScaleConfig;
+use crate::transport::{TransportKind, WatchdogTransport};
+
 pub const SICS_IMMEDIATE: &[u8] = b"SI\r\n";
+
+/// Bound on one scale transaction, mirrors the pump's `OPEN_TIMEOUT`.
+pub const SCALE_OPEN_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Open the configured scale on its own watchdog worker, like the pump's
+/// port, so a wedged balance read only ever blocks that worker. `None` when
+/// the port does not open: unlike the pump there is no sensible simulated
+/// scale, so a scale that isn't really there must look absent, not like a
+/// silently broken stand-in. Shared by boot (`main.rs`) and
+/// `Engine::recover_scale`.
+pub fn open_watchdogged(cfg: &ScaleConfig) -> Option<WatchdogTransport> {
+    let path = cfg.path.clone();
+    let baud = cfg.baud;
+    let (watchdog, kind) = WatchdogTransport::spawn_with(Box::new(move || {
+        match SicsScale::open(&path, baud, SCALE_OPEN_TIMEOUT) {
+            Ok(s) => (Box::new(s) as Box<dyn Transport + Send>, Some(TransportKind::Serial(path))),
+            Err(_) => (Box::new(fermentool_modbus::SimPump::new(1)) as Box<dyn Transport + Send>, None),
+        }
+    }));
+    kind.map(|_| watchdog)
+}
 
 pub struct SicsScale {
     port: Box<dyn serialport::SerialPort>,

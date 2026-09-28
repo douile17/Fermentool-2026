@@ -260,6 +260,9 @@ fn control_loop<T: Transport + SwapTransport>(
     // Gravimetric-trim scale probe deadline, only scheduled while the active
     // run has `gravimetric_trim` set (see `ActiveStatus::gravimetric_trim`).
     let mut next_scale_probe: Option<Instant> = None;
+    // Cooldown between automatic scale-reopen attempts, the balance's
+    // counterpart to `next_serial_retry`.
+    let mut next_scale_retry: Option<(Instant, Duration)> = None;
 
     loop {
         // Keep the monotonic run epoch in sync with what the engine is running.
@@ -362,11 +365,13 @@ fn control_loop<T: Transport + SwapTransport>(
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         engine.scale_tick(now)
                     }));
+                    maybe_recover_scale(engine, events, grace, &mut next_scale_retry);
                     next_scale_probe = Some(advance_past(scale_probe_due, LINK_PROBE_INTERVAL));
                     continue;
                 }
             } else {
                 next_scale_probe = None;
+                next_scale_retry = None;
             }
         }
 
@@ -482,6 +487,47 @@ fn maybe_recover_serial<T: Transport + SwapTransport>(
         if prev_delay.is_none() {
             tracing::warn!(
                 "serial link down; auto-reconnecting (backoff {SERIAL_RETRY_MIN:?}..{SERIAL_RETRY_MAX:?})"
+            );
+        }
+        let delay = match prev_delay {
+            Some(d) => (d * 2).min(SERIAL_RETRY_MAX),
+            None => SERIAL_RETRY_MIN,
+        };
+        *next_retry = Some((Instant::now() + delay, delay));
+    }
+    let _ = events.send(current_status(engine, grace));
+}
+
+/// Reopen the scale on its own after a mid-run disconnect (or a scale that
+/// never opened at boot), the gravimetric trim's counterpart to
+/// [`maybe_recover_serial`]. Only called on `scale_tick`'s cadence while the
+/// active run wants the trim, spaced by the same exponential backoff. No
+/// `[scale]` configured: never retries, never logs.
+fn maybe_recover_scale<T: Transport>(
+    engine: &mut Engine<T>,
+    events: &broadcast::Sender<DaemonStatus>,
+    grace: Duration,
+    next_retry: &mut Option<(Instant, Duration)>,
+) {
+    if !(engine.scale_wanted() && engine.scale_link_down()) {
+        *next_retry = None;
+        return;
+    }
+    if next_retry.is_some_and(|(t, _)| Instant::now() < t) {
+        return;
+    }
+    let prev_delay = next_retry.map(|(_, d)| d);
+    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.recover_scale()))
+        .unwrap_or(false);
+    if ok {
+        if prev_delay.is_some() {
+            tracing::info!("scale link reopened");
+        }
+        *next_retry = None;
+    } else {
+        if prev_delay.is_none() {
+            tracing::warn!(
+                "scale link down; auto-reconnecting (backoff {SERIAL_RETRY_MIN:?}..{SERIAL_RETRY_MAX:?})"
             );
         }
         let delay = match prev_delay {

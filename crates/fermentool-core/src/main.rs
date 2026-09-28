@@ -16,7 +16,6 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 use tokio::sync::{broadcast, Notify, RwLock};
@@ -26,10 +25,10 @@ use fermentool_core::api::{self, AppState};
 use fermentool_core::config::{self, Config};
 use fermentool_core::control;
 use fermentool_core::engine::Engine;
-use fermentool_core::scale::SicsScale;
+use fermentool_core::scale;
 use fermentool_core::store::Store;
 use fermentool_core::transport::WatchdogTransport;
-use fermentool_modbus::Pump;
+use fermentool_modbus::{Pump, Transport};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -166,32 +165,21 @@ fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<WatchdogTransp
     Ok(engine)
 }
 
-const SCALE_OPEN_TIMEOUT: Duration = Duration::from_millis(1500);
-
-/// Boot the scale link, or `None` if `[scale]` is unconfigured. Wrapped in a
-/// `WatchdogTransport` for the same reason the pump's port is: a wedged
-/// balance read must only block its own worker, never the control loop.
-/// Not yet threaded into `Engine::new` here, that lands in Task 7 alongside
-/// the `Engine.scale` field it feeds.
+/// Boot the scale link, or `None` if `[scale]` is unconfigured or the port
+/// did not open. A configured scale that is down at boot is not fatal: the
+/// control loop keeps retrying it (`Engine::recover_scale`).
 fn build_scale(cfg: &config::ScaleConfig) -> Option<WatchdogTransport> {
     if !cfg.configured() {
         return None;
     }
-    let path = cfg.path.clone();
-    let baud = cfg.baud;
-    let (watchdog, _kind) = WatchdogTransport::spawn_with(Box::new(move || {
-        match SicsScale::open(&path, baud, SCALE_OPEN_TIMEOUT) {
-            Ok(s) => (Box::new(s) as Box<dyn fermentool_modbus::Transport + Send>, None),
-            Err(e) => {
-                tracing::error!("cannot open scale {path} ({e}); gravimetric trim unavailable");
-                (
-                    Box::new(fermentool_modbus::SimPump::new(1)) as Box<dyn fermentool_modbus::Transport + Send>,
-                    None,
-                )
-            }
-        }
-    }));
-    Some(watchdog)
+    let scale = scale::open_watchdogged(cfg);
+    if scale.is_none() {
+        tracing::warn!(
+            "cannot open scale {}; gravimetric trim unavailable, retrying in the background",
+            cfg.path
+        );
+    }
+    scale
 }
 
 async fn shutdown_signal(via_api: Arc<Notify>) {
@@ -222,10 +210,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("fermentool-core {VERSION} starting");
     tracing::info!(data_dir = %paths.data_dir.display(), "paths resolved");
 
-    let engine = build_engine(&config, &paths.db)?;
-    // Not yet consumed: `Engine` gains its `scale` field in Task 7, which is
-    // where this gets threaded into `engine`'s construction.
-    let _scale = build_scale(&config.scale);
+    let mut engine = build_engine(&config, &paths.db)?;
+    let scale = build_scale(&config.scale);
+    engine.attach_scale(
+        scale.map(|w| Box::new(w) as Box<dyn Transport + Send>),
+        config.scale.clone(),
+    );
     let (events, _) = broadcast::channel(64);
     let control = Arc::new(control::spawn(engine, config.grace(), events.clone()));
     let shutdown = Arc::new(Notify::new());

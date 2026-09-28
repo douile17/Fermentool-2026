@@ -14,7 +14,7 @@ use fermentool_modbus::{limits, PduError, Pump, PumpError, PumpTransport, Transp
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::config::SerialConfig;
+use crate::config::{ScaleConfig, SerialConfig};
 use crate::scale;
 use crate::store::{
     ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunStatus, Store, StoreError,
@@ -62,6 +62,8 @@ pub enum EngineError {
         control_var: ControlVar,
         value: f64,
     },
+    /// The run asked for the gravimetric trim but no scale is attached.
+    ScaleUnavailable,
 }
 
 /// Structured error for the HTTP API: a one-line `message` (the [`Display`] of
@@ -85,6 +87,10 @@ impl std::fmt::Display for EngineError {
             EngineError::Config(s) => write!(f, "invalid run config: {s}"),
             EngineError::Busy => write!(f, "a run is already active"),
             EngineError::Idle => write!(f, "no run is active"),
+            EngineError::ScaleUnavailable => write!(
+                f,
+                "gravimetric trim needs a scale, and none is connected"
+            ),
             EngineError::SerialDown => write!(
                 f,
                 "the pump link is down. Connect the pump (or set serial.path to \"sim\") before starting a run"
@@ -124,6 +130,7 @@ impl EngineError {
             EngineError::SerialDown => "serial_down",
             EngineError::SimulatorNotAllowed => "simulator_not_allowed",
             EngineError::PumpRejectedSetpoint { .. } => "pump_setpoint_rejected",
+            EngineError::ScaleUnavailable => "scale_unavailable",
         }
     }
 
@@ -148,6 +155,12 @@ impl EngineError {
                 "Fermentool drives the pump over MODBUS on the configured serial port. Plug in the \
                  USB-RS485 adapter and pick its port in the connection bar, or set the port to \
                  \"sim\" to run against the built-in simulator."
+            }
+            EngineError::ScaleUnavailable => {
+                "The trim reads a balance under the feed bottle to correct the pump. Set the \
+                 balance's serial port under [scale] in config.toml and check its cable (a \
+                 configured scale that is unplugged is retried in the background), or start \
+                 this run without the gravimetric trim."
             }
             EngineError::SimulatorNotAllowed => {
                 "The engine is on the in-process simulator, so a run would move nothing real. \
@@ -393,15 +406,20 @@ pub struct Engine<T: Transport> {
     /// than generic over a second `Transport` type: the pump and the scale
     /// are independent links, unrelated to `Engine<T>`'s `T`.
     scale: Option<Box<dyn Transport + Send>>,
+    /// The `[scale]` config `scale` was attached from, kept so
+    /// [`recover_scale`](Self::recover_scale) can reopen the same port later.
+    scale_cfg: ScaleConfig,
     /// Dimensionless correction multiplied onto every curve setpoint:
     /// `target = curve.value_at(elapsed) * trim_c`. `1.0` is a no-op, the
     /// value while `gravimetric_trim` is off (or unset) on the active run.
     trim_c: f64,
     scale_state: trim::ScaleState,
     scale_read_fails: u32,
-    /// `false` once consecutive scale reads fail past `REOPEN_AFTER_WRITE_FAILS`,
-    /// or the trim update itself alarms (`trim::TrimOutcome::Alarm`). `trim_c`
-    /// freezes at its last value either way; the pump keeps running on it.
+    /// `false` once the trim update alarms (`trim::TrimOutcome::Alarm`).
+    /// Sticky until the next `start_run`. A down link is tracked separately
+    /// by `scale_read_fails` (see [`scale_link_down`](Self::scale_link_down));
+    /// the status frame's `scale_ok` combines both. `trim_c` freezes either
+    /// way and the pump keeps running on it.
     scale_ok: bool,
     /// The scale reading and moment `scale_state` last entered `Normal`
     /// (after a refill settles, or at run start): the reference point the
@@ -511,6 +529,7 @@ impl<T: Transport> Engine<T> {
             pump_confirmed: true,
             journal_fails: 0,
             scale: None,
+            scale_cfg: ScaleConfig::default(),
             trim_c,
             scale_state,
             scale_read_fails: 0,
@@ -826,6 +845,9 @@ impl<T: Transport> Engine<T> {
     }
 
     pub fn status(&self) -> EngineStatus {
+        // A configured scale is reported even while it is down, so the UI can
+        // show it as down instead of hiding the indicator.
+        let scale_shown = self.scale.is_some() || self.scale_wanted();
         EngineStatus {
             active: self.active.as_ref().map(|a| ActiveStatus {
                 run_id: a.id,
@@ -846,10 +868,10 @@ impl<T: Transport> Engine<T> {
             journal_ok: self.journal_fails < JOURNAL_STALL_LIMIT,
             simulator: self.on_simulator(),
             allow_simulator: self.allow_simulator,
-            scale_ok: self.scale.is_none() || self.scale_ok,
-            scale_state: self.scale.is_some().then_some(self.scale_state),
-            trim_c: self.scale.is_some().then_some(self.trim_c),
-            rate_g_per_min: self.scale.is_some().then_some(self.last_rate_g_per_min).flatten(),
+            scale_ok: !scale_shown || (self.scale_ok && !self.scale_link_down()),
+            scale_state: scale_shown.then_some(self.scale_state),
+            trim_c: scale_shown.then_some(self.trim_c),
+            rate_g_per_min: scale_shown.then_some(self.last_rate_g_per_min).flatten(),
         }
     }
 
@@ -876,6 +898,13 @@ impl<T: Transport> Engine<T> {
         // nothing just because `config.toml` still has the shipped `path = "sim"`.
         if self.on_simulator() && !self.allow_simulator {
             return Err(EngineError::SimulatorNotAllowed);
+        }
+
+        // Without a scale nothing would ever read the balance or correct c,
+        // and the UI would show no trim indicator: refuse rather than run a
+        // trim that silently does nothing.
+        if cfg.gravimetric_trim && self.scale.is_none() {
+            return Err(EngineError::ScaleUnavailable);
         }
 
         // A fresh run gets a fresh gravimetric-trim window: the previous run's
@@ -1214,6 +1243,13 @@ impl<T: Transport> Engine<T> {
         if !wants_trim {
             return;
         }
+        // Once the link is known down, stop asking: each failed read can cost
+        // up to the watchdog's timeout on the shared control thread, which
+        // would starve the pump's 150 ms setpoint cadence. `recover_scale`,
+        // on its own backoff, owns bringing the link back.
+        if self.scale_link_down() {
+            return;
+        }
         let Some(scale) = self.scale.as_mut() else {
             return;
         };
@@ -1232,9 +1268,6 @@ impl<T: Transport> Engine<T> {
             }
             Err(_) => {
                 self.scale_read_fails = self.scale_read_fails.saturating_add(1);
-                if self.scale_read_fails >= REOPEN_AFTER_WRITE_FAILS {
-                    self.scale_ok = false;
-                }
                 return;
             }
         };
@@ -1269,12 +1302,18 @@ impl<T: Transport> Engine<T> {
         if next == trim::ScaleState::RefillSettling && self.scale_state != trim::ScaleState::RefillSettling {
             self.settling_since = Some(now);
         }
-        if next == trim::ScaleState::Normal && self.scale_state != trim::ScaleState::Normal {
-            // New cumulative reference: skip resetting `c` back to a stale
-            // value, the state machine already froze it through the refill.
+        // Only a real refill completing resets the cumulative reference. A
+        // 5..=50 g bump (Perturbation -> Normal) is transient: freeze, don't
+        // reset, or a routine touch of the bottle would throw away hours of
+        // accumulated balance.
+        if next == trim::ScaleState::Normal && self.scale_state == trim::ScaleState::RefillSettling {
             self.refill_weight_g = Some(weight_g);
             self.refill_at = Some(now);
             self.weight_buffer.clear();
+            // A manual refill request is one-shot: close it here even if the
+            // operator never calls refill_done, or the next tick would go
+            // straight back to RefillPending and cycle forever.
+            self.manual_refill_mode = false;
         }
         self.scale_state = next;
 
@@ -1347,6 +1386,47 @@ impl<T: Transport> Engine<T> {
     pub fn trigger_refill_done(&mut self) {
         self.manual_refill_mode = false;
         self.manual_refill_done_flag = true;
+    }
+
+    /// Attach the scale link the boot sequence built (`None`: no `[scale]`
+    /// path, or a configured scale that did not open), and remember its
+    /// config: the feed density for the mass balance, and the port for
+    /// [`recover_scale`](Self::recover_scale) to retry.
+    pub fn attach_scale(&mut self, scale: Option<Box<dyn Transport + Send>>, cfg: ScaleConfig) {
+        self.scale = scale;
+        self.scale_density_g_per_ml = cfg.density_g_per_ml;
+        self.scale_cfg = cfg;
+    }
+
+    /// Whether `[scale]` names a port at all, attached or not. Tells "a
+    /// configured scale that is down" (retry it) from "no balance" (nothing
+    /// to do, ever).
+    pub fn scale_wanted(&self) -> bool {
+        self.scale_cfg.configured()
+    }
+
+    /// Whether the scale *link* needs reopening: never attached, or its read
+    /// failures crossed [`REOPEN_AFTER_WRITE_FAILS`]. Deliberately distinct
+    /// from a trim alarm on a reachable scale, which recovery must leave alone.
+    pub fn scale_link_down(&self) -> bool {
+        self.scale.is_none() || self.scale_read_fails >= REOPEN_AFTER_WRITE_FAILS
+    }
+
+    /// The scale's counterpart to [`recover_serial`](Self::recover_serial):
+    /// reopen the configured port from scratch. No simulator fallback, a
+    /// failed attempt leaves `self.scale` as it was and returns `false` so the
+    /// caller retries on its own backoff. Returns `true` without doing
+    /// anything when no scale is configured or the link is healthy.
+    pub fn recover_scale(&mut self) -> bool {
+        if !self.scale_wanted() || !self.scale_link_down() {
+            return true;
+        }
+        let Some(watchdog) = scale::open_watchdogged(&self.scale_cfg) else {
+            return false;
+        };
+        self.scale = Some(Box::new(watchdog));
+        self.scale_read_fails = 0;
+        true
     }
 
     #[cfg(test)]
@@ -2019,6 +2099,169 @@ mod tests {
         let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
         b.resume(at(600), grace()).unwrap();
         assert!((b.pump.transport().flow_ml_min() as f64 - 55.0).abs() < 1e-3);
+    }
+
+    fn scale_cfg(path: &str) -> ScaleConfig {
+        ScaleConfig {
+            path: path.into(),
+            baud: 9600,
+            density_g_per_ml: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_routine_perturbation_does_not_reset_the_cumulative_baseline() {
+        // "Transient: freeze, don't reset": a 5..=50 g bump that settles back
+        // one tick later must not wipe the buffer or the baseline, only a real
+        // RefillSettling -> Normal completion may.
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[
+            1000.0, 999.0, 998.0, // 3 stable readings, buffer at 3
+            1020.0, // +22 g -> Perturbation, buffer untouched
+            1022.0, // settles -> Normal, buffer resumes at 4
+        ])));
+        e.start_run(trim_cfg(), t0()).unwrap();
+        for i in 0..5 {
+            e.scale_tick(at(i));
+        }
+        assert_eq!(e.status().scale_state, Some(trim::ScaleState::Normal));
+        assert_eq!(e.weight_buffer_len(), 4);
+    }
+
+    #[test]
+    fn manual_refill_mode_does_not_cycle_forever_if_refill_done_is_never_called() {
+        // An operator who triggers refill mode and never calls refill_done
+        // must still end up in Normal, not cycle Normal -> RefillPending ->
+        // RefillSettling -> Normal forever, wiping the baseline every lap.
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0; 60])));
+        e.start_run(trim_cfg(), t0()).unwrap();
+        e.trigger_refill_mode();
+        // The buggy cycle has a 12-tick period and happens to sit in Normal
+        // at some ticks, so check every tick once it should have settled.
+        for i in 0..60 {
+            e.scale_tick(at(i));
+            if i >= 20 {
+                assert_eq!(
+                    e.status().scale_state,
+                    Some(trim::ScaleState::Normal),
+                    "still cycling at tick {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn start_run_refuses_gravimetric_trim_without_an_attached_scale() {
+        let mut e = engine(); // no scale attached
+        let err = e.start_run(trim_cfg(), t0()).unwrap_err();
+        assert!(matches!(err, EngineError::ScaleUnavailable), "got {err:?}");
+        assert!(err.hint().is_some());
+        assert!(e.status().active.is_none());
+    }
+
+    #[test]
+    fn a_configured_scale_that_did_not_open_reports_not_ok() {
+        let mut e = engine();
+        e.attach_scale(None, scale_cfg("NOPE_NOT_A_REAL_PORT_99999"));
+        let st = e.status();
+        assert!(!st.scale_ok, "a configured but absent scale must not look healthy");
+        assert!(st.scale_state.is_some());
+    }
+
+    #[test]
+    fn attach_scale_uses_the_configured_density() {
+        // Density 2.0 g/mL: a flat 60 ml/min curve is 2 g/s, so a bottle
+        // losing exactly 2 g/s must leave c alone and not alarm.
+        let mut e = engine();
+        e.attach_scale(
+            Some(Box::new(ScriptedScale::new(&[1000.0, 998.0, 996.0]))),
+            ScaleConfig { density_g_per_ml: 2.0, ..scale_cfg("sim-scale") },
+        );
+        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
+        for i in 0..3 {
+            e.scale_tick(at(i));
+        }
+        assert!(e.status().scale_ok);
+        assert_eq!(e.trim_c(), 1.0);
+    }
+
+    /// Always errors, and counts how many times it was asked to.
+    struct CountingFailingScale {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Transport for CountingFailingScale {
+        fn transaction(
+            &mut self,
+            _req: &[u8],
+        ) -> std::result::Result<Vec<u8>, fermentool_modbus::TransportError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(fermentool_modbus::TransportError::Timeout)
+        }
+    }
+
+    #[test]
+    fn scale_tick_fast_fails_once_the_link_is_confirmed_down() {
+        // Each failing read can cost up to the watchdog's timeout on the
+        // shared control thread; once the link is known down, stop asking.
+        let mut e = engine();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        e.attach_scale_for_test(Box::new(CountingFailingScale { calls: calls.clone() }));
+        e.start_run(trim_cfg(), t0()).unwrap();
+        let trip = REOPEN_AFTER_WRITE_FAILS as i64;
+        for i in 0..trip {
+            e.scale_tick(at(i));
+        }
+        assert!(e.scale_link_down());
+        let at_trip = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(at_trip, REOPEN_AFTER_WRITE_FAILS as usize);
+        for i in trip..trip + 50 {
+            e.scale_tick(at(i));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), at_trip);
+    }
+
+    #[test]
+    fn recover_scale_is_a_noop_when_nothing_is_configured() {
+        let mut e = engine();
+        assert!(e.recover_scale());
+        assert!(!e.scale_wanted());
+    }
+
+    #[test]
+    fn recover_scale_leaves_a_healthy_link_alone() {
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[1000.0]))), scale_cfg("sim-scale"));
+        assert!(!e.scale_link_down());
+        assert!(e.recover_scale());
+    }
+
+    #[test]
+    fn recover_scale_stays_down_when_the_port_will_not_open() {
+        let mut e = engine();
+        e.attach_scale(None, scale_cfg("NOPE_NOT_A_REAL_PORT_99999"));
+        assert!(e.scale_wanted());
+        assert!(e.scale_link_down());
+        assert!(!e.recover_scale());
+        assert!(e.scale_link_down());
+    }
+
+    #[test]
+    fn recover_scale_does_not_treat_a_trim_alarm_as_a_down_link() {
+        // scale_ok can be false from a mass-balance alarm on a perfectly
+        // reachable scale; recovery must leave that for start_run to clear.
+        let mut e = engine();
+        e.attach_scale(
+            Some(Box::new(ScriptedScale::new(&[1000.0, 1000.0]))),
+            scale_cfg("sim-scale"),
+        );
+        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
+        e.scale_tick(t0());
+        e.scale_tick(at(1));
+        assert!(!e.status().scale_ok, "must have alarmed");
+        assert!(!e.scale_link_down());
+        assert!(e.recover_scale());
+        assert!(!e.status().scale_ok, "recover_scale must not clear an alarm it didn't cause");
     }
 
     #[test]
