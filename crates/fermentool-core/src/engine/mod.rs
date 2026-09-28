@@ -448,6 +448,19 @@ const JOURNAL_STALL_LIMIT: u32 = 5;
 /// running its final setpoint). Empty value = nothing held.
 const HOLDING_KEY: &str = "holding";
 
+/// `app_state` key holding the JSON of the current [`PersistedTrim`], so a
+/// gravimetric trim that converged over many hours doesn't reset to `1.0` on
+/// a restart.
+const TRIM_STATE_KEY: &str = "trim_state";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedTrim {
+    trim_c: f64,
+    scale_state: trim::ScaleState,
+    refill_weight_g: Option<f64>,
+    refill_at: Option<Timestamp>,
+}
+
 impl<T: Transport> Engine<T> {
     pub fn new(pump: Pump<T>, store: Store, app_version: impl Into<String>) -> Self {
         // A run that completed naturally leaves the pump running at its final
@@ -460,6 +473,15 @@ impl<T: Transport> Engine<T> {
             .flatten()
             .filter(|s| !s.is_empty())
             .and_then(|s| serde_json::from_str::<HoldingStatus>(&s).ok());
+        let persisted_trim = store
+            .get_state(TRIM_STATE_KEY)
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<PersistedTrim>(&s).ok());
+        let (trim_c, scale_state, refill_weight_g, refill_at) = match persisted_trim {
+            Some(p) => (p.trim_c, p.scale_state, p.refill_weight_g, p.refill_at),
+            None => (1.0, trim::ScaleState::Normal, None, None),
+        };
         Self {
             pump,
             store,
@@ -484,12 +506,12 @@ impl<T: Transport> Engine<T> {
             pump_confirmed: true,
             journal_fails: 0,
             scale: None,
-            trim_c: 1.0,
-            scale_state: trim::ScaleState::Normal,
+            trim_c,
+            scale_state,
             scale_read_fails: 0,
             scale_ok: true,
-            refill_weight_g: None,
-            refill_at: None,
+            refill_weight_g,
+            refill_at,
             weight_buffer: Vec::new(),
             last_weight_g: None,
             settling_since: None,
@@ -510,6 +532,22 @@ impl<T: Transport> Engine<T> {
             .unwrap_or_default();
         let _ = self.store.set_state(HOLDING_KEY, &json);
         self.holding = holding;
+    }
+
+    /// Persist `trim_c`/`scale_state`/the refill reference to `app_state`, the
+    /// same mechanism `set_holding` uses, so a converged trim doesn't reset to
+    /// `1.0` on a restart. Cheap enough to call from `scale_tick` on every
+    /// actual change (at most once per adaptive window in steady state).
+    fn save_trim_state(&self) {
+        let p = PersistedTrim {
+            trim_c: self.trim_c,
+            scale_state: self.scale_state,
+            refill_weight_g: self.refill_weight_g,
+            refill_at: self.refill_at,
+        };
+        if let Ok(json) = serde_json::to_string(&p) {
+            let _ = self.store.set_state(TRIM_STATE_KEY, &json);
+        }
     }
 
     /// Record the serial link the daemon should reopen on its own after a
@@ -1170,6 +1208,10 @@ impl<T: Transport> Engine<T> {
             }
         };
 
+        // Snapshot so the (at most once per call) persistence write only
+        // happens when `trim_c`/`scale_state` actually move.
+        let before = (self.trim_c, self.scale_state);
+
         let prev = self.last_weight_g.unwrap_or(weight_g);
         self.last_weight_g = Some(weight_g);
         let seconds_in_settling = self
@@ -1206,6 +1248,9 @@ impl<T: Transport> Engine<T> {
         self.scale_state = next;
 
         if self.scale_state != trim::ScaleState::Normal {
+            if (self.trim_c, self.scale_state) != before {
+                self.save_trim_state();
+            }
             return;
         }
 
@@ -1237,6 +1282,10 @@ impl<T: Transport> Engine<T> {
                 }
             }
         }
+
+        if (self.trim_c, self.scale_state) != before {
+            self.save_trim_state();
+        }
     }
 
     /// Operator-declared "I'm about to change the bottle": forces the state
@@ -1262,6 +1311,11 @@ impl<T: Transport> Engine<T> {
     #[cfg(test)]
     pub(crate) fn trim_c(&self) -> f64 {
         self.trim_c
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_trim_c_for_test(&mut self, c: f64) {
+        self.trim_c = c;
     }
 
     /// Graceful stop: stop the pump, mark the run `stopped`.
@@ -1692,6 +1746,22 @@ mod tests {
         assert!(!e.status().scale_ok);
         let o = e.tick(at(20)).unwrap();
         assert!(matches!(o, TickOutcome::Applied { .. }));
+    }
+
+    #[test]
+    fn trim_state_survives_a_restart() {
+        let db = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0])));
+            let cfg = RunConfig { gravimetric_trim: true, ..linear_cfg() };
+            a.start_run(cfg, t0()).unwrap();
+            a.scale_tick(t0());
+            a.set_trim_c_for_test(1.05);
+            a.save_trim_state();
+        }
+        let b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        assert_eq!(b.trim_c(), 1.05);
     }
 
     #[test]
