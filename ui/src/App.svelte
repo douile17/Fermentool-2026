@@ -149,6 +149,12 @@
           <span class="dot" aria-hidden="true"></span>{pumpLink.short}
         </span>
       {/if}
+      {#if app.status?.scale_state}
+        <span class="pumpstat {app.status.scale_ok ? 'ok' : 'bad'}">
+          <span class="dot" aria-hidden="true"></span>
+          scale: {app.status.scale_state} (c={app.status.trim_c?.toFixed(3)})
+        </span>
+      {/if}
       <div class="rail-foot-row">
         <span class="status" class:on={app.connected}>
           <span class="dot" aria-hidden="true"></span>

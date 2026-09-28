@@ -27,6 +27,7 @@
     fb_sf: null,
     fb_ms: null, // maintenance coefficient, optional
     fb_vmax: null,
+    gravimetric_trim: false,
   });
 
   // "Run again" from History drops a seed here; apply it once, then clear.
@@ -36,9 +37,13 @@
   }
 
   let pumpAddr = $state(1);
+  let scaleConfigured = $state(false);
   $effect(() => {
     get('/api/config')
-      .then((c) => (pumpAddr = c.pump.address))
+      .then((c) => {
+        pumpAddr = c.pump.address;
+        scaleConfigured = (c.scale?.path?.length ?? 0) > 0;
+      })
       .catch(() => {});
   });
 
@@ -156,6 +161,7 @@
         direction: f.direction,
         pump_addr: pumpAddr,
         curve: curveSpec(),
+        gravimetric_trim: f.gravimetric_trim,
       });
       app.tab = 'overview';
     } catch (e) {
@@ -230,6 +236,13 @@
             <button class:on={f.direction === 'ccw'} onclick={() => (f.direction = 'ccw')}>counter</button>
           </div>
         </div>
+
+        {#if scaleConfigured}
+          <label class="field check">
+            <input type="checkbox" bind:checked={f.gravimetric_trim} />
+            <span>Enable gravimetric trim (uses the configured scale to correct the feed rate over time)</span>
+          </label>
+        {/if}
       </div>
     </div>
 
