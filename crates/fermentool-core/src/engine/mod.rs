@@ -348,6 +348,8 @@ pub struct ActiveStatus {
     /// Whether this run opted into the gravimetric trim, so the control loop
     /// knows to schedule `scale_tick` without reaching into `Engine` internals.
     pub gravimetric_trim: bool,
+    /// `calibration` for a tubing-calibration burst.
+    pub kind: RunKind,
 }
 
 struct ActiveRun {
@@ -386,6 +388,7 @@ struct ActiveRun {
     /// via `app_state` (see `save_trim_state`) would silently stop being
     /// applied because `scale_tick` gates on this flag.
     gravimetric_trim: bool,
+    kind: RunKind,
 }
 
 /// Trapezoid slice of a commanded-volume integral between two
@@ -882,6 +885,7 @@ impl<T: Transport> Engine<T> {
                 last_target: a.last_target,
                 volume_added_ml: a.volume_added_ml,
                 gravimetric_trim: a.gravimetric_trim,
+                kind: a.kind,
             }),
             transport: self.transport.label(),
             holding: self.holding.clone(),
@@ -1042,6 +1046,7 @@ impl<T: Transport> Engine<T> {
             vol_target: first,
             volume_added_ml: (cfg.control_var == ControlVar::MlMin).then_some(0.0),
             gravimetric_trim: cfg.gravimetric_trim,
+            kind: cfg.kind,
         });
         Ok(id)
     }
@@ -1055,6 +1060,7 @@ impl<T: Transport> Engine<T> {
         let id = active.id;
         let control_var = active.control_var;
         let duration_s = active.duration_s;
+        let run_kind = active.kind;
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
         let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
@@ -1210,6 +1216,21 @@ impl<T: Transport> Engine<T> {
                 });
             }
             self.journal_fails = 0;
+            if run_kind == RunKind::Calibration {
+                // A burst is weighed against its own started_at..ended_at, so
+                // the pump stops here instead of holding: any flow after
+                // ended_at would land in the bottle with no time to match it.
+                let _ = self.pump.stop();
+                let _ = self.store.log_event(&NewEvent {
+                    run_id: Some(id),
+                    wall_time: now,
+                    level: EventLevel::Info,
+                    kind: "curve_done".into(),
+                    detail: Some("calibration burst done, pump stopped".into()),
+                });
+                self.active = None;
+                return Ok(TickOutcome::Finished { seq, target });
+            }
             let _ = self.store.log_event(&NewEvent {
                 run_id: Some(id),
                 wall_time: now,
@@ -1667,6 +1688,7 @@ impl<T: Transport> Engine<T> {
             vol_target: target,
             volume_added_ml,
             gravimetric_trim: run.gravimetric_trim,
+            kind: run.kind,
         });
         Ok(run.id)
     }
@@ -2383,6 +2405,29 @@ mod tests {
                 note: None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn a_calibration_burst_stops_the_pump_at_its_end_instead_of_holding() {
+        // A burst's delivered mass is weighed against its own
+        // started_at..ended_at: a pump still running after the curve ends
+        // would put extra grams in the bottle that no duration accounts for.
+        let mut e = engine();
+        let cfg = RunConfig {
+            control_var: ControlVar::MlMin,
+            curve: CurveSpec::linear(10.0, 10.0, Duration::from_secs(300)),
+            kind: RunKind::Calibration,
+            ..linear_cfg()
+        };
+        let id = e.start_run(cfg, t0()).unwrap();
+        assert_eq!(e.status().active.as_ref().map(|a| a.kind), Some(RunKind::Calibration));
+        let o = e.tick(at(300)).unwrap();
+        assert!(matches!(o, TickOutcome::Finished { .. }));
+        assert!(!e.pump.transport().running(), "a burst must not keep pumping");
+        assert!(e.status().holding.is_none());
+        let run = e.store.run(id).unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.ended_at, Some(at(300)));
     }
 
     #[test]
