@@ -180,6 +180,89 @@ mod state_tests {
     }
 }
 
+pub const TRIM_IGNORE_BAND: f64 = 0.03;
+pub const TRIM_ALARM_BAND: f64 = 0.20;
+pub const TRIM_GAMMA: f64 = 0.3;
+pub const TRIM_MAX_DELTA: f64 = 0.02;
+pub const TRIM_MIN: f64 = 0.80;
+pub const TRIM_MAX: f64 = 1.25;
+
+#[derive(Debug, Clone, Copy)]
+pub enum TrimOutcome {
+    Unchanged,
+    Trimmed { new_c: f64 },
+    Alarm,
+}
+
+/// One bounded, slow correction step. `error_frac = (theoretical - measured)
+/// / theoretical` from the cumulative mass balance: positive means the pump
+/// is under-delivering (needs to speed up), negative means it's over.
+pub fn update_trim(prev_c: f64, error_frac: f64) -> TrimOutcome {
+    let mag = error_frac.abs();
+    if mag > TRIM_ALARM_BAND {
+        return TrimOutcome::Alarm;
+    }
+    if mag < TRIM_IGNORE_BAND {
+        return TrimOutcome::Unchanged;
+    }
+    let clamped_delta = (TRIM_GAMMA * error_frac).clamp(-TRIM_MAX_DELTA, TRIM_MAX_DELTA);
+    let new_c = (prev_c * (1.0 + clamped_delta)).clamp(TRIM_MIN, TRIM_MAX);
+    TrimOutcome::Trimmed { new_c }
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::*;
+
+    #[test]
+    fn inside_the_noise_band_is_a_no_op() {
+        assert!(matches!(update_trim(1.0, 0.01), TrimOutcome::Unchanged));
+        assert!(matches!(update_trim(1.0, -0.02), TrimOutcome::Unchanged));
+    }
+
+    #[test]
+    fn a_moderate_error_trims_by_a_fraction_of_it() {
+        match update_trim(1.0, 0.10) {
+            TrimOutcome::Trimmed { new_c } => assert!((new_c - 1.02).abs() < 1e-9, "got {new_c}"),
+            other => panic!("expected Trimmed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_negative_moderate_error_trims_down() {
+        match update_trim(1.0, -0.10) {
+            TrimOutcome::Trimmed { new_c } => assert!((new_c - 0.98).abs() < 1e-9, "got {new_c}"),
+            other => panic!("expected Trimmed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_gross_error_alarms_instead_of_correcting() {
+        assert!(matches!(update_trim(1.0, 0.30), TrimOutcome::Alarm));
+        assert!(matches!(update_trim(1.0, -0.25), TrimOutcome::Alarm));
+    }
+
+    #[test]
+    fn c_never_leaves_its_clamp_regardless_of_repeated_extreme_input() {
+        let mut c = 1.0;
+        for _ in 0..500 {
+            match update_trim(c, 0.15) {
+                TrimOutcome::Trimmed { new_c } => c = new_c,
+                TrimOutcome::Alarm => break,
+                TrimOutcome::Unchanged => {}
+            }
+            assert!((TRIM_MIN..=TRIM_MAX).contains(&c), "c escaped its clamp: {c}");
+        }
+    }
+
+    #[test]
+    fn a_single_update_never_moves_more_than_the_per_window_cap() {
+        if let TrimOutcome::Trimmed { new_c } = update_trim(1.0, 0.15) {
+            assert!((new_c - 1.0).abs() <= TRIM_MAX_DELTA + 1e-9, "moved too far: {new_c}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
