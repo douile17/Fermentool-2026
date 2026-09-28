@@ -427,10 +427,19 @@ impl Store {
     /// mid-way failure rolls back on drop instead of leaving this long-lived
     /// connection stuck inside an open transaction.
     pub fn clear_history(&self) -> Result<()> {
+        // Tubing calibrations are kept, and so are the bursts they point at
+        // (with their ticks and events): the record must stay traceable to
+        // its raw data, and the foreign key would refuse deleting them anyway.
+        const KEEP: &str = "SELECT run_1_id FROM tubing_calibrations \
+             UNION SELECT run_2_id FROM tubing_calibrations \
+             UNION SELECT run_3_id FROM tubing_calibrations";
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM ticks", [])?;
-        tx.execute("DELETE FROM events", [])?;
-        tx.execute("DELETE FROM runs", [])?;
+        tx.execute(&format!("DELETE FROM ticks WHERE run_id NOT IN ({KEEP})"), [])?;
+        tx.execute(
+            &format!("DELETE FROM events WHERE run_id IS NULL OR run_id NOT IN ({KEEP})"),
+            [],
+        )?;
+        tx.execute(&format!("DELETE FROM runs WHERE id NOT IN ({KEEP})"), [])?;
         tx.commit()?;
         Ok(())
     }
@@ -994,6 +1003,25 @@ mod tests {
             calibration_run(s, 10.0, "2026-09-01T09:10:00Z", 5),
             calibration_run(s, 10.0, "2026-09-01T09:20:00Z", 5),
         ]
+    }
+
+    #[test]
+    fn clear_history_keeps_calibrations_and_their_bursts() {
+        // A calibration record points at its three bursts; clearing the run
+        // history must neither fail on that reference nor orphan the record.
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        let cal = s.insert_calibration(&new_calibration(runs, [50.0; 3])).unwrap();
+        let dosing = s.insert_run(&sample_run()).unwrap();
+        s.finish_run(dosing, RunStatus::Stopped, ts("2026-09-02T09:00:00Z")).unwrap();
+
+        s.clear_history().unwrap();
+
+        assert!(s.run(dosing).unwrap().is_none());
+        assert!(s.calibration(cal).unwrap().is_some());
+        for id in runs {
+            assert!(s.run(id).unwrap().is_some(), "burst {id} was deleted");
+        }
     }
 
     #[test]
