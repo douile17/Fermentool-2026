@@ -27,6 +27,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: include_str!("migrations/0002_gravimetric_trim.sql"),
     },
+    Migration {
+        version: 3,
+        sql: include_str!("migrations/0003_tubing_calibration.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -39,6 +43,9 @@ pub enum StoreError {
     Json(serde_json::Error),
     /// `PRAGMA integrity_check` returned something other than `ok`.
     Corrupt(String),
+    /// The caller's data was refused before it reached the database (e.g. a
+    /// tubing calibration naming a run that is not a finished burst).
+    Invalid(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -47,6 +54,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Sqlite(e) => write!(f, "sqlite: {e}"),
             StoreError::Json(e) => write!(f, "json: {e}"),
             StoreError::Corrupt(s) => write!(f, "database integrity check failed: {s}"),
+            StoreError::Invalid(s) => write!(f, "{s}"),
         }
     }
 }
@@ -131,6 +139,18 @@ str_enum!(
     Direction { Cw => "cw", Ccw => "ccw" }
 );
 str_enum!(
+    /// What a run is for. A `calibration` run is a short tubing-calibration
+    /// burst, kept apart from the dosing history it would otherwise pollute.
+    RunKind { Dosing => "dosing", Calibration => "calibration" }
+);
+
+impl Default for RunKind {
+    fn default() -> Self {
+        RunKind::Dosing
+    }
+}
+
+str_enum!(
     /// Severity of a timeline event.
     EventLevel { Info => "info", Warn => "warn", Error => "error" }
 );
@@ -152,6 +172,9 @@ pub struct NewRun {
     pub app_version: String,
     pub curve: CurveSpec,
     pub gravimetric_trim: bool,
+    pub kind: RunKind,
+    /// The tubing calibration that seeded this run's trim, if any.
+    pub tubing_calibration_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -170,6 +193,43 @@ pub struct RunRow {
     pub app_version: String,
     pub curve: CurveSpec,
     pub gravimetric_trim: bool,
+    pub kind: RunKind,
+    pub tubing_calibration_id: Option<i64>,
+}
+
+/// A tubing calibration to record: three hand-weighed bursts of one tube at
+/// one setpoint. Only the raw inputs; the store derives the flows itself.
+#[derive(Debug, Clone)]
+pub struct NewCalibration {
+    pub tubing_lot_id: String,
+    pub tubing_size: String,
+    pub control_var: ControlVar,
+    pub setpoint: f64,
+    pub density_g_per_ml: f64,
+    /// The three `kind = calibration` runs, each finished.
+    pub run_ids: [i64; 3],
+    pub weights_g: [f64; 3],
+    pub operator: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CalibrationRow {
+    pub id: i64,
+    pub created_at: Timestamp,
+    pub tubing_lot_id: String,
+    pub tubing_size: String,
+    pub control_var: ControlVar,
+    pub setpoint: f64,
+    pub density_g_per_ml: f64,
+    pub run_ids: [i64; 3],
+    pub weights_g: [f64; 3],
+    pub measured_ml_min: [f64; 3],
+    pub mean_measured_ml_min: f64,
+    pub cv_pct: f64,
+    pub c0: f64,
+    pub operator: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,7 +287,12 @@ pub struct Store {
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
      direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
-     gravimetric_trim";
+     gravimetric_trim, kind, tubing_calibration_id";
+
+const CAL_COLS: &str = "id, created_at, tubing_lot_id, tubing_size, control_var, setpoint, \
+     density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
+     measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
+     c0, operator, note";
 
 const TICK_COLS: &str = "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note";
 
@@ -299,9 +364,9 @@ impl Store {
             "INSERT INTO runs
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
-                pump_addr, app_version, gravimetric_trim)
+                pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 r.name,
                 created,
@@ -316,6 +381,8 @@ impl Store {
                 r.pump_addr as i64,
                 r.app_version,
                 r.gravimetric_trim as i64,
+                r.kind.as_str(),
+                r.tubing_calibration_id,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -375,6 +442,130 @@ impl Store {
             params![id, status.as_str(), ended_at.to_string()],
         )?;
         Ok(())
+    }
+
+    // ---- tubing calibrations ----
+
+    /// Record a tubing calibration. Every derived number (per-burst flow,
+    /// mean, CV%, `c0`) is computed here from the three runs' own
+    /// `started_at`/`ended_at` and the typed-in weights, never taken from the
+    /// client, so the record stays traceable to the raw bursts.
+    pub fn insert_calibration(&self, c: &NewCalibration) -> Result<i64> {
+        let invalid = |m: String| StoreError::Invalid(m);
+        if c.tubing_lot_id.trim().is_empty() || c.tubing_size.trim().is_empty() {
+            return Err(invalid("tubing lot and size are required".into()));
+        }
+        if !(c.density_g_per_ml.is_finite() && c.density_g_per_ml > 0.0) {
+            return Err(invalid("density must be a positive number".into()));
+        }
+        if !(c.setpoint.is_finite() && c.setpoint > 0.0) {
+            return Err(invalid("setpoint must be a positive number".into()));
+        }
+        if c.weights_g.iter().any(|w| !(w.is_finite() && *w > 0.0)) {
+            return Err(invalid("every weight must be a positive number of grams".into()));
+        }
+        let [a, b, d] = c.run_ids;
+        if a == b || a == d || b == d {
+            return Err(invalid("the three bursts must be three different runs".into()));
+        }
+
+        let mut samples = [(0.0, 0.0); 3];
+        for (i, &run_id) in c.run_ids.iter().enumerate() {
+            let run = self
+                .run(run_id)?
+                .ok_or_else(|| invalid(format!("run {run_id} does not exist")))?;
+            if run.kind != RunKind::Calibration {
+                return Err(invalid(format!("run {run_id} is not a calibration burst")));
+            }
+            if run.control_var != c.control_var {
+                return Err(invalid(format!(
+                    "run {run_id} ran in {}, not {}",
+                    run.control_var.as_str(),
+                    c.control_var.as_str()
+                )));
+            }
+            let commanded = run.curve.value_at(std::time::Duration::ZERO);
+            if (commanded - c.setpoint).abs() > 1e-6 * c.setpoint.max(1.0) {
+                return Err(invalid(format!(
+                    "run {run_id} ran at {commanded}, not the setpoint {}",
+                    c.setpoint
+                )));
+            }
+            let ended = run
+                .ended_at
+                .ok_or_else(|| invalid(format!("run {run_id} has not finished")))?;
+            let minutes = ended.duration_since(run.started_at).as_secs_f64() / 60.0;
+            if minutes <= 0.0 {
+                return Err(invalid(format!("run {run_id} has no duration")));
+            }
+            samples[i] = (minutes, c.weights_g[i]);
+        }
+        let r = crate::trim::compute_calibration(&crate::trim::CalibrationInput {
+            setpoint: c.setpoint,
+            density_g_per_ml: c.density_g_per_ml,
+            samples,
+        });
+
+        self.conn.execute(
+            "INSERT INTO tubing_calibrations
+               (created_at, tubing_lot_id, tubing_size, control_var, setpoint,
+                density_g_per_ml, run_1_id, run_2_id, run_3_id,
+                weight_1_g, weight_2_g, weight_3_g,
+                measured_1_ml_min, measured_2_ml_min, measured_3_ml_min,
+                mean_measured_ml_min, cv_pct, c0, operator, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17, ?18, ?19, ?20)",
+            params![
+                Timestamp::now().to_string(),
+                c.tubing_lot_id.trim(),
+                c.tubing_size.trim(),
+                c.control_var.as_str(),
+                c.setpoint,
+                c.density_g_per_ml,
+                a,
+                b,
+                d,
+                c.weights_g[0],
+                c.weights_g[1],
+                c.weights_g[2],
+                r.measured_ml_min[0],
+                r.measured_ml_min[1],
+                r.measured_ml_min[2],
+                r.mean_measured_ml_min,
+                r.cv_pct,
+                r.c0,
+                c.operator,
+                c.note,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn calibration(&self, id: i64) -> Result<Option<CalibrationRow>> {
+        self.conn
+            .query_row(
+                &format!("SELECT {CAL_COLS} FROM tubing_calibrations WHERE id = ?1"),
+                [id],
+                row_to_calibration,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Calibrations newest first, optionally narrowed to one tubing lot and/or
+    /// size (exact match).
+    pub fn list_calibrations(
+        &self,
+        tubing_lot_id: Option<&str>,
+        tubing_size: Option<&str>,
+    ) -> Result<Vec<CalibrationRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CAL_COLS} FROM tubing_calibrations
+             WHERE (?1 IS NULL OR tubing_lot_id = ?1) AND (?2 IS NULL OR tubing_size = ?2)
+             ORDER BY created_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map(params![tubing_lot_id, tubing_size], row_to_calibration)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ---- ticks ----
@@ -530,6 +721,28 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         pump_addr: row.get::<_, i64>(11)? as u8,
         app_version: row.get(12)?,
         gravimetric_trim: row.get::<_, i64>(13)? != 0,
+        kind: parse_token(row.get(14)?, RunKind::from_token, "run kind")?,
+        tubing_calibration_id: row.get(15)?,
+    })
+}
+
+fn row_to_calibration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalibrationRow> {
+    Ok(CalibrationRow {
+        id: row.get(0)?,
+        created_at: parse_ts(row.get(1)?)?,
+        tubing_lot_id: row.get(2)?,
+        tubing_size: row.get(3)?,
+        control_var: parse_token(row.get(4)?, ControlVar::from_token, "control var")?,
+        setpoint: row.get(5)?,
+        density_g_per_ml: row.get(6)?,
+        run_ids: [row.get(7)?, row.get(8)?, row.get(9)?],
+        weights_g: [row.get(10)?, row.get(11)?, row.get(12)?],
+        measured_ml_min: [row.get(13)?, row.get(14)?, row.get(15)?],
+        mean_measured_ml_min: row.get(16)?,
+        cv_pct: row.get(17)?,
+        c0: row.get(18)?,
+        operator: row.get(19)?,
+        note: row.get(20)?,
     })
 }
 
@@ -579,6 +792,8 @@ mod tests {
             curve: CurveSpec::exponential_physio(2.0, 0.15, Duration::from_secs(100 * 3600))
                 .with_clamp(0.1, 350.0),
             gravimetric_trim: false,
+            kind: RunKind::Dosing,
+            tubing_calibration_id: None,
         }
     }
 
@@ -599,7 +814,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     #[test]
@@ -611,7 +826,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     #[test]
@@ -736,5 +951,187 @@ mod tests {
     fn integrity_check_passes_on_fresh_db() {
         let s = Store::open_in_memory().unwrap();
         s.integrity_check().unwrap();
+    }
+
+    // ---- tubing calibrations ----
+
+    /// A finished `kind = calibration` burst: a constant `setpoint` ml/min run
+    /// stopped `minutes` after it started.
+    fn calibration_run(s: &Store, setpoint: f64, start: &str, minutes: i64) -> i64 {
+        let started = ts(start);
+        let id = s
+            .insert_run(&NewRun {
+                name: "cal".into(),
+                started_at: started,
+                control_var: ControlVar::MlMin,
+                curve: CurveSpec::linear(setpoint, setpoint, Duration::from_secs(3600)),
+                kind: RunKind::Calibration,
+                ..sample_run()
+            })
+            .unwrap();
+        let ended = started + jiff::SignedDuration::from_mins(minutes);
+        s.finish_run(id, RunStatus::Stopped, ended).unwrap();
+        id
+    }
+
+    fn new_calibration(run_ids: [i64; 3], weights_g: [f64; 3]) -> NewCalibration {
+        NewCalibration {
+            tubing_lot_id: "LOT-42".into(),
+            tubing_size: "1.6mm".into(),
+            control_var: ControlVar::MlMin,
+            setpoint: 10.0,
+            density_g_per_ml: 1.0,
+            run_ids,
+            weights_g,
+            operator: Some("AZ".into()),
+            note: None,
+        }
+    }
+
+    fn three_bursts(s: &Store) -> [i64; 3] {
+        [
+            calibration_run(s, 10.0, "2026-09-01T09:00:00Z", 5),
+            calibration_run(s, 10.0, "2026-09-01T09:10:00Z", 5),
+            calibration_run(s, 10.0, "2026-09-01T09:20:00Z", 5),
+        ]
+    }
+
+    #[test]
+    fn a_run_defaults_to_dosing_with_no_calibration() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_run(&sample_run()).unwrap();
+        let got = s.run(id).unwrap().unwrap();
+        assert_eq!(got.kind, RunKind::Dosing);
+        assert_eq!(got.tubing_calibration_id, None);
+    }
+
+    #[test]
+    fn insert_and_fetch_a_calibration_round_trips() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        // 5 min each at a commanded 10 ml/min; 45 g at 1.0 g/mL is 9 ml/min.
+        let id = s.insert_calibration(&new_calibration(runs, [45.0, 45.0, 45.0])).unwrap();
+        let c = s.calibration(id).unwrap().expect("calibration exists");
+        assert_eq!(c.id, id);
+        assert_eq!(c.tubing_lot_id, "LOT-42");
+        assert_eq!(c.tubing_size, "1.6mm");
+        assert_eq!(c.control_var, ControlVar::MlMin);
+        assert_eq!(c.run_ids, runs);
+        assert_eq!(c.weights_g, [45.0, 45.0, 45.0]);
+        assert_eq!(c.operator.as_deref(), Some("AZ"));
+        // Derived server-side from each run's own started_at/ended_at.
+        for m in c.measured_ml_min {
+            assert!((m - 9.0).abs() < 1e-9, "got {m}");
+        }
+        assert!((c.mean_measured_ml_min - 9.0).abs() < 1e-9);
+        assert!(c.cv_pct.abs() < 1e-9);
+        assert!((c.c0 - 10.0 / 9.0).abs() < 1e-9);
+        assert!(s.calibration(id + 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_duration_comes_from_each_runs_own_clock() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = [
+            calibration_run(&s, 10.0, "2026-09-01T09:00:00Z", 5),
+            calibration_run(&s, 10.0, "2026-09-01T09:10:00Z", 10),
+            calibration_run(&s, 10.0, "2026-09-01T09:30:00Z", 4),
+        ];
+        let id = s.insert_calibration(&new_calibration(runs, [50.0, 100.0, 40.0])).unwrap();
+        let c = s.calibration(id).unwrap().unwrap();
+        for m in c.measured_ml_min {
+            assert!((m - 10.0).abs() < 1e-9, "got {m}");
+        }
+    }
+
+    #[test]
+    fn list_calibrations_filters_by_lot_and_size_newest_first() {
+        let s = Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for (lot, size) in [("A", "1.6mm"), ("A", "3.2mm"), ("B", "1.6mm"), ("A", "1.6mm")] {
+            let runs = three_bursts(&s);
+            let c = NewCalibration {
+                tubing_lot_id: lot.into(),
+                tubing_size: size.into(),
+                ..new_calibration(runs, [50.0; 3])
+            };
+            ids.push(s.insert_calibration(&c).unwrap());
+        }
+        let all = s.list_calibrations(None, None).unwrap();
+        assert_eq!(all.len(), 4);
+        let a_small = s.list_calibrations(Some("A"), Some("1.6mm")).unwrap();
+        assert_eq!(a_small.iter().map(|c| c.id).collect::<Vec<_>>(), vec![ids[3], ids[0]]);
+        let lot_a = s.list_calibrations(Some("A"), None).unwrap();
+        assert_eq!(lot_a.len(), 3);
+        let small = s.list_calibrations(None, Some("1.6mm")).unwrap();
+        assert_eq!(small.len(), 3);
+    }
+
+    #[test]
+    fn insert_calibration_refuses_runs_that_are_not_finished_calibration_bursts() {
+        let s = Store::open_in_memory().unwrap();
+        let good = three_bursts(&s);
+
+        // A dosing run is not a calibration burst.
+        let dosing = s.insert_run(&sample_run()).unwrap();
+        s.finish_run(dosing, RunStatus::Stopped, ts("2026-09-01T10:00:00Z")).unwrap();
+        let err = s
+            .insert_calibration(&new_calibration([good[0], good[1], dosing], [50.0; 3]))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "got {err:?}");
+
+        // A burst still running has no duration yet.
+        let running = s
+            .insert_run(&NewRun { kind: RunKind::Calibration, ..sample_run() })
+            .unwrap();
+        let err = s
+            .insert_calibration(&new_calibration([good[0], good[1], running], [50.0; 3]))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "got {err:?}");
+
+        // An unknown run id.
+        let err = s
+            .insert_calibration(&new_calibration([good[0], good[1], 9999], [50.0; 3]))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "got {err:?}");
+
+        // The same burst counted twice.
+        let err = s
+            .insert_calibration(&new_calibration([good[0], good[0], good[1]], [50.0; 3]))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn insert_calibration_refuses_a_setpoint_or_unit_the_bursts_did_not_run_at() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        let wrong_setpoint = NewCalibration { setpoint: 12.0, ..new_calibration(runs, [50.0; 3]) };
+        assert!(matches!(
+            s.insert_calibration(&wrong_setpoint).unwrap_err(),
+            StoreError::Invalid(_)
+        ));
+        let wrong_unit = NewCalibration {
+            control_var: ControlVar::Rpm,
+            ..new_calibration(runs, [50.0; 3])
+        };
+        assert!(matches!(
+            s.insert_calibration(&wrong_unit).unwrap_err(),
+            StoreError::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn insert_calibration_refuses_non_positive_or_non_finite_numbers() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        for bad in [
+            new_calibration(runs, [50.0, 0.0, 50.0]),
+            new_calibration(runs, [50.0, f64::NAN, 50.0]),
+            NewCalibration { density_g_per_ml: 0.0, ..new_calibration(runs, [50.0; 3]) },
+            NewCalibration { tubing_lot_id: "  ".into(), ..new_calibration(runs, [50.0; 3]) },
+        ] {
+            assert!(matches!(s.insert_calibration(&bad).unwrap_err(), StoreError::Invalid(_)));
+        }
     }
 }

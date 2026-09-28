@@ -707,7 +707,7 @@ mod tests {
     use fermentool_modbus::{Pump, SimPump};
 
     use crate::engine::{Engine, RunConfig};
-    use crate::store::{ControlVar, Direction, Store};
+    use crate::store::{ControlVar, Direction, RunKind, Store};
 
     fn cadence_run() -> RunConfig {
         RunConfig {
@@ -717,6 +717,8 @@ mod tests {
             pump_addr: 1,
             curve: CurveSpec::linear(0.0, 100.0, Duration::from_secs(3600)),
             gravimetric_trim: false,
+            kind: RunKind::Dosing,
+            tubing_calibration_id: None,
         }
     }
 
@@ -780,6 +782,8 @@ mod tests {
             // 0 → 350 rpm in 60 s ⇒ ~5.8 rpm/s: a 0.1 grid step every ~17 ms.
             curve: CurveSpec::linear(0.0, 350.0, Duration::from_secs(60)),
             gravimetric_trim: false,
+            kind: RunKind::Dosing,
+            tubing_calibration_id: None,
         };
         handle
             .call(|reply| Command::StartRun(cfg, reply))
@@ -857,6 +861,8 @@ mod tests {
             pump_addr: 1,
             curve: CurveSpec::linear(10.0, 20.0, Duration::from_secs(1)),
             gravimetric_trim: false,
+            kind: RunKind::Dosing,
+            tubing_calibration_id: None,
         };
         handle
             .call(|reply| Command::StartRun(cfg, reply))

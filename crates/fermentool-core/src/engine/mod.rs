@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ScaleConfig, SerialConfig};
 use crate::scale;
 use crate::store::{
-    ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunStatus, Store, StoreError,
+    ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunKind, RunStatus, Store,
+    StoreError,
 };
 use crate::transport::{SwapTransport, TransportKind};
 use crate::trim;
@@ -211,6 +212,14 @@ pub struct RunConfig {
     /// default) is byte-for-byte today's open-loop behavior.
     #[serde(default)]
     pub gravimetric_trim: bool,
+    /// `calibration` for a tubing-calibration burst, kept out of the dosing
+    /// history. Defaults to `dosing`.
+    #[serde(default)]
+    pub kind: RunKind,
+    /// The tubing calibration to start the trim from (its `c0`, or in rpm
+    /// mode its rpm-to-volume conversion). Required for a trimmed rpm run.
+    #[serde(default)]
+    pub tubing_calibration_id: Option<i64>,
 }
 
 /// What [`Engine::pending_recovery`] found: a run that was `running` when the
@@ -961,6 +970,8 @@ impl<T: Transport> Engine<T> {
             app_version: self.app_version.clone(),
             curve: spec.clone(),
             gravimetric_trim: cfg.gravimetric_trim,
+            kind: cfg.kind,
+            tubing_calibration_id: cfg.tubing_calibration_id,
         })?;
         self.store.log_event(&NewEvent {
             run_id: Some(id),
@@ -1831,6 +1842,8 @@ mod tests {
             pump_addr: 1,
             curve: CurveSpec::linear(0.0, 100.0, Duration::from_secs(3600)),
             gravimetric_trim: false,
+            kind: RunKind::Dosing,
+            tubing_calibration_id: None,
         }
     }
 
