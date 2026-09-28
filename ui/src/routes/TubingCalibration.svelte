@@ -166,8 +166,11 @@
     await persist();
   }
 
+  // Two-step, in-page: a native confirm() dialog is not something the
+  // desktop webview can be relied on to show.
+  let confirmDiscard = $state(false);
   async function discard() {
-    if (!confirm('Discard this calibration session? The bursts stay in the run history.')) return;
+    confirmDiscard = false;
     await del('/api/calibrations/draft').catch(() => {});
     Object.assign(d, blank());
     saved = null;
@@ -356,8 +359,12 @@
         {#if current && !burstRunning}
           <button class="btn-ghost" onclick={redoLast}>Redo burst {d.bursts.length}</button>
         {/if}
-        {#if locked || d.tubing_lot_id}
-          <button class="btn-danger" onclick={discard}>Discard session</button>
+        {#if confirmDiscard}
+          <span class="confirm">Discard this session? The bursts stay in the run history.</span>
+          <button class="btn-danger" onclick={discard}>Discard</button>
+          <button class="btn-ghost" onclick={() => (confirmDiscard = false)}>Keep</button>
+        {:else if locked || d.tubing_lot_id}
+          <button class="btn-danger" onclick={() => (confirmDiscard = true)}>Discard session</button>
         {/if}
       </div>
     </div>
@@ -451,6 +458,7 @@
   .bursts li.done .n { color: var(--green-600); }
   .actions { display: flex; gap: var(--s-3); align-items: flex-end; flex-wrap: wrap; margin-top: var(--s-3); }
   .weigh { width: 180px; }
+  .confirm { font-size: 13px; align-self: center; }
   .warn { font-size: 13px; color: var(--danger); margin: var(--s-3) 0 0; }
   .result {
     display: flex;
