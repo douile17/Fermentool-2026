@@ -1493,6 +1493,17 @@ impl<T: Transport> Engine<T> {
         self.scale.is_none() || self.scale_read_fails >= REOPEN_AFTER_WRITE_FAILS
     }
 
+    /// Whether the control loop should try to reopen the scale now: it is
+    /// configured, its link is down, and either no run is active or the
+    /// active run wants the trim. Idle retries matter because a trimmed run
+    /// refuses to start without a scale; a plain dosing run is left alone so
+    /// reopen attempts never slow its setpoint writes.
+    pub fn scale_recovery_wanted(&self) -> bool {
+        self.scale_wanted()
+            && self.scale_link_down()
+            && self.active.as_ref().is_none_or(|a| a.gravimetric_trim)
+    }
+
     /// The scale's counterpart to [`recover_serial`](Self::recover_serial):
     /// reopen the configured port from scratch. No simulator fallback, a
     /// failed attempt leaves `self.scale` as it was and returns `false` so the
@@ -2341,6 +2352,24 @@ mod tests {
             e.scale_tick(at(i));
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), at_trip);
+    }
+
+    #[test]
+    fn a_scale_down_at_boot_is_retried_while_idle_not_only_during_a_trim_run() {
+        // A trimmed run can't start without a scale, so if recovery only ran
+        // during one, a scale that missed boot would never come back.
+        let mut e = engine();
+        assert!(!e.scale_recovery_wanted(), "nothing configured, nothing to retry");
+        e.attach_scale(None, scale_cfg("NOPE_NOT_A_REAL_PORT_99999"));
+        assert!(e.scale_recovery_wanted(), "idle with a configured scale down");
+        // A plain dosing run doesn't need the scale: don't block its control
+        // thread on reopen attempts.
+        e.start_run(linear_cfg(), t0()).unwrap();
+        assert!(!e.scale_recovery_wanted());
+        e.stop_run(at(1)).unwrap();
+        // A healthy link needs nothing.
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[]))), scale_cfg("sim-scale"));
+        assert!(!e.scale_recovery_wanted());
     }
 
     #[test]

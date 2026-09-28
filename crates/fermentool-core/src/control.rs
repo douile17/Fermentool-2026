@@ -297,6 +297,11 @@ fn control_loop<T: Transport + SwapTransport>(
             None => run_epoch = None,
         }
 
+        // Scale auto-recovery runs on its own backoff whenever the engine
+        // wants it (idle, or during a trimmed run), not only from the trim's
+        // probe: a trimmed run can't start until the scale is back.
+        maybe_recover_scale(engine, events, grace, &mut next_scale_retry);
+
         if engine.tick_interval().is_none() {
             next_journal = None;
             next_write = None;
@@ -384,13 +389,11 @@ fn control_loop<T: Transport + SwapTransport>(
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         engine.scale_tick(now)
                     }));
-                    maybe_recover_scale(engine, events, grace, &mut next_scale_retry);
                     next_scale_probe = Some(advance_past(scale_probe_due, LINK_PROBE_INTERVAL));
                     continue;
                 }
             } else {
                 next_scale_probe = None;
-                next_scale_retry = None;
             }
         }
 
@@ -519,16 +522,17 @@ fn maybe_recover_serial<T: Transport + SwapTransport>(
 
 /// Reopen the scale on its own after a mid-run disconnect (or a scale that
 /// never opened at boot), the gravimetric trim's counterpart to
-/// [`maybe_recover_serial`]. Only called on `scale_tick`'s cadence while the
-/// active run wants the trim, spaced by the same exponential backoff. No
-/// `[scale]` configured: never retries, never logs.
+/// [`maybe_recover_serial`], spaced by the same exponential backoff. Acts
+/// only while [`Engine::scale_recovery_wanted`] holds (idle, or a trimmed run
+/// is active); otherwise it clears the backoff. No `[scale]` configured:
+/// never retries, never logs.
 fn maybe_recover_scale<T: Transport>(
     engine: &mut Engine<T>,
     events: &broadcast::Sender<DaemonStatus>,
     grace: Duration,
     next_retry: &mut Option<(Instant, Duration)>,
 ) {
-    if !(engine.scale_wanted() && engine.scale_link_down()) {
+    if !engine.scale_recovery_wanted() {
         *next_retry = None;
         return;
     }
