@@ -313,3 +313,106 @@ mod tests {
         assert_eq!(decimate(&pts, 200), pts);
     }
 }
+
+/// A tubing calibration's replicate spread above this CV% is flagged to the
+/// operator. A warning only, never a block: a human decides whether to redo it.
+pub const CALIBRATION_CV_WARN_PCT: f64 = 5.0;
+
+/// Three hand-weighed bursts at one commanded `setpoint` (the run's own unit,
+/// rpm or mL/min).
+#[derive(Debug, Clone, Copy)]
+pub struct CalibrationInput {
+    pub setpoint: f64,
+    pub density_g_per_ml: f64,
+    /// `(duration_min, weight_g)` per replicate, the duration from the burst
+    /// run's own clock.
+    pub samples: [(f64, f64); 3],
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct CalibrationResult {
+    pub measured_ml_min: [f64; 3],
+    pub mean_measured_ml_min: f64,
+    /// Population CV of the three measured flows, percent.
+    pub cv_pct: f64,
+    /// `setpoint / mean_measured`. In ml/min mode it is dimensionless, with
+    /// the trim's convention (above 1 = under-delivering = speed up), and
+    /// seeds `trim_c` directly. In rpm mode it is rpm per (mL/min), not a
+    /// trim factor: the engine uses its inverse as the rpm-to-volume
+    /// conversion and starts `trim_c` at 1.0.
+    pub c0: f64,
+}
+
+/// Pure: weights to flows, then mean, CV and `c0`. Callers validate that
+/// durations, weights and density are positive and finite.
+pub fn compute_calibration(input: &CalibrationInput) -> CalibrationResult {
+    let measured_ml_min = input
+        .samples
+        .map(|(dur_min, weight_g)| weight_g / (input.density_g_per_ml * dur_min));
+    let mean = measured_ml_min.iter().sum::<f64>() / 3.0;
+    let variance = measured_ml_min.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / 3.0;
+    let cv_pct = if mean.abs() > 1e-9 { 100.0 * variance.sqrt() / mean } else { 0.0 };
+    let c0 = if mean.abs() > 1e-9 { input.setpoint / mean } else { 1.0 };
+    CalibrationResult {
+        measured_ml_min,
+        mean_measured_ml_min: mean,
+        cv_pct,
+        c0,
+    }
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+
+    #[test]
+    fn identical_replicates_give_zero_cv() {
+        let input = CalibrationInput {
+            setpoint: 10.0,
+            density_g_per_ml: 1.0,
+            samples: [(5.0, 50.0), (5.0, 50.0), (5.0, 50.0)],
+        };
+        let r = compute_calibration(&input);
+        assert!((r.mean_measured_ml_min - 10.0).abs() < 1e-9);
+        assert!(r.cv_pct.abs() < 1e-9);
+        assert!((r.c0 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn underdelivery_gives_c0_above_one() {
+        // commanded 10 mL/min, measured 9 mL/min: the pump needs to speed up.
+        let input = CalibrationInput {
+            setpoint: 10.0,
+            density_g_per_ml: 1.0,
+            samples: [(5.0, 45.0), (5.0, 45.0), (5.0, 45.0)],
+        };
+        let r = compute_calibration(&input);
+        assert!((r.mean_measured_ml_min - 9.0).abs() < 1e-9);
+        assert!(r.c0 > 1.0, "got {}", r.c0);
+        assert!((r.c0 - 10.0 / 9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_divergent_replicate_raises_cv_pct() {
+        let input = CalibrationInput {
+            setpoint: 10.0,
+            density_g_per_ml: 1.0,
+            samples: [(5.0, 50.0), (5.0, 50.0), (5.0, 60.0)],
+        };
+        let r = compute_calibration(&input);
+        assert!(r.cv_pct > CALIBRATION_CV_WARN_PCT, "got {}", r.cv_pct);
+    }
+
+    #[test]
+    fn density_and_duration_convert_grams_to_ml_per_min() {
+        // 118 g of a 1.18 g/mL feed in 10 min is 100 mL / 10 min = 10 mL/min.
+        let input = CalibrationInput {
+            setpoint: 10.0,
+            density_g_per_ml: 1.18,
+            samples: [(10.0, 118.0), (10.0, 118.0), (10.0, 118.0)],
+        };
+        let r = compute_calibration(&input);
+        assert!((r.measured_ml_min[0] - 10.0).abs() < 1e-9);
+        assert!((r.c0 - 1.0).abs() < 1e-9);
+    }
+}
