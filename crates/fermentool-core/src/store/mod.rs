@@ -204,6 +204,8 @@ pub struct RunRow {
 pub struct NewCalibration {
     pub tubing_lot_id: String,
     pub tubing_size: String,
+    pub inner_diameter_mm: f64,
+    pub outer_diameter_mm: f64,
     pub control_var: ControlVar,
     pub setpoint: f64,
     pub density_g_per_ml: f64,
@@ -220,6 +222,8 @@ pub struct CalibrationRow {
     pub created_at: Timestamp,
     pub tubing_lot_id: String,
     pub tubing_size: String,
+    pub inner_diameter_mm: f64,
+    pub outer_diameter_mm: f64,
     pub control_var: ControlVar,
     pub setpoint: f64,
     pub density_g_per_ml: f64,
@@ -293,7 +297,7 @@ const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, cont
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, tubing_size, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
      measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
-     c0, operator, note";
+     c0, operator, note, inner_diameter_mm, outer_diameter_mm";
 
 const TICK_COLS: &str = "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note";
 
@@ -465,6 +469,12 @@ impl Store {
         if c.tubing_lot_id.trim().is_empty() || c.tubing_size.trim().is_empty() {
             return Err(invalid("tubing lot and size are required".into()));
         }
+        if [c.inner_diameter_mm, c.outer_diameter_mm].iter().any(|v| !(v.is_finite() && *v > 0.0)) {
+            return Err(invalid("inner and outer diameters must be positive (mm)".into()));
+        }
+        if c.outer_diameter_mm <= c.inner_diameter_mm {
+            return Err(invalid("the outer diameter must be larger than the inner one".into()));
+        }
         if !(c.density_g_per_ml.is_finite() && c.density_g_per_ml > 0.0) {
             return Err(invalid("density must be a positive number".into()));
         }
@@ -522,9 +532,10 @@ impl Store {
                 density_g_per_ml, run_1_id, run_2_id, run_3_id,
                 weight_1_g, weight_2_g, weight_3_g,
                 measured_1_ml_min, measured_2_ml_min, measured_3_ml_min,
-                mean_measured_ml_min, cv_pct, c0, operator, note)
+                mean_measured_ml_min, cv_pct, c0, operator, note,
+                inner_diameter_mm, outer_diameter_mm)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 Timestamp::now().to_string(),
                 c.tubing_lot_id.trim(),
@@ -546,6 +557,8 @@ impl Store {
                 r.c0,
                 c.operator,
                 c.note,
+                c.inner_diameter_mm,
+                c.outer_diameter_mm,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -753,6 +766,8 @@ fn row_to_calibration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalibrationRo
         c0: row.get(18)?,
         operator: row.get(19)?,
         note: row.get(20)?,
+        inner_diameter_mm: row.get(21)?,
+        outer_diameter_mm: row.get(22)?,
     })
 }
 
@@ -988,6 +1003,8 @@ mod tests {
         NewCalibration {
             tubing_lot_id: "LOT-42".into(),
             tubing_size: "1.6mm".into(),
+            inner_diameter_mm: 1.6,
+            outer_diameter_mm: 4.8,
             control_var: ControlVar::MlMin,
             setpoint: 10.0,
             density_g_per_ml: 1.0,
@@ -1044,6 +1061,8 @@ mod tests {
         assert_eq!(c.id, id);
         assert_eq!(c.tubing_lot_id, "LOT-42");
         assert_eq!(c.tubing_size, "1.6mm");
+        assert_eq!(c.inner_diameter_mm, 1.6);
+        assert_eq!(c.outer_diameter_mm, 4.8);
         assert_eq!(c.control_var, ControlVar::MlMin);
         assert_eq!(c.run_ids, runs);
         assert_eq!(c.weights_g, [45.0, 45.0, 45.0]);
@@ -1159,6 +1178,10 @@ mod tests {
             new_calibration(runs, [50.0, f64::NAN, 50.0]),
             NewCalibration { density_g_per_ml: 0.0, ..new_calibration(runs, [50.0; 3]) },
             NewCalibration { tubing_lot_id: "  ".into(), ..new_calibration(runs, [50.0; 3]) },
+            NewCalibration { inner_diameter_mm: 0.0, ..new_calibration(runs, [50.0; 3]) },
+            NewCalibration { outer_diameter_mm: f64::NAN, ..new_calibration(runs, [50.0; 3]) },
+            // The outside of a tube is wider than its inside.
+            NewCalibration { outer_diameter_mm: 1.6, ..new_calibration(runs, [50.0; 3]) },
         ] {
             assert!(matches!(s.insert_calibration(&bad).unwrap_err(), StoreError::Invalid(_)));
         }

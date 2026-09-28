@@ -7,6 +7,8 @@ CREATE TABLE tubing_calibrations (
     created_at            TEXT    NOT NULL,
     tubing_lot_id         TEXT    NOT NULL,
     tubing_size           TEXT    NOT NULL,
+    inner_diameter_mm     REAL    NOT NULL,
+    outer_diameter_mm     REAL    NOT NULL,
     control_var           TEXT    NOT NULL CHECK (control_var IN ('rpm','ml_min')),
     setpoint              REAL    NOT NULL,
     density_g_per_ml      REAL    NOT NULL,

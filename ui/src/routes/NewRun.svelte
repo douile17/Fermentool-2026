@@ -169,7 +169,7 @@
     f.gravimetric_trim && f.control_var === 'rpm' && f.tubing_calibration_id == null,
   );
   const calLabel = (c) =>
-    `${c.tubing_lot_id} · ${c.tubing_size} · ${stamp(c.created_at)} · CV ${num(c.cv_pct, 1)} %` +
+    `${c.tubing_lot_id} · ${c.tubing_size} · Ø ${num(c.inner_diameter_mm, 1)}/${num(c.outer_diameter_mm, 1)} mm · ${stamp(c.created_at)} · CV ${num(c.cv_pct, 1)} %` +
     (c.control_var === 'ml_min' ? ` · c₀ ${num(c.c0, 3)}` : ` · ${num(c.mean_measured_ml_min / c.setpoint, 3)} ml/min per rpm`);
 
   let starting = $state(false);

@@ -19,6 +19,8 @@
   const blank = () => ({
     tubing_lot_id: '',
     tubing_size: '',
+    inner_diameter_mm: null,
+    outer_diameter_mm: null,
     control_var: 'ml_min',
     direction: 'cw',
     setpoint: 10,
@@ -80,6 +82,8 @@
   const formOk = $derived(
     d.tubing_lot_id.trim() !== '' &&
       d.tubing_size.trim() !== '' &&
+      Number(d.inner_diameter_mm) > 0 &&
+      Number(d.outer_diameter_mm) > Number(d.inner_diameter_mm) &&
       Number(d.setpoint) > 0 &&
       Number(d.density_g_per_ml) > 0 &&
       Number(d.target_min) > 0,
@@ -221,6 +225,8 @@
       saved = await post('/api/calibrations', {
         tubing_lot_id: d.tubing_lot_id.trim(),
         tubing_size: d.tubing_size.trim(),
+        inner_diameter_mm: Number(d.inner_diameter_mm),
+        outer_diameter_mm: Number(d.outer_diameter_mm),
         control_var: d.control_var,
         setpoint: Number(d.setpoint),
         density_g_per_ml: Number(d.density_g_per_ml),
@@ -241,7 +247,8 @@
 
   function exportCsv() {
     const cols = [
-      'id', 'created_at', 'tubing_lot_id', 'tubing_size', 'control_var', 'setpoint',
+      'id', 'created_at', 'tubing_lot_id', 'tubing_size', 'inner_diameter_mm',
+      'outer_diameter_mm', 'control_var', 'setpoint',
       'density_g_per_ml', 'run_1_id', 'run_2_id', 'run_3_id', 'weight_1_g', 'weight_2_g',
       'weight_3_g', 'measured_1_ml_min', 'measured_2_ml_min', 'measured_3_ml_min',
       'mean_measured_ml_min', 'cv_pct', 'c0', 'operator', 'note',
@@ -252,7 +259,8 @@
     };
     const lines = history.map((c) =>
       [
-        c.id, c.created_at, c.tubing_lot_id, c.tubing_size, c.control_var, c.setpoint,
+        c.id, c.created_at, c.tubing_lot_id, c.tubing_size, c.inner_diameter_mm,
+        c.outer_diameter_mm, c.control_var, c.setpoint,
         c.density_g_per_ml, ...c.run_ids, ...c.weights_g, ...c.measured_ml_min,
         c.mean_measured_ml_min, c.cv_pct, c.c0, c.operator, c.note,
       ].map(cell).join(','),
@@ -290,7 +298,13 @@
           <input type="text" bind:value={d.tubing_lot_id} disabled={locked} onchange={persist} placeholder="e.g. LOT-2409" />
         </label>
         <label class="field"><span>Tubing size</span>
-          <input type="text" bind:value={d.tubing_size} disabled={locked} onchange={persist} placeholder="e.g. 1.6 mm" />
+          <input type="text" bind:value={d.tubing_size} disabled={locked} onchange={persist} placeholder="e.g. #16" />
+        </label>
+        <label class="field"><span>Inner Ø (mm)</span>
+          <input type="number" step="0.1" min="0" bind:value={d.inner_diameter_mm} disabled={locked} onchange={persist} />
+        </label>
+        <label class="field"><span>Outer Ø (mm)</span>
+          <input type="number" step="0.1" min="0" bind:value={d.outer_diameter_mm} disabled={locked} onchange={persist} />
         </label>
         <div class="field"><span>Control</span>
           <div class="seg">
@@ -339,6 +353,9 @@
         {/each}
       </ol>
 
+      {#if Number(d.inner_diameter_mm) > 0 && Number(d.outer_diameter_mm) > 0 && Number(d.outer_diameter_mm) <= Number(d.inner_diameter_mm)}
+        <p class="warn">The outer Ø must be larger than the inner Ø.</p>
+      {/if}
       {#if otherRunActive}
         <p class="warn">Another run is active. Stop it before starting a burst.</p>
       {/if}
@@ -413,7 +430,7 @@
       {#if history.length}
         <table class="hist mono">
           <thead>
-            <tr><th>#</th><th>date</th><th>lot</th><th>size</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th></tr>
+            <tr><th>#</th><th>date</th><th>lot</th><th>size</th><th>Ø int / ext (mm)</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th></tr>
           </thead>
           <tbody>
             {#each history as c (c.id)}
@@ -422,6 +439,7 @@
                 <td>{stamp(c.created_at)}</td>
                 <td>{c.tubing_lot_id}</td>
                 <td>{c.tubing_size}</td>
+                <td>{num(c.inner_diameter_mm, 1)} / {num(c.outer_diameter_mm, 1)}</td>
                 <td>{num(c.setpoint, digitsFor(c.control_var))} {unitFor(c.control_var)}</td>
                 <td>{num(c.mean_measured_ml_min, 3)}</td>
                 <td class:bad={cvBad(c.cv_pct)}>{num(c.cv_pct, 2)}</td>

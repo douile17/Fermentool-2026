@@ -2451,6 +2451,8 @@ mod tests {
             .insert_calibration(&crate::store::NewCalibration {
                 tubing_lot_id: "LOT".into(),
                 tubing_size: "1.6mm".into(),
+                inner_diameter_mm: 1.6,
+                outer_diameter_mm: 4.8,
                 control_var,
                 setpoint,
                 density_g_per_ml: 1.0,
