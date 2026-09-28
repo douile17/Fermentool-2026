@@ -61,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/serial/ports", get(serial_ports))
         .route("/api/serial/reconnect", post(serial_reconnect))
         .route("/api/pump/stop", post(pump_stop))
+        .route("/api/scale/refill_mode", post(scale_refill_mode))
+        .route("/api/scale/refill_done", post(scale_refill_done))
         .route("/api/shutdown", post(shutdown))
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
@@ -320,6 +322,22 @@ async fn pump_stop(State(s): State<AppState>) -> ApiResult<Response> {
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "stopped": true })).into_response())
+}
+
+async fn scale_refill_mode(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::TriggerRefillMode)
+        .await
+        .map_err(|_| ApiError::Down)?;
+    Ok(Json(json!({ "ok": true })).into_response())
+}
+
+async fn scale_refill_done(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::TriggerRefillDone)
+        .await
+        .map_err(|_| ApiError::Down)?;
+    Ok(Json(json!({ "ok": true })).into_response())
 }
 
 async fn get_recovery(State(s): State<AppState>) -> ApiResult<Response> {
@@ -664,6 +682,37 @@ mod tests {
         let v = body_json(res).await;
         assert!(v["active"].is_null());
         assert_eq!(v["has_pending_recovery"], false);
+    }
+
+    #[tokio::test]
+    async fn status_reports_no_scale_fields_when_unconfigured() {
+        let app = router(test_state());
+        let res = app.oneshot(get("/api/status")).await.unwrap();
+        let body = body_json(res).await;
+        assert!(body["scale_ok"].as_bool().unwrap());
+        assert!(body["scale_state"].is_null());
+        assert!(body["trim_c"].is_null());
+    }
+
+    #[tokio::test]
+    async fn refill_endpoints_toggle_the_manual_flags() {
+        let app = router(test_state());
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/scale/refill_mode", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        // The SPA fallback also answers an unmapped path with 200 (it serves
+        // index.html for client-side routing), so the status code alone
+        // can't tell a missing route from a real one, check the JSON body.
+        assert_eq!(body_json(res).await["ok"], true);
+        let res = app
+            .oneshot(post_json("/api/scale/refill_done", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["ok"], true);
     }
 
     #[tokio::test]

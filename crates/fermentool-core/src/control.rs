@@ -94,6 +94,11 @@ pub enum Command {
     /// engine, so enabling simulator runs in Settings takes effect without a
     /// reconnect or restart.
     SetAllowSimulator(bool, oneshot::Sender<()>),
+    /// Operator-declared "about to change the bottle", ahead of the automatic
+    /// weight-jump threshold.
+    TriggerRefillMode(oneshot::Sender<()>),
+    /// Operator-declared "bottle is back, settled".
+    TriggerRefillDone(oneshot::Sender<()>),
     Shutdown,
 }
 
@@ -120,6 +125,15 @@ pub struct DaemonStatus {
     pub simulator: bool,
     /// `serial.allow_simulator`, simulator runs are explicitly enabled.
     pub allow_simulator: bool,
+    /// `false` once the scale link is lost or the trim has alarmed. `true`
+    /// (the safe "no problem" default) when no scale is configured.
+    pub scale_ok: bool,
+    /// `None` when no scale is configured.
+    pub scale_state: Option<String>,
+    /// `None` when no scale is configured.
+    pub trim_c: Option<f64>,
+    /// Diagnostic instantaneous rate, `None` until enough samples are buffered.
+    pub rate_g_per_min: Option<f64>,
 }
 
 /// Sending / receiving on the control channel failed, the thread is gone.
@@ -182,6 +196,10 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         journal_ok: st.journal_ok,
         simulator: st.simulator,
         allow_simulator: st.allow_simulator,
+        scale_ok: st.scale_ok,
+        scale_state: st.scale_state.map(|s| format!("{s:?}")),
+        trim_c: st.trim_c,
+        rate_g_per_min: st.rate_g_per_min,
     }
 }
 
@@ -619,6 +637,16 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         }
         Command::SetAllowSimulator(allow, reply) => {
             engine.set_allow_simulator(allow);
+            let _ = reply.send(());
+            true
+        }
+        Command::TriggerRefillMode(reply) => {
+            engine.trigger_refill_mode();
+            let _ = reply.send(());
+            true
+        }
+        Command::TriggerRefillDone(reply) => {
+            engine.trigger_refill_done();
             let _ = reply.send(());
             true
         }
