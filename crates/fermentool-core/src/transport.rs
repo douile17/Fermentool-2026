@@ -155,7 +155,7 @@ enum Job {
 /// open can't stall the caller either) and returns it plus what kind it is
 /// (`None` = a real port was wanted but wouldn't open, a `SimPump` no-op sink
 /// is in its place and the caller should keep retrying).
-type Opener = Box<dyn FnOnce() -> (Box<dyn Transport + Send>, Option<TransportKind>) + Send>;
+pub type Opener = Box<dyn FnOnce() -> (Box<dyn Transport + Send>, Option<TransportKind>) + Send>;
 
 fn spawn_worker(opener: Opener) -> (mpsc::Sender<Job>, JoinHandle<()>, Option<TransportKind>) {
     let (job_tx, job_rx) = mpsc::channel::<Job>();
@@ -237,10 +237,9 @@ impl WatchdogTransport {
         kind
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_opener(opener: Opener) -> Self {
-        let (tx, worker, _kind) = spawn_worker(opener);
-        Self {
+    pub fn spawn_with(opener: Opener) -> (Self, Option<TransportKind>) {
+        let (tx, worker, kind) = spawn_worker(opener);
+        let this = Self {
             tx,
             _worker: worker,
             stuck: false,
@@ -250,7 +249,8 @@ impl WatchdogTransport {
                 allow_simulator: false,
             },
             pump_addr: 1,
-        }
+        };
+        (this, kind)
     }
 
     #[cfg(test)]
@@ -415,14 +415,14 @@ mod tests {
 
     #[test]
     fn watchdog_passes_a_healthy_transport_through() {
-        let mut wd = WatchdogTransport::from_opener(Box::new(|| (Box::new(EchoTransport), None)));
+        let (mut wd, _kind) = WatchdogTransport::spawn_with(Box::new(|| (Box::new(EchoTransport), None)));
         assert_eq!(wd.transaction(b"ping").unwrap(), b"ping");
         assert!(!wd.is_stuck());
     }
 
     #[test]
     fn watchdog_transaction_times_out_instead_of_blocking_forever() {
-        let mut wd = WatchdogTransport::from_opener(Box::new(|| (Box::new(HangingTransport), None)));
+        let (mut wd, _kind) = WatchdogTransport::spawn_with(Box::new(|| (Box::new(HangingTransport), None)));
         let t0 = Instant::now();
         assert!(matches!(wd.transaction(b"x"), Err(TransportError::Timeout)));
         let dt = t0.elapsed();
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn watchdog_recovers_on_respawn_after_a_wedge() {
-        let mut wd = WatchdogTransport::from_opener(Box::new(|| (Box::new(HangingTransport), None)));
+        let (mut wd, _kind) = WatchdogTransport::spawn_with(Box::new(|| (Box::new(HangingTransport), None)));
         assert!(wd.transaction(b"x").is_err());
         assert!(wd.is_stuck());
         // Auto-recovery / operator reconnect swaps in a fresh worker.
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn watchdog_swap_to_sim_works_after_a_wedge() {
-        let mut wd = WatchdogTransport::from_opener(Box::new(|| (Box::new(HangingTransport), None)));
+        let (mut wd, _kind) = WatchdogTransport::spawn_with(Box::new(|| (Box::new(HangingTransport), None)));
         assert!(wd.transaction(b"x").is_err());
         assert_eq!(wd.swap(&sc("sim"), 1), TransportKind::Sim);
         assert!(!wd.is_stuck());
