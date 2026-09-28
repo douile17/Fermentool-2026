@@ -1143,6 +1143,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "serialport",
  "tokio",
  "toml 0.8.2",
  "tower",

@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 fermentool-curves = { path = "../fermentool-curves" }
 fermentool-modbus = { path = "../fermentool-modbus" }
+serialport = "4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 jiff = { version = "0.2", features = ["serde"] }
 serde.workspace = true
