@@ -29,3 +29,6 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Agent-managed git worktrees (isolated implementation workspaces)
+/.worktrees/
