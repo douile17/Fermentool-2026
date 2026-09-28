@@ -28,9 +28,7 @@
     fb_ms: null, // maintenance coefficient, optional
     fb_vmax: null,
     gravimetric_trim: false,
-    // tubing calibration picker (only with the gravimetric trim)
-    tubing_lot_id: '',
-    tubing_size: '',
+    // tubing calibration picked for the gravimetric trim
     tubing_calibration_id: null,
   });
 
@@ -152,25 +150,14 @@
     return () => clearTimeout(debounce);
   });
 
-  // Tubing calibrations for this lot / size, newest first. Only those made in
-  // the run's own unit can seed it (the daemon refuses the others).
+  // Recorded tubing calibrations, newest first. Only those made in the run's
+  // own unit can seed it (the daemon refuses the others).
   let calibrations = $state([]);
-  let calTimer;
   $effect(() => {
-    if (!f.gravimetric_trim) {
-      calibrations = [];
-      return;
-    }
-    const q = new URLSearchParams();
-    if (f.tubing_lot_id.trim()) q.set('lot_id', f.tubing_lot_id.trim());
-    if (f.tubing_size.trim()) q.set('size', f.tubing_size.trim());
-    clearTimeout(calTimer);
-    calTimer = setTimeout(() => {
-      get(`/api/calibrations?${q}`)
-        .then((rows) => (calibrations = rows ?? []))
-        .catch(() => (calibrations = []));
-    }, 250);
-    return () => clearTimeout(calTimer);
+    if (!f.gravimetric_trim) return;
+    get('/api/calibrations')
+      .then((rows) => (calibrations = rows ?? []))
+      .catch(() => (calibrations = []));
   });
   const calMatches = $derived(calibrations.filter((c) => c.control_var === f.control_var));
   // Drop a selection that no longer matches the lot, size or unit.
@@ -182,7 +169,7 @@
     f.gravimetric_trim && f.control_var === 'rpm' && f.tubing_calibration_id == null,
   );
   const calLabel = (c) =>
-    `#${c.id} · ${stamp(c.created_at)} · CV ${num(c.cv_pct, 1)} %` +
+    `${c.tubing_lot_id} · ${c.tubing_size} · ${stamp(c.created_at)} · CV ${num(c.cv_pct, 1)} %` +
     (c.control_var === 'ml_min' ? ` · c₀ ${num(c.c0, 3)}` : ` · ${num(c.mean_measured_ml_min / c.setpoint, 3)} ml/min per rpm`);
 
   let starting = $state(false);
@@ -284,14 +271,6 @@
       </div>
       {#if f.gravimetric_trim}
         <div class="cal">
-          <div class="cal-fields">
-            <label class="field"><span>Tubing lot</span>
-              <input type="text" bind:value={f.tubing_lot_id} placeholder="e.g. LOT-2409" />
-            </label>
-            <label class="field"><span>Tubing size</span>
-              <input type="text" bind:value={f.tubing_size} placeholder="e.g. 1.6 mm" />
-            </label>
-          </div>
           {#if calMatches.length}
             <label class="field"><span>Tubing calibration</span>
               <select bind:value={f.tubing_calibration_id}>
@@ -304,7 +283,7 @@
           {/if}
           {#if needsCalibration}
             <p class="cal-note bad">
-              {calMatches.length ? 'Choose a calibration:' : `No ${unit} calibration for this lot and size:`}
+              {calMatches.length ? 'Choose the calibration of the tube you installed:' : `No ${unit} calibration recorded yet:`}
               the trim cannot start in rpm without one.
               <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
             </p>
@@ -479,8 +458,6 @@
   }
   .pane-profile { flex: 1 1 320px; }
   .cal { margin-top: var(--s-4); display: grid; gap: var(--s-3); max-width: 420px; }
-  .cal-fields { display: flex; gap: var(--s-3); }
-  .cal-fields .field { flex: 1; min-width: 0; }
   .cal-note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
   .cal-note.bad { color: var(--danger); }
   .linkish {
