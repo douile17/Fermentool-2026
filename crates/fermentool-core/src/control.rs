@@ -24,7 +24,9 @@ use crate::engine::{
     ActiveStatus, Engine, ErrDetail, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome,
     REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
 };
-use crate::store::{EventRow, RunRow, RunStatus, TickRow};
+use crate::store::{
+    CalibrationRow, EventRow, NewCalibration, RunRow, RunStatus, StoreError, TickRow,
+};
 use crate::transport::{SwapTransport, TransportKind};
 
 const IDLE_POLL: Duration = Duration::from_millis(500);
@@ -33,6 +35,12 @@ const IDLE_POLL: Duration = Duration::from_millis(500);
 /// transaction at 9600 8E1 and well under the 200 ms serial timeout, so a steep
 /// ramp steps through each pump grid value without loading the bus.
 const WRITE_SETPOINT_INTERVAL: Duration = Duration::from_millis(150);
+
+/// `app_state` key holding the in-progress tubing calibration session (the
+/// UI's own JSON), so a page refresh or daemon restart resumes it. Empty value
+/// = no session. One key is enough: like a run, only one calibration is ever
+/// in progress.
+const CALIBRATION_DRAFT_KEY: &str = "calibration_draft";
 
 /// While the serial link is lost, retry reopening the port on an exponential
 /// backoff: `SERIAL_RETRY_MIN`, then doubling, capped at `SERIAL_RETRY_MAX`. The
@@ -99,6 +107,17 @@ pub enum Command {
     TriggerRefillMode(oneshot::Sender<()>),
     /// Operator-declared "bottle is back, settled".
     TriggerRefillDone(oneshot::Sender<()>),
+    /// Record a tubing calibration, then drop the in-progress draft.
+    InsertCalibration(NewCalibration, oneshot::Sender<Result<CalibrationRow, StoreError>>),
+    ListCalibrations {
+        lot_id: Option<String>,
+        size: Option<String>,
+        reply: oneshot::Sender<Result<Vec<CalibrationRow>, String>>,
+    },
+    /// The in-progress calibration session, as the UI saved it (opaque JSON).
+    GetCalibrationDraft(oneshot::Sender<Result<Option<String>, String>>),
+    /// Save (`Some`) or drop (`None`) the in-progress calibration session.
+    SetCalibrationDraft(Option<String>, oneshot::Sender<Result<(), String>>),
     Shutdown,
 }
 
@@ -695,6 +714,44 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             engine.trigger_refill_done();
             let _ = reply.send(());
             true
+        }
+        Command::InsertCalibration(cal, reply) => {
+            let store = engine.store();
+            let res = store.insert_calibration(&cal).and_then(|id| {
+                // Only one session is ever in progress: once it is recorded
+                // the draft has served its purpose.
+                let _ = store.set_state(CALIBRATION_DRAFT_KEY, "");
+                store
+                    .calibration(id)?
+                    .ok_or_else(|| StoreError::Invalid(format!("calibration {id} vanished")))
+            });
+            let _ = reply.send(res);
+            false
+        }
+        Command::ListCalibrations { lot_id, size, reply } => {
+            let res = engine
+                .store()
+                .list_calibrations(lot_id.as_deref(), size.as_deref())
+                .map_err(|e| e.to_string());
+            let _ = reply.send(res);
+            false
+        }
+        Command::GetCalibrationDraft(reply) => {
+            let res = engine
+                .store()
+                .get_state(CALIBRATION_DRAFT_KEY)
+                .map(|v| v.filter(|s| !s.is_empty()))
+                .map_err(|e| e.to_string());
+            let _ = reply.send(res);
+            false
+        }
+        Command::SetCalibrationDraft(draft, reply) => {
+            let res = engine
+                .store()
+                .set_state(CALIBRATION_DRAFT_KEY, draft.as_deref().unwrap_or(""))
+                .map_err(|e| e.to_string());
+            let _ = reply.send(res);
+            false
         }
     }
 }

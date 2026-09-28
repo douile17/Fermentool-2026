@@ -24,7 +24,7 @@ use fermentool_modbus::serial::available_ports;
 use crate::config::Config;
 use crate::control::{Command, ControlHandle, DaemonStatus};
 use crate::engine::{ErrDetail, RunConfig};
-use crate::store::RunStatus;
+use crate::store::{NewCalibration, RunStatus, StoreError};
 
 /// The built Svelte UI (`ui/dist/`), baked into the binary. The folder path is
 /// resolved relative to this crate's `Cargo.toml`.
@@ -63,6 +63,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pump/stop", post(pump_stop))
         .route("/api/scale/refill_mode", post(scale_refill_mode))
         .route("/api/scale/refill_done", post(scale_refill_done))
+        .route("/api/calibrations", get(list_calibrations).post(create_calibration))
+        .route(
+            "/api/calibrations/draft",
+            get(get_calibration_draft)
+                .post(save_calibration_draft)
+                .delete(delete_calibration_draft),
+        )
         .route("/api/shutdown", post(shutdown))
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
@@ -324,6 +331,83 @@ async fn pump_stop(State(s): State<AppState>) -> ApiResult<Response> {
     Ok(Json(json!({ "stopped": true })).into_response())
 }
 
+#[derive(Deserialize)]
+struct CalibrationQuery {
+    lot_id: Option<String>,
+    size: Option<String>,
+}
+
+/// Tubing calibrations, newest first; `?lot_id=&size=` narrow it (blank = any).
+async fn list_calibrations(
+    State(s): State<AppState>,
+    Query(q): Query<CalibrationQuery>,
+) -> ApiResult<Response> {
+    let nonblank = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let rows = s
+        .control
+        .call(|reply| Command::ListCalibrations {
+            lot_id: nonblank(q.lot_id),
+            size: nonblank(q.size),
+            reply,
+        })
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(rows).into_response())
+}
+
+/// Record a tubing calibration from three finished bursts. Every derived
+/// number is recomputed server-side from the runs' own clocks.
+async fn create_calibration(
+    State(s): State<AppState>,
+    Json(cal): Json<NewCalibration>,
+) -> ApiResult<Response> {
+    let row = s
+        .control
+        .call(|reply| Command::InsertCalibration(cal, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(|e| match e {
+            StoreError::Invalid(m) => ApiError::Bad(m),
+            other => ApiError::Conflict(other.to_string()),
+        })?;
+    Ok((StatusCode::CREATED, Json(row)).into_response())
+}
+
+/// The in-progress calibration session, or `null` when there is none.
+async fn get_calibration_draft(State(s): State<AppState>) -> ApiResult<Response> {
+    let draft = s
+        .control
+        .call(Command::GetCalibrationDraft)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    let value = draft
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+        .unwrap_or(serde_json::Value::Null);
+    Ok(Json(value).into_response())
+}
+
+async fn save_calibration_draft(
+    State(s): State<AppState>,
+    Json(draft): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    set_calibration_draft(&s, (!draft.is_null()).then(|| draft.to_string())).await
+}
+
+async fn delete_calibration_draft(State(s): State<AppState>) -> ApiResult<Response> {
+    set_calibration_draft(&s, None).await
+}
+
+async fn set_calibration_draft(s: &AppState, draft: Option<String>) -> ApiResult<Response> {
+    s.control
+        .call(|reply| Command::SetCalibrationDraft(draft, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "ok": true })).into_response())
+}
+
 async fn scale_refill_mode(State(s): State<AppState>) -> ApiResult<Response> {
     s.control
         .call(Command::TriggerRefillMode)
@@ -577,11 +661,11 @@ mod tests {
     use fermentool_modbus::{Pump, SimPump};
 
     fn test_state() -> AppState {
-        let engine = Engine::new(
-            Pump::new(SimPump::new(1), 1),
-            Store::open_in_memory().unwrap(),
-            "test",
-        );
+        test_state_with(Store::open_in_memory().unwrap())
+    }
+
+    fn test_state_with(store: Store) -> AppState {
+        let engine = Engine::new(Pump::new(SimPump::new(1), 1), store, "test");
         let (events, _) = broadcast::channel(16);
         AppState {
             control: Arc::new(crate::control::spawn(
@@ -982,5 +1066,174 @@ mod tests {
         // Still served, CORS is browser-enforced, but with no allow-origin echo.
         assert_eq!(res.status(), StatusCode::OK);
         assert!(res.headers().get("access-control-allow-origin").is_none());
+    }
+
+    // ---- tubing calibrations (Task 13) ----
+
+    /// An engine over a store already holding three finished 5-minute
+    /// `kind = calibration` bursts at 10 ml/min; returns their ids too. The
+    /// bursts are seeded directly because their durations must be real
+    /// minutes, which an API-driven start/stop in a test cannot give.
+    fn state_with_three_bursts() -> (AppState, [i64; 3]) {
+        use crate::store::{ControlVar, Direction, NewRun, RunKind};
+        let store = Store::open_in_memory().unwrap();
+        let mut ids = [0; 3];
+        for (i, id) in ids.iter_mut().enumerate() {
+            let started: jiff::Timestamp = "2026-09-01T09:00:00Z".parse().unwrap();
+            let started = started + jiff::SignedDuration::from_mins(10 * i as i64);
+            *id = store
+                .insert_run(&NewRun {
+                    name: format!("cal {}", i + 1),
+                    started_at: started,
+                    control_var: ControlVar::MlMin,
+                    direction: Direction::Cw,
+                    tick_interval_s: 1,
+                    pump_addr: 1,
+                    app_version: "test".into(),
+                    curve: CurveSpec::linear(10.0, 10.0, Duration::from_secs(600)),
+                    gravimetric_trim: false,
+                    kind: RunKind::Calibration,
+                    tubing_calibration_id: None,
+                })
+                .unwrap();
+            store
+                .finish_run(*id, RunStatus::Stopped, started + jiff::SignedDuration::from_mins(5))
+                .unwrap();
+        }
+        (test_state_with(store), ids)
+    }
+
+    fn delete_req(uri: &str) -> Request<Body> {
+        Request::builder().method("DELETE").uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn calibration_body(run_ids: [i64; 3], weights: [f64; 3]) -> serde_json::Value {
+        json!({
+            "tubing_lot_id": "LOT-42", "tubing_size": "1.6mm",
+            "control_var": "ml_min", "setpoint": 10.0, "density_g_per_ml": 1.0,
+            "run_ids": run_ids, "weights_g": weights,
+        })
+    }
+
+    #[tokio::test]
+    async fn calibration_round_trip() {
+        let (state, runs) = state_with_three_bursts();
+        let app = router(state);
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/calibrations", calibration_body(runs, [50.0; 3])))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_json(res).await;
+        assert!((body["c0"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+        assert!(body["cv_pct"].as_f64().unwrap().abs() < 1e-6);
+        let id = body["id"].as_i64().unwrap();
+
+        let res = app
+            .oneshot(get("/api/calibrations?lot_id=LOT-42&size=1.6mm"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let list = body_json(res).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["id"].as_i64(), Some(id));
+    }
+
+    #[tokio::test]
+    async fn list_calibrations_filters_and_defaults_to_all() {
+        let (state, runs) = state_with_three_bursts();
+        let app = router(state);
+        app.clone()
+            .oneshot(post_json("/api/calibrations", calibration_body(runs, [50.0; 3])))
+            .await
+            .unwrap();
+        let other = app.clone().oneshot(get("/api/calibrations?lot_id=OTHER")).await.unwrap();
+        assert_eq!(body_json(other).await.as_array().unwrap().len(), 0);
+        let all = app.oneshot(get("/api/calibrations")).await.unwrap();
+        assert_eq!(body_json(all).await.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_calibration_over_bursts_that_are_not_finished_calibrations_is_a_400() {
+        let (state, runs) = state_with_three_bursts();
+        let app = router(state);
+        let res = app
+            .oneshot(post_json(
+                "/api/calibrations",
+                calibration_body([runs[0], runs[1], 9999], [50.0; 3]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn draft_persists_across_a_reload() {
+        let app = router(test_state());
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/calibrations/draft",
+                json!({"tubing_lot_id": "LOT-1", "tubing_size": "1.6mm"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await["ok"], true);
+        let res = app.oneshot(get("/api/calibrations/draft")).await.unwrap();
+        let body = body_json(res).await;
+        assert_eq!(body["tubing_lot_id"], "LOT-1");
+    }
+
+    #[tokio::test]
+    async fn no_draft_reads_as_null_and_delete_clears_it() {
+        let app = router(test_state());
+        let res = app.clone().oneshot(get("/api/calibrations/draft")).await.unwrap();
+        assert!(body_json(res).await.is_null());
+        app.clone()
+            .oneshot(post_json("/api/calibrations/draft", json!({"tubing_lot_id": "X"})))
+            .await
+            .unwrap();
+        let res = app.clone().oneshot(delete_req("/api/calibrations/draft")).await.unwrap();
+        assert_eq!(body_json(res).await["ok"], true);
+        let res = app.oneshot(get("/api/calibrations/draft")).await.unwrap();
+        assert!(body_json(res).await.is_null());
+    }
+
+    #[tokio::test]
+    async fn recording_a_calibration_clears_the_draft() {
+        let (state, runs) = state_with_three_bursts();
+        let app = router(state);
+        app.clone()
+            .oneshot(post_json("/api/calibrations/draft", json!({"tubing_lot_id": "LOT-42"})))
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(post_json("/api/calibrations", calibration_body(runs, [50.0; 3])))
+            .await
+            .unwrap();
+        let res = app.oneshot(get("/api/calibrations/draft")).await.unwrap();
+        assert!(body_json(res).await.is_null());
+    }
+
+    #[tokio::test]
+    async fn a_calibration_run_can_be_started_through_the_runs_endpoint() {
+        let app = router(test_state());
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/runs",
+                json!({
+                    "name": "cal 1", "control_var": "ml_min", "direction": "cw", "pump_addr": 1,
+                    "curve": serde_json::to_value(CurveSpec::linear(10.0, 10.0, Duration::from_secs(300))).unwrap(),
+                    "kind": "calibration",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = body_json(res).await["run_id"].as_i64().unwrap();
+        let res = app.oneshot(get(&format!("/api/runs/{id}"))).await.unwrap();
+        assert_eq!(body_json(res).await["kind"], "calibration");
     }
 }

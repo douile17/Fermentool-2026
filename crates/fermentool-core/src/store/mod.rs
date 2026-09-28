@@ -199,7 +199,8 @@ pub struct RunRow {
 
 /// A tubing calibration to record: three hand-weighed bursts of one tube at
 /// one setpoint. Only the raw inputs; the store derives the flows itself.
-#[derive(Debug, Clone)]
+/// Also the `POST /api/calibrations` body.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct NewCalibration {
     pub tubing_lot_id: String,
     pub tubing_size: String,
