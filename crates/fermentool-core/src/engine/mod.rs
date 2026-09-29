@@ -304,6 +304,11 @@ pub struct EngineStatus {
     /// `false` once the scale link is lost or the trim has alarmed. `true`
     /// (the safe "no problem" default) when no scale is configured at all.
     pub scale_ok: bool,
+    /// Whether the balance link itself is up (`false`: unplugged, or its
+    /// reads keep failing). Lets the UI tell that apart from a trim alarm on a
+    /// reachable balance, both of which make `scale_ok` false. `None` when no
+    /// scale is configured.
+    pub scale_connected: Option<bool>,
     /// `None` when no scale is configured.
     pub scale_state: Option<trim::ScaleState>,
     /// `None` when no scale is configured.
@@ -896,6 +901,7 @@ impl<T: Transport> Engine<T> {
             simulator: self.on_simulator(),
             allow_simulator: self.allow_simulator,
             scale_ok: !scale_shown || (self.scale_ok && !self.scale_link_down()),
+            scale_connected: scale_shown.then(|| !self.scale_link_down()),
             scale_state: scale_shown.then_some(self.scale_state),
             trim_c: scale_shown.then_some(self.trim_c),
             rate_g_per_min: scale_shown.then_some(self.last_rate_g_per_min).flatten(),
@@ -2299,6 +2305,7 @@ mod tests {
         e.attach_scale(None, scale_cfg("NOPE_NOT_A_REAL_PORT_99999"));
         let st = e.status();
         assert!(!st.scale_ok, "a configured but absent scale must not look healthy");
+        assert_eq!(st.scale_connected, Some(false));
         assert!(st.scale_state.is_some());
     }
 
@@ -2413,6 +2420,8 @@ mod tests {
         assert!(!e.scale_link_down());
         assert!(e.recover_scale());
         assert!(!e.status().scale_ok, "recover_scale must not clear an alarm it didn't cause");
+        // The UI tells this alarm apart from an unplugged balance.
+        assert_eq!(e.status().scale_connected, Some(true));
     }
 
     // ---- tubing calibration gate (Task 12) ----

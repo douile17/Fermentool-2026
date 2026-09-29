@@ -26,6 +26,43 @@
 
   const running = $derived(!!app.status?.active);
 
+  // Balance indicator: plain words instead of the raw state token. The
+  // correction factor only shows while a run actually applies it.
+  const SCALE_STATES = {
+    normal: 'stable',
+    perturbation: 'disturbed',
+    refill_pending: 'refilling…',
+    refill_settling: 'settling…',
+  };
+  const scaleView = $derived.by(() => {
+    const s = app.status;
+    if (!s?.scale_state) return null;
+    if (s.scale_connected === false) {
+      return {
+        tone: 'bad',
+        label: 'Balance disconnected',
+        title: 'The balance is not answering. Check its cable; the daemon keeps retrying.',
+      };
+    }
+    if (!s.scale_ok) {
+      return {
+        tone: 'bad',
+        label: 'Balance · trim alarm',
+        title:
+          'The weighed flow is more than 20 % off the curve. The correction is frozen until the next run.',
+      };
+    }
+    const trimOn = !!s.active?.gravimetric_trim;
+    const c = trimOn && s.trim_c != null ? ` · ×${s.trim_c.toFixed(3)}` : '';
+    return {
+      tone: 'ok',
+      label: `Balance · ${SCALE_STATES[s.scale_state] ?? s.scale_state}${c}`,
+      title: trimOn
+        ? `Gravimetric trim active: the pump setpoint is multiplied by ${s.trim_c?.toFixed(3)}.`
+        : 'Balance connected. The trim applies only to runs started with it enabled.',
+    };
+  });
+
   $effect(() => {
     if (running && app.tab === 'new') app.tab = 'overview';
   });
@@ -151,10 +188,9 @@
           <span class="dot" aria-hidden="true"></span>{pumpLink.short}
         </span>
       {/if}
-      {#if app.status?.scale_state}
-        <span class="pumpstat {app.status.scale_ok ? 'ok' : 'bad'}">
-          <span class="dot" aria-hidden="true"></span>
-          scale: {app.status.scale_state} (c={app.status.trim_c?.toFixed(3)})
+      {#if scaleView}
+        <span class="pumpstat {scaleView.tone}" title={scaleView.title}>
+          <span class="dot" aria-hidden="true"></span>{scaleView.label}
         </span>
       {/if}
       <div class="rail-foot-row">

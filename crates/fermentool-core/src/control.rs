@@ -147,6 +147,9 @@ pub struct DaemonStatus {
     /// (the safe "no problem" default) when no scale is configured.
     pub scale_ok: bool,
     /// `None` when no scale is configured.
+    /// `false`: the balance is unplugged or not answering. `None` when no
+    /// scale is configured.
+    pub scale_connected: Option<bool>,
     pub scale_state: Option<crate::trim::ScaleState>,
     /// `None` when no scale is configured.
     pub trim_c: Option<f64>,
@@ -215,6 +218,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         simulator: st.simulator,
         allow_simulator: st.allow_simulator,
         scale_ok: st.scale_ok,
+        scale_connected: st.scale_connected,
         scale_state: st.scale_state,
         trim_c: st.trim_c,
         rate_g_per_min: st.rate_g_per_min,
