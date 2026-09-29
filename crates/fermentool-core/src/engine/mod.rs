@@ -21,6 +21,7 @@ use crate::store::{
     StoreError,
 };
 use crate::transport::{SwapTransport, TransportKind};
+use crate::tracking;
 use crate::trim;
 
 /// Fixed **journal** cadence, not user-tunable.
@@ -321,6 +322,8 @@ pub struct EngineStatus {
     /// Diagnostic instantaneous rate from the Theil-Sen estimator, `None`
     /// until at least two samples have been buffered since the last refill.
     pub rate_g_per_min: Option<f64>,
+    /// Cumulative feed tracking, `Some` only during a trimmed run.
+    pub tracking: Option<TrackingStatus>,
 }
 
 /// A completed run whose final setpoint the pump is still holding.
@@ -451,7 +454,8 @@ pub struct Engine<T: Transport> {
     trim_c: f64,
     scale_state: trim::ScaleState,
     scale_read_fails: u32,
-    /// `false` once the trim update alarms (`trim::TrimOutcome::Alarm`).
+    /// `false` once the tracker alarms (the pump stayed out of what c can
+    /// correct for `tracking::ALARM_AFTER_SATURATED_UPDATES` updates).
     /// Sticky until the next `start_run`. A down link is tracked separately
     /// by `scale_read_fails` (see [`scale_link_down`](Self::scale_link_down));
     /// the status frame's `scale_ok` combines both. `trim_c` freezes either
@@ -476,6 +480,8 @@ pub struct Engine<T: Transport> {
     /// Last balance reading `(grams, stable)`, for display only. `None` until
     /// a read succeeds, and again after any failed read.
     live_weight: Option<(f64, bool)>,
+    /// Cumulative feed accounting for the active trimmed run.
+    tracker: Tracker,
     /// The balance's display step, from its last reply (sizes the tracking
     /// window). 0.1 g until something has been read.
     scale_resolution_g: f64,
@@ -524,6 +530,47 @@ struct PersistedTrim {
     scale_state: trim::ScaleState,
     refill_weight_g: Option<f64>,
     refill_at: Option<Timestamp>,
+    #[serde(default)]
+    tracker: Tracker,
+}
+
+/// Cumulative feed accounting for the active trimmed run (see
+/// `docs/superpowers/plans/2026-09-29-cumulative-feed-tracking.md`). Masses in
+/// grams since run start. Persisted with the trim so a crash resume carries on.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Tracker {
+    /// Run elapsed time the masses were last integrated to.
+    last_t_s: Option<f64>,
+    /// What the curve asked for.
+    required_g: f64,
+    /// What the pump was told (curve times c).
+    commanded_g: f64,
+    /// What left the bottle.
+    delivered_g: f64,
+    /// Last `Normal` reading, and the commanded mass at that moment.
+    last_weight_g: Option<f64>,
+    last_normal_commanded_g: f64,
+    /// Set while the balance is out of `Normal` (touch, refill, restart).
+    anchor: Option<tracking::Anchor>,
+    /// Recent `Normal` reads for the delivery-ratio slope.
+    #[serde(skip)]
+    points: Vec<tracking::TrackPoint>,
+    /// Last delivery-ratio estimate.
+    k: Option<f64>,
+    last_update_t_s: f64,
+    saturated_updates: u32,
+}
+
+/// The tracker's view for the status frame, volumes in mL.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackingStatus {
+    pub required_ml: f64,
+    pub delivered_ml: f64,
+    /// `100 * (required - delivered) / required`, positive = behind.
+    pub deficit_pct: Option<f64>,
+    /// The pump's measured delivered / commanded ratio.
+    pub delivery_ratio: Option<f64>,
 }
 
 impl<T: Transport> Engine<T> {
@@ -543,9 +590,9 @@ impl<T: Transport> Engine<T> {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<PersistedTrim>(&s).ok());
-        let (trim_c, scale_state, refill_weight_g, refill_at) = match persisted_trim {
-            Some(p) => (p.trim_c, p.scale_state, p.refill_weight_g, p.refill_at),
-            None => (1.0, trim::ScaleState::Normal, None, None),
+        let (trim_c, scale_state, refill_weight_g, refill_at, tracker) = match persisted_trim {
+            Some(p) => (p.trim_c, p.scale_state, p.refill_weight_g, p.refill_at, p.tracker),
+            None => (1.0, trim::ScaleState::Normal, None, None, Tracker::default()),
         };
         Self {
             pump,
@@ -585,6 +632,7 @@ impl<T: Transport> Engine<T> {
             manual_refill_done_flag: false,
             last_rate_g_per_min: None,
             live_weight: None,
+            tracker,
             scale_resolution_g: 0.1,
             scale_density_g_per_ml: 1.0,
             rpm_to_ml_min: None,
@@ -612,6 +660,7 @@ impl<T: Transport> Engine<T> {
             scale_state: self.scale_state,
             refill_weight_g: self.refill_weight_g,
             refill_at: self.refill_at,
+            tracker: self.tracker.clone(),
         };
         if let Ok(json) = serde_json::to_string(&p) {
             let _ = self.store.set_state(TRIM_STATE_KEY, &json);
@@ -920,6 +969,17 @@ impl<T: Transport> Engine<T> {
             scale_state: scale_shown.then_some(self.scale_state),
             trim_c: scale_shown.then_some(self.trim_c),
             rate_g_per_min: scale_shown.then_some(self.last_rate_g_per_min).flatten(),
+            tracking: self.active.as_ref().filter(|a| a.gravimetric_trim).map(|_| {
+                let tr = &self.tracker;
+                let ml = |g: f64| g / self.scale_density_g_per_ml;
+                TrackingStatus {
+                    required_ml: ml(tr.required_g),
+                    delivered_ml: ml(tr.delivered_g),
+                    deficit_pct: (tr.required_g > 0.0)
+                        .then(|| 100.0 * (tr.required_g - tr.delivered_g) / tr.required_g),
+                    delivery_ratio: tr.k,
+                }
+            }),
         }
     }
 
@@ -996,6 +1056,7 @@ impl<T: Transport> Engine<T> {
         self.manual_refill_mode = false;
         self.manual_refill_done_flag = false;
         self.last_rate_g_per_min = None;
+        self.tracker = Tracker { last_t_s: Some(0.0), ..Tracker::default() };
         self.rpm_to_ml_min = None;
         if let Some(cal) = &calibration {
             match cfg.control_var {
@@ -1394,9 +1455,20 @@ impl<T: Transport> Engine<T> {
             return;
         };
 
-        // Snapshot so the (at most once per call) persistence write only
-        // happens when `trim_c`, `scale_state` or the baseline actually move.
-        let before = (self.trim_c, self.scale_state, self.refill_weight_g);
+        // Cumulative masses since run start: what the curve asks for, and what
+        // the pump was told (c is constant between two reads).
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let spec = active.spec.clone();
+        let t = now.duration_since(active.started_at).as_secs_f64().max(0.0);
+        let ml_per_unit = self.rpm_to_ml_min.unwrap_or(1.0);
+        let density = self.scale_density_g_per_ml;
+        let from = self.tracker.last_t_s.unwrap_or(t);
+        let required = integrate_curve_mass(&spec, from, t, density, ml_per_unit);
+        self.tracker.required_g += required;
+        self.tracker.commanded_g += required * self.trim_c;
+        self.tracker.last_t_s = Some(t);
 
         let prev = self.last_weight_g.unwrap_or(weight_g);
         self.last_weight_g = Some(weight_g);
@@ -1440,57 +1512,103 @@ impl<T: Transport> Engine<T> {
         self.scale_state = next;
 
         if self.scale_state != trim::ScaleState::Normal {
-            if (self.trim_c, self.scale_state, self.refill_weight_g) != before {
+            let refill = matches!(
+                self.scale_state,
+                trim::ScaleState::RefillPending | trim::ScaleState::RefillSettling
+            );
+            let before = self.tracker.anchor;
+            let anchor = self.tracker.anchor.get_or_insert(tracking::Anchor {
+                weight_g: self.tracker.last_weight_g.unwrap_or(weight_g),
+                commanded_g: self.tracker.last_normal_commanded_g,
+                refill: false,
+            });
+            anchor.refill |= refill;
+            if self.tracker.anchor != before {
                 self.save_trim_state();
             }
             return;
         }
 
         if self.refill_weight_g.is_none() {
-            // First read in Normal with no baseline: a brand new run never
-            // crosses RefillSettling -> Normal, so seed the cumulative check
-            // here or it would stay dead until the first refill cycle.
+            // Reference for the diagnostic rate below, reset by each refill.
             self.refill_weight_g = Some(weight_g);
             self.refill_at = Some(now);
         }
-
         let t_refill = self.refill_at.unwrap_or(now);
         let elapsed_since_refill = now.duration_since(t_refill).as_secs_f64().max(0.0);
         self.weight_buffer.push((elapsed_since_refill, weight_g));
         if self.weight_buffer.len() > WEIGHT_BUFFER_CAP {
             self.weight_buffer = trim::decimate(&self.weight_buffer, trim::MAX_SLOPE_POINTS);
         }
-        self.last_rate_g_per_min = trim::theil_sen_slope(&trim::decimate(
-            &self.weight_buffer,
-            trim::MAX_SLOPE_POINTS,
-        ))
-        .map(|s| s * 60.0);
 
-        if let (Some(w0), Some(active)) = (self.refill_weight_g, self.active.as_ref()) {
-            let density = self.scale_density_g_per_ml;
-            let elapsed = now.duration_since(active.started_at).as_secs_f64().max(0.0);
-            let refill_elapsed = now.duration_since(t_refill).as_secs_f64().max(0.0);
-            let start_elapsed = (elapsed - refill_elapsed).max(0.0);
-            let ml_per_unit = self.rpm_to_ml_min.unwrap_or(1.0);
-            // Deliberately NOT scaled by `trim_c`: the theoretical side is what
-            // the raw curve asks for, the measured side is what the pump
-            // (running at curve * c) really delivered, so error_frac = 1 - k*c
-            // and the loop converges on c = 1/k. Scaling both by c would
-            // cancel it out and ratchet c to its clamp.
-            let mass_theoretical =
-                integrate_curve_mass(&active.spec, start_elapsed, elapsed, density, ml_per_unit);
-            let mass_measured = w0 - weight_g;
-            if mass_theoretical.abs() > 1e-6 {
-                let error_frac = (mass_theoretical - mass_measured) / mass_theoretical;
-                match trim::update_trim(self.trim_c, error_frac) {
-                    trim::TrimOutcome::Unchanged => {}
-                    trim::TrimOutcome::Trimmed { new_c } => self.trim_c = new_c,
-                    trim::TrimOutcome::Alarm => self.scale_ok = false,
+        // Delivered mass: measured between consecutive Normal reads, settled
+        // from the anchor after a touch, a refill or a restart.
+        let resolution_g = self.scale_resolution_g;
+        let tr = &mut self.tracker;
+        // Persisted on the first read, after a settled anchor and with each c
+        // update (every UPDATE_EVERY_S), not every second: a resume anchors
+        // on the saved weight with the masses saved alongside it, so the
+        // downtime is measured whatever the save lag.
+        let mut save = tr.anchor.is_some() || tr.last_weight_g.is_none();
+        if let Some(a) = tr.anchor.take() {
+            tr.delivered_g += tracking::settle_anchor(&a, weight_g, tr.commanded_g, tr.k, resolution_g);
+            if a.refill {
+                tr.points.clear();
+            }
+        } else if let Some(w0) = tr.last_weight_g {
+            tr.delivered_g += w0 - weight_g;
+        } else {
+            // First read of the run: under a second of flow, counted nominal.
+            tr.delivered_g += tr.commanded_g;
+        }
+        tr.last_weight_g = Some(weight_g);
+        tr.last_normal_commanded_g = tr.commanded_g;
+        tr.points.push(tracking::TrackPoint {
+            t_s: t,
+            commanded_g: tr.commanded_g,
+            delivered_g: tr.delivered_g,
+        });
+        if tr.points.len() > WEIGHT_BUFFER_CAP {
+            tr.points = tracking::thin(&tr.points, WEIGHT_BUFFER_CAP);
+        }
+
+        if t - tr.last_update_t_s >= tracking::UPDATE_EVERY_S {
+            save = true;
+            tr.last_update_t_s = t;
+            // Diagnostic rate for the status: an O(n^2) slope, so on the
+            // update cadence rather than every read.
+            self.last_rate_g_per_min = trim::theil_sen_slope(&trim::decimate(
+                &self.weight_buffer,
+                trim::MAX_SLOPE_POINTS,
+            ))
+            .map(|s| s * 60.0);
+        } else {
+            // Not an update tick: nothing below runs.
+            if save {
+                self.save_trim_state();
+            }
+            return;
+        }
+        if self.scale_ok {
+            if let Some(k) = tracking::delivery_ratio(&tr.points, resolution_g) {
+                tr.k = Some(k);
+                tr.saturated_updates = if tracking::needs_alarm(k) {
+                    tr.saturated_updates + 1
+                } else {
+                    0
+                };
+                if tr.saturated_updates >= tracking::ALARM_AFTER_SATURATED_UPDATES {
+                    // The pump can't be brought on track within the c bounds:
+                    // freeze c and say so. Accounting goes on for the record.
+                    self.scale_ok = false;
+                } else {
+                    let rate = spec.value_at(Duration::from_secs_f64(t)) * ml_per_unit * density / 60.0;
+                    let deficit = tr.required_g - tr.delivered_g;
+                    self.trim_c = tracking::next_c(self.trim_c, k, deficit, rate);
                 }
             }
         }
-
-        if (self.trim_c, self.scale_state, self.refill_weight_g) != before {
+        if save {
             self.save_trim_state();
         }
     }
@@ -1695,6 +1813,18 @@ impl<T: Transport> Engine<T> {
         if run.control_var == ControlVar::Rpm {
             if let Some(cal_id) = run.tubing_calibration_id {
                 self.rpm_to_ml_min = self.store.calibration(cal_id)?.map(|c| calibration_ml_per_rpm(&c));
+            }
+        }
+        // The tracker was restored with the trim. Anchor it on the last weight
+        // seen before the crash, so the downtime (the pump kept going) is
+        // measured by the weight difference at the first read.
+        if run.gravimetric_trim && self.tracker.anchor.is_none() {
+            if let Some(w) = self.tracker.last_weight_g {
+                self.tracker.anchor = Some(tracking::Anchor {
+                    weight_g: w,
+                    commanded_g: self.tracker.last_normal_commanded_g,
+                    refill: false,
+                });
             }
         }
         // `trim_c` only applies if this run opted in, same gate as
@@ -2075,8 +2205,8 @@ mod tests {
     /// `k` times whatever the pump is actually commanded, i.e. a pump whose
     /// real delivered/commanded ratio is `k`. Each reading is computed from the
     /// engine's own `trim_c` as of the previous tick, so this exercises the
-    /// real closed loop (`scale_tick` -> `integrate_curve_mass` ->
-    /// `update_trim`) rather than a pre-scripted sequence. Returns the highest
+    /// real closed loop (`scale_tick` -> tracker -> `tracking::next_c`)
+    /// rather than a pre-scripted sequence. Returns the highest
     /// `trim_c` seen along the way.
     fn drain_at_ratio(e: &mut Engine<SimPump>, k: f64, start_g: f64, ticks: i64) -> f64 {
         let mut w = start_g;
@@ -2090,79 +2220,6 @@ mod tests {
             peak_c = peak_c.max(e.trim_c());
         }
         peak_c
-    }
-
-    #[test]
-    fn trim_c_converges_toward_the_pumps_real_delivery_ratio() {
-        // Commanded a flat 60 ml/min (1 g/s at density 1.0) but really
-        // delivering k = 0.85 of that: c must walk toward 1/k and hold there,
-        // not ratchet to TRIM_MAX (the bug when the theoretical side was also
-        // multiplied by c, which cancelled c out of error_frac).
-        const K: f64 = 0.85;
-        let target = 1.0 / K;
-        let mut e = engine();
-        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
-        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
-        assert_eq!(e.trim_c(), 1.0, "c must start un-trimmed");
-
-        let peak_c = drain_at_ratio(&mut e, K, 4_000.0, 600);
-        let c = e.trim_c();
-        assert!((c - target).abs() < 0.02, "c did not converge: {c}, target {target}");
-        let residual = 1.0 - K * c;
-        assert!(
-            residual.abs() <= trim::TRIM_IGNORE_BAND,
-            "residual mass-balance error too large: c = {c}, residual {residual}"
-        );
-        // The cumulative window lags c right after the baseline, so c
-        // overshoots on the way up; what matters is that it comes back.
-        assert!(c < trim::TRIM_MAX - 1e-6, "c ended pinned at the clamp: {c}");
-        assert!(peak_c - c > 0.01, "c never came back off its overshoot (peak {peak_c}, final {c})");
-        assert!(e.status().scale_ok, "a converging loop must not alarm");
-    }
-
-    #[test]
-    fn a_correctly_delivering_pump_leaves_c_alone() {
-        let mut e = engine();
-        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
-        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
-        drain_at_ratio(&mut e, 1.0, 4_000.0, 120);
-        assert!((e.trim_c() - 1.0).abs() < 1e-9, "c drifted with a perfect pump: {}", e.trim_c());
-        assert!(e.status().scale_ok);
-    }
-
-    #[test]
-    fn the_first_normal_read_seeds_the_mass_balance_baseline() {
-        // A brand new run never crosses RefillSettling -> Normal, so without
-        // seeding on the first read the cumulative check would stay dead
-        // until the operator ran a full refill cycle.
-        let mut e = engine();
-        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0, 1000.0])));
-        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
-        e.scale_tick(t0());
-        // Nothing left the bottle while the curve commanded ~1 g: alarms.
-        e.scale_tick(at(1));
-        assert!(!e.status().scale_ok, "the mass balance never ran");
-    }
-
-    #[test]
-    fn a_trim_alarm_is_not_erased_by_the_next_healthy_read() {
-        let mut e = engine();
-        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0, 1000.0])));
-        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
-        e.scale_tick(t0());
-        e.scale_tick(at(1));
-        assert!(!e.status().scale_ok, "a gross mass-balance error must alarm");
-        let c_at_alarm = e.trim_c();
-
-        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[998.0])));
-        e.scale_tick(at(2));
-        assert!(!e.status().scale_ok, "scale_ok must be sticky until the next start_run");
-        assert_eq!(e.trim_c(), c_at_alarm, "c stays frozen through the alarm");
-
-        e.stop_run(at(3)).unwrap();
-        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0; 4])));
-        e.start_run(flat_60_ml_min_cfg(), at(4)).unwrap();
-        assert!(e.status().scale_ok);
     }
 
     #[test]
@@ -2345,23 +2402,6 @@ mod tests {
         assert!(st.scale_state.is_some());
     }
 
-    #[test]
-    fn attach_scale_uses_the_configured_density() {
-        // Density 2.0 g/mL: a flat 60 ml/min curve is 2 g/s, so a bottle
-        // losing exactly 2 g/s must leave c alone and not alarm.
-        let mut e = engine();
-        e.attach_scale(
-            Some(Box::new(ScriptedScale::new(&[1000.0, 998.0, 996.0]))),
-            ScaleConfig { density_g_per_ml: 2.0, ..scale_cfg("sim-scale") },
-        );
-        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
-        for i in 0..3 {
-            e.scale_tick(at(i));
-        }
-        assert!(e.status().scale_ok);
-        assert_eq!(e.trim_c(), 1.0);
-    }
-
     /// Always errors, and counts how many times it was asked to.
     struct CountingFailingScale {
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -2495,26 +2535,6 @@ mod tests {
         assert!(e.scale_link_down());
     }
 
-    #[test]
-    fn recover_scale_does_not_treat_a_trim_alarm_as_a_down_link() {
-        // scale_ok can be false from a mass-balance alarm on a perfectly
-        // reachable scale; recovery must leave that for start_run to clear.
-        let mut e = engine();
-        e.attach_scale(
-            Some(Box::new(ScriptedScale::new(&[1000.0, 1000.0]))),
-            scale_cfg("sim-scale"),
-        );
-        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
-        e.scale_tick(t0());
-        e.scale_tick(at(1));
-        assert!(!e.status().scale_ok, "must have alarmed");
-        assert!(!e.scale_link_down());
-        assert!(e.recover_scale());
-        assert!(!e.status().scale_ok, "recover_scale must not clear an alarm it didn't cause");
-        // The UI tells this alarm apart from an unplugged balance.
-        assert_eq!(e.status().scale_connected, Some(true));
-    }
-
     // ---- tubing calibration gate (Task 12) ----
 
     /// Record a calibration of `setpoint` (in `control_var`'s unit) from three
@@ -2634,33 +2654,170 @@ mod tests {
         assert_eq!(e.trim_c(), trim::TRIM_MAX);
     }
 
+    /// Simulate `secs` one-second balance reads of a bottle drained by a pump
+    /// that delivers `k(t)` times what it is commanded, the command being the
+    /// run's own curve times the engine's current c. The balance reports 0.1 g
+    /// steps (ScriptedScale's format). Returns the true delivered grams.
+    fn simulate(
+        e: &mut Engine<SimPump>,
+        spec: &CurveSpec,
+        k: impl Fn(f64) -> f64,
+        start_g: f64,
+        from_s: i64,
+        secs: i64,
+    ) -> f64 {
+        let mut w = start_g;
+        let mut delivered = 0.0;
+        for i in from_s..from_s + secs {
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            let rate = spec.value_at(Duration::from_secs(i as u64)) / 60.0; // g/s at 1 g/mL
+            let out = k(i as f64) * rate * e.trim_c();
+            w -= out;
+            delivered += out;
+        }
+        delivered
+    }
+
     #[test]
-    fn an_rpm_calibration_converts_the_curve_for_the_mass_balance() {
-        // Calibrated at 50 rpm -> 600 g in 5 min = 120 ml/min, i.e. 2.4 ml/min
-        // per rpm. A flat 50 rpm run is then 120 ml/min = 2 g/s at 1 g/mL.
-        // A bottle losing exactly that must leave c at 1.0 without alarming;
-        // treating rpm as ml/min would expect 50/60 g/s and alarm at once.
-        // (Whole grams per second: the scripted scale reports 0.1 g.)
+    fn delivered_mass_tracks_an_exponential_curve_to_r2_one() {
+        // 1 ml/min, mu = 0.15/h, 6 h; the pump starts at 85 % and drifts to 92 %.
+        let spec = CurveSpec::exponential_physio(1.0, 0.15, Duration::from_secs(6 * 3600));
         let mut e = engine();
-        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
         e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
-        let cfg = RunConfig {
-            control_var: ControlVar::Rpm,
-            gravimetric_trim: true,
-            tubing_calibration_id: Some(cal),
-            curve: CurveSpec::linear(50.0, 50.0, Duration::from_secs(36_000)),
-            ..linear_cfg()
-        };
+        let cfg = RunConfig { curve: spec.clone(), ..trim_cfg() };
         e.start_run(cfg, t0()).unwrap();
-        assert_eq!(e.trim_c(), 1.0, "an rpm c0 is not a trim factor");
-        let mut w = 4_000.0;
-        for i in 0..120 {
+        let k = |t: f64| 0.85 + 0.07 * t / (6.0 * 3600.0);
+        let truth = simulate(&mut e, &spec, k, 5_000.0, 0, 6 * 3600);
+        let st = e.status();
+        let tr = st.tracking.expect("tracking status during a trimmed run");
+        assert!(st.scale_ok, "no alarm expected");
+        // The engine's own count agrees with the truth to the balance step.
+        assert!((tr.delivered_ml - truth).abs() < 0.5, "{} vs {truth}", tr.delivered_ml);
+        // And the cumulative delivered volume matches the curve.
+        let pct = tr.deficit_pct.unwrap();
+        assert!(pct.abs() < 1.0, "final deficit {pct} %");
+        // c sits on the pump's final inverse ratio.
+        assert!((e.trim_c() - 1.0 / 0.92).abs() < 0.03, "c = {}", e.trim_c());
+    }
+
+    #[test]
+    fn a_linear_curve_from_zero_is_tracked_too() {
+        let spec = CurveSpec::linear(0.0, 10.0, Duration::from_secs(3 * 3600));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        simulate(&mut e, &spec, |_| 0.9, 5_000.0, 0, 3 * 3600);
+        let pct = e.status().tracking.unwrap().deficit_pct.unwrap();
+        assert!(pct.abs() < 1.0, "final deficit {pct} %");
+    }
+
+    #[test]
+    fn a_refill_keeps_the_cumulative_count() {
+        let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let mut truth = simulate(&mut e, &spec, |_| 0.9, 2_000.0, 0, 1800);
+        // Bottle swapped: +1500 g, then the run goes on from the new weight.
+        let w_after = 2_000.0 - truth + 1_500.0;
+        truth += simulate(&mut e, &spec, |_| 0.9, w_after, 1800, 1800);
+        let tr = e.status().tracking.unwrap();
+        // The refill itself is estimated from k, so allow a few grams.
+        assert!((tr.delivered_ml - truth).abs() < 5.0, "{} vs {truth}", tr.delivered_ml);
+        assert!(tr.deficit_pct.unwrap().abs() < 1.0);
+    }
+
+    #[test]
+    fn a_blocked_line_alarms_after_five_minutes_and_freezes_c() {
+        let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 0, 120 + 10 * 29);
+        assert!(e.status().scale_ok, "not before 30 saturated updates");
+        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 410, 30);
+        assert!(!e.status().scale_ok, "a line delivering nothing must alarm");
+        let c = e.trim_c();
+        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 440, 60);
+        assert_eq!(e.trim_c(), c, "c frozen by the alarm");
+    }
+
+    #[test]
+    fn recover_scale_does_not_treat_a_trim_alarm_as_a_down_link() {
+        // A blocked line alarms while every balance read succeeds; recovery
+        // must leave that alarm for start_run to clear.
+        let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[]))), scale_cfg("sim-scale"));
+        e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 0, 600);
+        assert!(!e.status().scale_ok, "must have alarmed");
+        assert!(!e.scale_link_down());
+        assert!(e.recover_scale());
+        assert!(!e.status().scale_ok, "recover_scale must not clear an alarm it didn't cause");
+        assert_eq!(e.status().scale_connected, Some(true));
+    }
+
+    #[test]
+    fn a_very_low_flow_never_false_alarms() {
+        // 0.05 ml/min on a 0.1 g balance: 3 g/h, the window needs 20 g.
+        let spec = CurveSpec::linear(0.05, 0.05, Duration::from_secs(10 * 3600));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        simulate(&mut e, &spec, |_| 0.95, 500.0, 0, 10 * 3600);
+        assert!(e.status().scale_ok);
+        assert!(e.status().tracking.unwrap().deficit_pct.unwrap().abs() < 3.0);
+    }
+
+    #[test]
+    fn tracking_uses_the_configured_density() {
+        // 2 g/mL: a flat 60 ml/min curve is 2 g/s. A bottle losing exactly
+        // that is on track: c stays at 1 and required == delivered in mL.
+        let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale(
+            Some(Box::new(ScriptedScale::new(&[]))),
+            ScaleConfig { density_g_per_ml: 2.0, ..scale_cfg("sim-scale") },
+        );
+        e.start_run(RunConfig { curve: spec, ..trim_cfg() }, t0()).unwrap();
+        let mut w = 10_000.0;
+        for i in 0..900 {
             e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
             e.scale_tick(at(i));
             w -= 2.0 * e.trim_c();
         }
-        assert!(e.status().scale_ok, "the rpm curve was not converted to volume");
-        assert!((e.trim_c() - 1.0).abs() < 1e-9, "got {}", e.trim_c());
+        let tr = e.status().tracking.unwrap();
+        assert!(e.status().scale_ok);
+        assert!((e.trim_c() - 1.0).abs() < 0.01, "c = {}", e.trim_c());
+        assert!((tr.required_ml - tr.delivered_ml).abs() < 1.0, "{tr:?}");
+    }
+
+    #[test]
+    fn an_rpm_calibration_converts_the_curve_for_tracking() {
+        // Calibrated at 50 rpm -> 600 g in 5 min = 120 ml/min, 2.4 ml/min
+        // per rpm; a flat 50 rpm run delivering exactly that keeps c at 1.
+        let mut e = engine();
+        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let spec = CurveSpec::linear(50.0, 50.0, Duration::from_secs(36_000));
+        let cfg = RunConfig {
+            control_var: ControlVar::Rpm,
+            gravimetric_trim: true,
+            tubing_calibration_id: Some(cal),
+            curve: spec.clone(),
+            ..linear_cfg()
+        };
+        e.start_run(cfg, t0()).unwrap();
+        let mut w = 10_000.0;
+        for i in 0..900 {
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            w -= 2.0 * e.trim_c();
+        }
+        assert!(e.status().scale_ok);
+        assert!((e.trim_c() - 1.0).abs() < 0.01, "c = {}", e.trim_c());
     }
 
     #[test]
@@ -2694,12 +2851,12 @@ mod tests {
         let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
         b.resume(at(10), grace()).unwrap();
         let mut w = 4_000.0;
-        for i in 10..130 {
+        for i in 10..910 {
             b.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
             b.scale_tick(at(i));
             w -= 2.0 * b.trim_c();
         }
-        assert!(b.status().scale_ok, "resume lost the rpm-to-volume conversion");
+        assert!((b.trim_c() - 1.0).abs() < 0.01, "resume lost the rpm-to-volume conversion: c = {}", b.trim_c());
     }
 
     #[test]

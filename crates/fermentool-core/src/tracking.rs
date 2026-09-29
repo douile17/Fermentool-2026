@@ -44,6 +44,25 @@ pub fn delivery_ratio(points: &[TrackPoint], resolution_g: f64) -> Option<f64> {
     k.is_finite().then_some(k.max(0.0))
 }
 
+/// Bound the point history to `cap`: the newer half stays at full density,
+/// the older half is evenly thinned. The span back to the first point is
+/// kept, so a slow feed still reaches the window's minimum mass.
+pub fn thin(points: &[TrackPoint], cap: usize) -> Vec<TrackPoint> {
+    if points.len() <= cap || cap < 4 {
+        return points.to_vec();
+    }
+    let newer = points.len() / 2;
+    let split = points.len() - newer;
+    let old_xy: Vec<(f64, f64)> = (0..split).map(|i| (i as f64, 0.0)).collect();
+    let mut out: Vec<TrackPoint> = decimate(&old_xy, cap - newer)
+        .into_iter()
+        .map(|(i, _)| points[i as usize])
+        .collect();
+    out.dedup_by(|a, b| a.t_s == b.t_s);
+    out.extend_from_slice(&points[split..]);
+    out
+}
+
 /// Next c: feed-forward `1/k`, plus paying back the cumulative deficit over
 /// `DEFICIT_HORIZON_S`, moved by at most `MAX_C_STEP` and kept in bounds.
 pub fn next_c(prev_c: f64, k: f64, deficit_g: f64, demand_rate_g_s: f64) -> f64 {
@@ -166,6 +185,30 @@ mod tests {
     fn no_ratio_until_the_window_holds_enough_mass() {
         // 0.01 g/s for 600 s = 6 g, below 200 x 0.1 g = 20 g.
         assert_eq!(delivery_ratio(&line(1.0, 600, 1.0, 0.01), 0.1), None);
+    }
+
+    #[test]
+    fn thinning_keeps_the_whole_span_and_the_recent_points() {
+        let pts = line(1.0, 1000, 1.0, 1.0);
+        let thin_pts = thin(&pts, 800);
+        assert!(thin_pts.len() <= 800);
+        assert_eq!(thin_pts.first(), pts.first(), "the oldest point survives");
+        assert_eq!(&thin_pts[thin_pts.len() - 500..], &pts[500..], "the recent half is intact");
+        assert!(thin_pts.windows(2).all(|w| w[0].t_s < w[1].t_s), "still in time order");
+    }
+
+    #[test]
+    fn a_long_low_flow_history_still_yields_a_ratio_after_thinning() {
+        // 0.001 g/s for 8 h: 28.8 g over the run, only 0.8 g per 800 reads.
+        let mut pts = Vec::new();
+        for p in line(0.95, 8 * 3600, 1.0, 0.001) {
+            pts.push(p);
+            if pts.len() > 800 {
+                pts = thin(&pts, 800);
+            }
+        }
+        let k = delivery_ratio(&pts, 0.1).expect("the span must survive thinning");
+        assert!((k - 0.95).abs() < 0.02, "got {k}");
     }
 
     #[test]

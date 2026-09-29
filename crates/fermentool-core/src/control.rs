@@ -158,6 +158,8 @@ pub struct DaemonStatus {
     pub trim_c: Option<f64>,
     /// Diagnostic instantaneous rate, `None` until enough samples are buffered.
     pub rate_g_per_min: Option<f64>,
+    /// Cumulative feed tracking, `Some` only during a trimmed run.
+    pub tracking: Option<crate::engine::TrackingStatus>,
 }
 
 /// Sending / receiving on the control channel failed, the thread is gone.
@@ -227,6 +229,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         scale_state: st.scale_state,
         trim_c: st.trim_c,
         rate_g_per_min: st.rate_g_per_min,
+        tracking: st.tracking,
     }
 }
 
