@@ -203,7 +203,6 @@ pub struct RunRow {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct NewCalibration {
     pub tubing_lot_id: String,
-    pub tubing_size: String,
     pub inner_diameter_mm: f64,
     pub outer_diameter_mm: f64,
     pub control_var: ControlVar,
@@ -221,7 +220,6 @@ pub struct CalibrationRow {
     pub id: i64,
     pub created_at: Timestamp,
     pub tubing_lot_id: String,
-    pub tubing_size: String,
     pub inner_diameter_mm: f64,
     pub outer_diameter_mm: f64,
     pub control_var: ControlVar,
@@ -294,7 +292,7 @@ const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, cont
      direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
      gravimetric_trim, kind, tubing_calibration_id";
 
-const CAL_COLS: &str = "id, created_at, tubing_lot_id, tubing_size, control_var, setpoint, \
+const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
      measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
      c0, operator, note, inner_diameter_mm, outer_diameter_mm";
@@ -466,8 +464,8 @@ impl Store {
     /// client, so the record stays traceable to the raw bursts.
     pub fn insert_calibration(&self, c: &NewCalibration) -> Result<i64> {
         let invalid = |m: String| StoreError::Invalid(m);
-        if c.tubing_lot_id.trim().is_empty() || c.tubing_size.trim().is_empty() {
-            return Err(invalid("tubing lot and size are required".into()));
+        if c.tubing_lot_id.trim().is_empty() {
+            return Err(invalid("the tubing lot is required".into()));
         }
         if [c.inner_diameter_mm, c.outer_diameter_mm].iter().any(|v| !(v.is_finite() && *v > 0.0)) {
             return Err(invalid("inner and outer diameters must be positive (mm)".into()));
@@ -528,18 +526,17 @@ impl Store {
 
         self.conn.execute(
             "INSERT INTO tubing_calibrations
-               (created_at, tubing_lot_id, tubing_size, control_var, setpoint,
+               (created_at, tubing_lot_id, control_var, setpoint,
                 density_g_per_ml, run_1_id, run_2_id, run_3_id,
                 weight_1_g, weight_2_g, weight_3_g,
                 measured_1_ml_min, measured_2_ml_min, measured_3_ml_min,
                 mean_measured_ml_min, cv_pct, c0, operator, note,
                 inner_diameter_mm, outer_diameter_mm)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                     ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 Timestamp::now().to_string(),
                 c.tubing_lot_id.trim(),
-                c.tubing_size.trim(),
                 c.control_var.as_str(),
                 c.setpoint,
                 c.density_g_per_ml,
@@ -576,18 +573,17 @@ impl Store {
     }
 
     /// Calibrations newest first, optionally narrowed to one tubing lot and/or
-    /// size (exact match).
+    /// (exact match).
     pub fn list_calibrations(
         &self,
         tubing_lot_id: Option<&str>,
-        tubing_size: Option<&str>,
     ) -> Result<Vec<CalibrationRow>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CAL_COLS} FROM tubing_calibrations
-             WHERE (?1 IS NULL OR tubing_lot_id = ?1) AND (?2 IS NULL OR tubing_size = ?2)
+             WHERE (?1 IS NULL OR tubing_lot_id = ?1)
              ORDER BY created_at DESC, id DESC"
         ))?;
-        let rows = stmt.query_map(params![tubing_lot_id, tubing_size], row_to_calibration)?;
+        let rows = stmt.query_map(params![tubing_lot_id], row_to_calibration)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -751,23 +747,26 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
 
 fn row_to_calibration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalibrationRow> {
     Ok(CalibrationRow {
-        id: row.get(0)?,
-        created_at: parse_ts(row.get(1)?)?,
-        tubing_lot_id: row.get(2)?,
-        tubing_size: row.get(3)?,
-        control_var: parse_token(row.get(4)?, ControlVar::from_token, "control var")?,
-        setpoint: row.get(5)?,
-        density_g_per_ml: row.get(6)?,
-        run_ids: [row.get(7)?, row.get(8)?, row.get(9)?],
-        weights_g: [row.get(10)?, row.get(11)?, row.get(12)?],
-        measured_ml_min: [row.get(13)?, row.get(14)?, row.get(15)?],
-        mean_measured_ml_min: row.get(16)?,
-        cv_pct: row.get(17)?,
-        c0: row.get(18)?,
-        operator: row.get(19)?,
-        note: row.get(20)?,
-        inner_diameter_mm: row.get(21)?,
-        outer_diameter_mm: row.get(22)?,
+        id: row.get("id")?,
+        created_at: parse_ts(row.get("created_at")?)?,
+        tubing_lot_id: row.get("tubing_lot_id")?,
+        inner_diameter_mm: row.get("inner_diameter_mm")?,
+        outer_diameter_mm: row.get("outer_diameter_mm")?,
+        control_var: parse_token(row.get("control_var")?, ControlVar::from_token, "control var")?,
+        setpoint: row.get("setpoint")?,
+        density_g_per_ml: row.get("density_g_per_ml")?,
+        run_ids: [row.get("run_1_id")?, row.get("run_2_id")?, row.get("run_3_id")?],
+        weights_g: [row.get("weight_1_g")?, row.get("weight_2_g")?, row.get("weight_3_g")?],
+        measured_ml_min: [
+            row.get("measured_1_ml_min")?,
+            row.get("measured_2_ml_min")?,
+            row.get("measured_3_ml_min")?,
+        ],
+        mean_measured_ml_min: row.get("mean_measured_ml_min")?,
+        cv_pct: row.get("cv_pct")?,
+        c0: row.get("c0")?,
+        operator: row.get("operator")?,
+        note: row.get("note")?,
     })
 }
 
@@ -1002,7 +1001,6 @@ mod tests {
     fn new_calibration(run_ids: [i64; 3], weights_g: [f64; 3]) -> NewCalibration {
         NewCalibration {
             tubing_lot_id: "LOT-42".into(),
-            tubing_size: "1.6mm".into(),
             inner_diameter_mm: 1.6,
             outer_diameter_mm: 4.8,
             control_var: ControlVar::MlMin,
@@ -1060,7 +1058,6 @@ mod tests {
         let c = s.calibration(id).unwrap().expect("calibration exists");
         assert_eq!(c.id, id);
         assert_eq!(c.tubing_lot_id, "LOT-42");
-        assert_eq!(c.tubing_size, "1.6mm");
         assert_eq!(c.inner_diameter_mm, 1.6);
         assert_eq!(c.outer_diameter_mm, 4.8);
         assert_eq!(c.control_var, ControlVar::MlMin);
@@ -1093,26 +1090,18 @@ mod tests {
     }
 
     #[test]
-    fn list_calibrations_filters_by_lot_and_size_newest_first() {
+    fn list_calibrations_filters_by_lot_newest_first() {
         let s = Store::open_in_memory().unwrap();
         let mut ids = Vec::new();
-        for (lot, size) in [("A", "1.6mm"), ("A", "3.2mm"), ("B", "1.6mm"), ("A", "1.6mm")] {
+        for lot in ["A", "A", "B", "A"] {
             let runs = three_bursts(&s);
-            let c = NewCalibration {
-                tubing_lot_id: lot.into(),
-                tubing_size: size.into(),
-                ..new_calibration(runs, [50.0; 3])
-            };
+            let c = NewCalibration { tubing_lot_id: lot.into(), ..new_calibration(runs, [50.0; 3]) };
             ids.push(s.insert_calibration(&c).unwrap());
         }
-        let all = s.list_calibrations(None, None).unwrap();
+        let all = s.list_calibrations(None).unwrap();
         assert_eq!(all.len(), 4);
-        let a_small = s.list_calibrations(Some("A"), Some("1.6mm")).unwrap();
-        assert_eq!(a_small.iter().map(|c| c.id).collect::<Vec<_>>(), vec![ids[3], ids[0]]);
-        let lot_a = s.list_calibrations(Some("A"), None).unwrap();
-        assert_eq!(lot_a.len(), 3);
-        let small = s.list_calibrations(None, Some("1.6mm")).unwrap();
-        assert_eq!(small.len(), 3);
+        let lot_a = s.list_calibrations(Some("A")).unwrap();
+        assert_eq!(lot_a.iter().map(|c| c.id).collect::<Vec<_>>(), vec![ids[3], ids[1], ids[0]]);
     }
 
     #[test]

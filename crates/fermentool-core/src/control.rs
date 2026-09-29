@@ -111,7 +111,6 @@ pub enum Command {
     InsertCalibration(NewCalibration, oneshot::Sender<Result<CalibrationRow, StoreError>>),
     ListCalibrations {
         lot_id: Option<String>,
-        size: Option<String>,
         reply: oneshot::Sender<Result<Vec<CalibrationRow>, String>>,
     },
     /// The in-progress calibration session, as the UI saved it (opaque JSON).
@@ -732,10 +731,10 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let _ = reply.send(res);
             false
         }
-        Command::ListCalibrations { lot_id, size, reply } => {
+        Command::ListCalibrations { lot_id, reply } => {
             let res = engine
                 .store()
-                .list_calibrations(lot_id.as_deref(), size.as_deref())
+                .list_calibrations(lot_id.as_deref())
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
             false

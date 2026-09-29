@@ -1,6 +1,6 @@
 <script>
   // Tubing calibration: three timed bursts at one setpoint, each weighed by
-  // hand, recorded as one calibration per tubing lot + size. The balance is
+  // hand, recorded as one calibration per tubing lot and diameters. The balance is
   // never read here on purpose: the bench where a tube is calibrated need not
   // be wired to this Fermentool. Each burst is an ordinary run
   // (kind = calibration); its real duration comes from the run's own clock,
@@ -18,7 +18,6 @@
 
   const blank = () => ({
     tubing_lot_id: '',
-    tubing_size: '',
     inner_diameter_mm: null,
     outer_diameter_mm: null,
     control_var: 'ml_min',
@@ -81,7 +80,6 @@
 
   const formOk = $derived(
     d.tubing_lot_id.trim() !== '' &&
-      d.tubing_size.trim() !== '' &&
       Number(d.inner_diameter_mm) > 0 &&
       Number(d.outer_diameter_mm) > Number(d.inner_diameter_mm) &&
       Number(d.setpoint) > 0 &&
@@ -119,7 +117,7 @@
     const lim = d.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS;
     try {
       const r = await post('/api/runs', {
-        name: `calibration ${d.tubing_lot_id.trim()} ${d.tubing_size.trim()} ${n}/3`,
+        name: `calibration ${d.tubing_lot_id.trim()} ${n}/3`,
         control_var: d.control_var,
         direction: d.direction,
         pump_addr: pumpAddr,
@@ -224,7 +222,6 @@
     try {
       saved = await post('/api/calibrations', {
         tubing_lot_id: d.tubing_lot_id.trim(),
-        tubing_size: d.tubing_size.trim(),
         inner_diameter_mm: Number(d.inner_diameter_mm),
         outer_diameter_mm: Number(d.outer_diameter_mm),
         control_var: d.control_var,
@@ -247,7 +244,7 @@
 
   function exportCsv() {
     const cols = [
-      'id', 'created_at', 'tubing_lot_id', 'tubing_size', 'inner_diameter_mm',
+      'id', 'created_at', 'tubing_lot_id', 'inner_diameter_mm',
       'outer_diameter_mm', 'control_var', 'setpoint',
       'density_g_per_ml', 'run_1_id', 'run_2_id', 'run_3_id', 'weight_1_g', 'weight_2_g',
       'weight_3_g', 'measured_1_ml_min', 'measured_2_ml_min', 'measured_3_ml_min',
@@ -259,7 +256,7 @@
     };
     const lines = history.map((c) =>
       [
-        c.id, c.created_at, c.tubing_lot_id, c.tubing_size, c.inner_diameter_mm,
+        c.id, c.created_at, c.tubing_lot_id, c.inner_diameter_mm,
         c.outer_diameter_mm, c.control_var, c.setpoint,
         c.density_g_per_ml, ...c.run_ids, ...c.weights_g, ...c.measured_ml_min,
         c.mean_measured_ml_min, c.cv_pct, c.c0, c.operator, c.note,
@@ -296,9 +293,6 @@
       <div class="grid">
         <label class="field"><span>Tubing lot</span>
           <input type="text" bind:value={d.tubing_lot_id} disabled={locked} onchange={persist} placeholder="e.g. LOT-2409" />
-        </label>
-        <label class="field"><span>Tubing size</span>
-          <input type="text" bind:value={d.tubing_size} disabled={locked} onchange={persist} placeholder="e.g. #16" />
         </label>
         <label class="field"><span>Inner Ø (mm)</span>
           <input type="number" step="0.1" min="0" bind:value={d.inner_diameter_mm} disabled={locked} onchange={persist} />
@@ -430,7 +424,7 @@
       {#if history.length}
         <table class="hist mono">
           <thead>
-            <tr><th>#</th><th>date</th><th>lot</th><th>size</th><th>Ø int / ext (mm)</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th></tr>
+            <tr><th>#</th><th>date</th><th>lot</th><th>Ø int / ext (mm)</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th></tr>
           </thead>
           <tbody>
             {#each history as c (c.id)}
@@ -438,7 +432,6 @@
                 <td>{c.id}</td>
                 <td>{stamp(c.created_at)}</td>
                 <td>{c.tubing_lot_id}</td>
-                <td>{c.tubing_size}</td>
                 <td>{num(c.inner_diameter_mm, 1)} / {num(c.outer_diameter_mm, 1)}</td>
                 <td>{num(c.setpoint, digitsFor(c.control_var))} {unitFor(c.control_var)}</td>
                 <td>{num(c.mean_measured_ml_min, 3)}</td>

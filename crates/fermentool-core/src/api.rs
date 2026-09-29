@@ -334,10 +334,9 @@ async fn pump_stop(State(s): State<AppState>) -> ApiResult<Response> {
 #[derive(Deserialize)]
 struct CalibrationQuery {
     lot_id: Option<String>,
-    size: Option<String>,
 }
 
-/// Tubing calibrations, newest first; `?lot_id=&size=` narrow it (blank = any).
+/// Tubing calibrations, newest first; `?lot_id=` narrows it (blank = any).
 async fn list_calibrations(
     State(s): State<AppState>,
     Query(q): Query<CalibrationQuery>,
@@ -347,7 +346,6 @@ async fn list_calibrations(
         .control
         .call(|reply| Command::ListCalibrations {
             lot_id: nonblank(q.lot_id),
-            size: nonblank(q.size),
             reply,
         })
         .await
@@ -1109,7 +1107,7 @@ mod tests {
 
     fn calibration_body(run_ids: [i64; 3], weights: [f64; 3]) -> serde_json::Value {
         json!({
-            "tubing_lot_id": "LOT-42", "tubing_size": "1.6mm",
+            "tubing_lot_id": "LOT-42",
             "inner_diameter_mm": 1.6, "outer_diameter_mm": 4.8,
             "control_var": "ml_min", "setpoint": 10.0, "density_g_per_ml": 1.0,
             "run_ids": run_ids, "weights_g": weights,
@@ -1132,7 +1130,7 @@ mod tests {
         let id = body["id"].as_i64().unwrap();
 
         let res = app
-            .oneshot(get("/api/calibrations?lot_id=LOT-42&size=1.6mm"))
+            .oneshot(get("/api/calibrations?lot_id=LOT-42"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1176,7 +1174,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/calibrations/draft",
-                json!({"tubing_lot_id": "LOT-1", "tubing_size": "1.6mm"}),
+                json!({"tubing_lot_id": "LOT-1", "inner_diameter_mm": 1.6}),
             ))
             .await
             .unwrap();

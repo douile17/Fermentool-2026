@@ -6,7 +6,6 @@ CREATE TABLE tubing_calibrations (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at            TEXT    NOT NULL,
     tubing_lot_id         TEXT    NOT NULL,
-    tubing_size           TEXT    NOT NULL,
     inner_diameter_mm     REAL    NOT NULL,
     outer_diameter_mm     REAL    NOT NULL,
     control_var           TEXT    NOT NULL CHECK (control_var IN ('rpm','ml_min')),
@@ -27,7 +26,7 @@ CREATE TABLE tubing_calibrations (
     operator              TEXT,
     note                  TEXT
 );
-CREATE INDEX ix_tubing_cal_lot_size ON tubing_calibrations(tubing_lot_id, tubing_size, created_at);
+CREATE INDEX ix_tubing_cal_lot ON tubing_calibrations(tubing_lot_id, created_at);
 
 ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'dosing' CHECK (kind IN ('dosing','calibration'));
 ALTER TABLE runs ADD COLUMN tubing_calibration_id INTEGER REFERENCES tubing_calibrations(id);
