@@ -1457,12 +1457,7 @@ impl<T: Transport> Engine<T> {
         let Some(run) = self.store.run(run_id)? else {
             return Ok(None);
         };
-        let ticks: Vec<(f64, f64)> = self
-            .store
-            .ticks(run_id, 0, i64::MAX)?
-            .into_iter()
-            .filter_map(|t| t.delivered_g.map(|d| (t.elapsed_s, d)))
-            .collect();
+        let ticks = self.store.delivery_samples(run_id, 1999)?; // + the latest tick: <= 2000
         if ticks.len() < 2 {
             return Ok(None);
         }
@@ -1474,7 +1469,7 @@ impl<T: Transport> Engine<T> {
                 .map_or(1.0, |c| calibration_ml_per_rpm(&c)),
             _ => 1.0,
         };
-        let sampled = trim::decimate(&ticks, 2000);
+        let sampled = ticks;
         let mut required_ml = Vec::with_capacity(sampled.len());
         let (mut acc, mut prev) = (0.0, 0.0);
         for &(t, _) in &sampled {

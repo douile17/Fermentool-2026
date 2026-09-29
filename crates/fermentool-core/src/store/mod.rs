@@ -636,6 +636,28 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// `(elapsed_s, delivered_g)` of a run's ticks that carry a delivered
+    /// mass, sampled in SQL to about `max_points` (one tick in N, plus the
+    /// latest) and reading only those two columns: a 100 h run journals
+    /// ~360k ticks, and this runs on the control thread.
+    pub fn delivery_samples(&self, run_id: i64, max_points: i64) -> Result<Vec<(f64, f64)>> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM ticks WHERE run_id = ?1 AND delivered_g IS NOT NULL",
+            [run_id],
+            |r| r.get(0),
+        )?;
+        let stride = ((n + max_points - 1) / max_points.max(1)).max(1);
+        let mut stmt = self.conn.prepare(
+            "SELECT elapsed_s, delivered_g FROM ticks
+             WHERE run_id = ?1 AND delivered_g IS NOT NULL
+               AND (seq % ?2 = 0 OR seq = (SELECT max(seq) FROM ticks
+                                           WHERE run_id = ?1 AND delivered_g IS NOT NULL))
+             ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(params![run_id, stride], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// The highest-`seq` tick for a run, if any.
     pub fn last_tick(&self, run_id: i64) -> Result<Option<TickRow>> {
         self.conn
@@ -1087,6 +1109,36 @@ mod tests {
         let t = s.last_tick(run).unwrap().unwrap();
         assert_eq!(t.weight_g, Some(742.5));
         assert_eq!(t.delivered_g, Some(0.3));
+    }
+
+    #[test]
+    fn delivery_samples_are_bounded_and_keep_both_ends() {
+        // A 100 h run journals ~360k ticks; the tracking report must not load
+        // them all on the control thread every 10 s.
+        let s = Store::open_in_memory().unwrap();
+        let run = s.insert_run(&sample_run()).unwrap();
+        for seq in 0..5_000 {
+            s.append_tick(&NewTick {
+                run_id: run,
+                seq,
+                wall_time: ts("2026-09-01T09:30:01Z"),
+                elapsed_s: seq as f64,
+                target: 1.0,
+                written_ok: true,
+                readback: None,
+                note: None,
+                weight_g: None,
+                // the first ticks precede the first balance read
+                delivered_g: (seq >= 3).then_some(seq as f64 * 0.5),
+            })
+            .unwrap();
+        }
+        let pts = s.delivery_samples(run, 500).unwrap();
+        assert!(pts.len() <= 501, "got {}", pts.len());
+        assert!(pts.len() >= 400, "got {}", pts.len());
+        assert_eq!(pts.last(), Some(&(4_999.0, 2_499.5)), "the latest tick is kept");
+        assert!(pts[0].0 <= 10.0, "starts near the first delivered tick: {:?}", pts[0]);
+        assert!(pts.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]
