@@ -74,6 +74,8 @@ pub enum Command {
     Resume(oneshot::Sender<Result<i64, ErrDetail>>),
     DiscardRecovery(RunStatus, oneshot::Sender<Result<(), String>>),
     GetRun(i64, oneshot::Sender<Result<Option<RunRow>, String>>),
+    /// The delivered-vs-requested proof for a run (`None`: no balance data).
+    Tracking(i64, oneshot::Sender<Result<Option<crate::engine::TrackingReport>, String>>),
     ListRuns(i64, oneshot::Sender<Result<Vec<RunRow>, String>>),
     /// Delete every run + journal. Refused while a run is active or a crash
     /// recovery is pending.
@@ -634,6 +636,10 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         }
         Command::GetRun(id, reply) => {
             let _ = reply.send(engine.store().run(id).map_err(|e| e.to_string()));
+            false
+        }
+        Command::Tracking(id, reply) => {
+            let _ = reply.send(engine.tracking_report(id).map_err(|e| e.to_string()));
             false
         }
         Command::ListRuns(limit, reply) => {

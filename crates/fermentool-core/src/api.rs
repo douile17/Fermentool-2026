@@ -53,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/ticks", get(get_ticks))
         .route("/api/runs/{id}/events", get(get_events))
+        .route("/api/runs/{id}/tracking", get(get_tracking))
         .route("/api/runs/{id}/stop", post(stop_run))
         .route("/api/runs/{id}/abort", post(abort_run))
         .route("/api/recovery", get(get_recovery))
@@ -236,6 +237,19 @@ async fn clear_history(State(s): State<AppState>) -> ApiResult<Response> {
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "cleared": true })).into_response())
+}
+
+/// Delivered vs requested feed for a run: chart points, R², fitted µ. 404 when
+/// the run has no balance data.
+async fn get_tracking(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let report = s
+        .control
+        .call(|reply| Command::Tracking(id, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(report).into_response())
 }
 
 async fn get_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
@@ -1234,5 +1248,12 @@ mod tests {
         let id = body_json(res).await["run_id"].as_i64().unwrap();
         let res = app.oneshot(get(&format!("/api/runs/{id}"))).await.unwrap();
         assert_eq!(body_json(res).await["kind"], "calibration");
+    }
+
+    #[tokio::test]
+    async fn tracking_is_404_for_a_run_without_balance_data() {
+        let app = router(test_state());
+        let res = app.oneshot(get("/api/runs/1/tracking")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

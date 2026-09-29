@@ -562,6 +562,22 @@ struct Tracker {
     saturated_updates: u32,
 }
 
+/// The proof that a run's delivered feed followed its curve, from the journal.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackingReport {
+    /// `[t_s, required_ml, delivered_ml]`, cumulative, at most 2000 points.
+    pub points: Vec<[f64; 3]>,
+    /// Of delivered against required.
+    pub r_squared: Option<f64>,
+    /// Required minus delivered at the last point, positive = behind.
+    pub deficit_ml: f64,
+    pub deficit_pct: Option<f64>,
+    /// Exponential curves only: the µ asked for, and the µ that best fits
+    /// the delivered volume (per hour).
+    pub mu_requested: Option<f64>,
+    pub mu_delivered: Option<f64>,
+}
+
 /// The tracker's view for the status frame, volumes in mL.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackingStatus {
@@ -1432,6 +1448,64 @@ impl<T: Transport> Engine<T> {
                 None
             }
         }
+    }
+
+    /// Chart, R² and fitted µ for a run, from its journal. `None` when the
+    /// run has no delivered-mass data (no balance, or not trimmed). Volumes
+    /// use the configured feed density.
+    pub fn tracking_report(&self, run_id: i64) -> Result<Option<TrackingReport>> {
+        let Some(run) = self.store.run(run_id)? else {
+            return Ok(None);
+        };
+        let ticks: Vec<(f64, f64)> = self
+            .store
+            .ticks(run_id, 0, i64::MAX)?
+            .into_iter()
+            .filter_map(|t| t.delivered_g.map(|d| (t.elapsed_s, d)))
+            .collect();
+        if ticks.len() < 2 {
+            return Ok(None);
+        }
+        let rho = self.scale_density_g_per_ml;
+        let ml_per_unit = match (run.control_var, run.tubing_calibration_id) {
+            (ControlVar::Rpm, Some(cal_id)) => self
+                .store
+                .calibration(cal_id)?
+                .map_or(1.0, |c| calibration_ml_per_rpm(&c)),
+            _ => 1.0,
+        };
+        let sampled = trim::decimate(&ticks, 2000);
+        let mut required_ml = Vec::with_capacity(sampled.len());
+        let (mut acc, mut prev) = (0.0, 0.0);
+        for &(t, _) in &sampled {
+            acc += integrate_curve_mass(&run.curve, prev, t, rho, ml_per_unit) / rho;
+            required_ml.push(acc);
+            prev = t;
+        }
+        let delivered_ml: Vec<f64> = sampled.iter().map(|&(_, d)| d / rho).collect();
+        let req_end = required_ml.last().copied().unwrap_or(0.0);
+        let del_end = delivered_ml.last().copied().unwrap_or(0.0);
+        let mu_requested = tracking::requested_mu_per_hour(&run.curve);
+        let mu_delivered = mu_requested.and_then(|mu| {
+            let pts: Vec<(f64, f64)> = sampled
+                .iter()
+                .zip(&delivered_ml)
+                .map(|(&(t, _), &v)| (t / 3600.0, v))
+                .collect();
+            tracking::fit_exponential_mu(&pts, mu)
+        });
+        Ok(Some(TrackingReport {
+            points: sampled
+                .iter()
+                .zip(required_ml.iter().zip(&delivered_ml))
+                .map(|(&(t, _), (&r, &d))| [t, r, d])
+                .collect(),
+            r_squared: tracking::r_squared(&required_ml, &delivered_ml),
+            deficit_ml: req_end - del_end,
+            deficit_pct: (req_end > 0.0).then(|| 100.0 * (req_end - del_end) / req_end),
+            mu_requested,
+            mu_delivered,
+        }))
     }
 
     /// Idle balance read, about once a second from the control loop: keeps
@@ -2861,6 +2935,34 @@ mod tests {
         let t = e.store.last_tick(id).unwrap().unwrap();
         assert_eq!(t.weight_g, Some(1000.0));
         assert!(t.delivered_g.is_some());
+    }
+
+    #[test]
+    fn the_tracking_report_proves_an_exponential_run() {
+        let spec = CurveSpec::exponential_physio(1.0, 0.15, Duration::from_secs(4 * 3600));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let mut w = 5_000.0;
+        for i in 0..4 * 3600 {
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            e.tick(at(i)).unwrap();
+            w -= 0.9 * spec.value_at(Duration::from_secs(i as u64)) / 60.0 * e.trim_c();
+        }
+        let r = e.tracking_report(id).unwrap().expect("report");
+        assert!(r.r_squared.unwrap() > 0.999, "R² {:?}", r.r_squared);
+        assert!((r.mu_requested.unwrap() - 0.15).abs() < 1e-9);
+        assert!((r.mu_delivered.unwrap() - 0.15).abs() < 0.01, "µ {:?}", r.mu_delivered);
+        assert!(r.points.len() <= 2000);
+    }
+
+    #[test]
+    fn no_report_for_a_run_without_a_balance() {
+        let mut e = engine();
+        let id = e.start_run(linear_cfg(), t0()).unwrap();
+        e.tick(at(1)).unwrap();
+        assert!(e.tracking_report(id).unwrap().is_none());
     }
 
     #[test]
