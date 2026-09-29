@@ -3,6 +3,7 @@
   import { get, post } from '../lib/api.js';
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
+  import TrackingPanel from '../components/TrackingPanel.svelte';
   import FigureBand from '../components/FigureBand.svelte';
 
   const active = $derived(app.status?.active ?? null);
@@ -298,6 +299,10 @@
         {digits}
         nowVolumeMl={run.control_var === 'ml_min' ? active?.volume_added_ml : null}
       />
+
+      {#if active?.gravimetric_trim}
+        <TrackingPanel runId={active.run_id} durationS={run.duration_s} live />
+      {/if}
 
       <div class="meta">
         <div><div class="k">Direction</div><div class="v mono">{run.direction === 'cw' ? 'clockwise' : 'counter-cw'}</div></div>

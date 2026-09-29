@@ -3,6 +3,7 @@
   import { get, post, del } from '../lib/api.js';
   import { num, dur, shortTime, stampY, unitFor, digitsFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
+  import TrackingPanel from '../components/TrackingPanel.svelte';
 
   let runs = $state([]);
   let err = $state(null);
@@ -246,6 +247,8 @@
         {num(sel.run.curve.start, digitsFor(sel.run.control_var))} → {num(sel.run.curve.end, digitsFor(sel.run.control_var))}
         {unitFor(sel.run.control_var)}
       </div>
+
+      <TrackingPanel runId={sel.run.id} durationS={sel.run.duration_s} />
 
       <div class="acts">
         {#each sel.events as e (e.id)}
