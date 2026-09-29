@@ -18,6 +18,7 @@
 
   const blank = () => ({
     tubing_lot_id: '',
+    internal_ref: '',
     inner_diameter_mm: null,
     outer_diameter_mm: null,
     control_var: 'ml_min',
@@ -222,6 +223,7 @@
     try {
       saved = await post('/api/calibrations', {
         tubing_lot_id: d.tubing_lot_id.trim(),
+        internal_ref: (d.internal_ref ?? '').trim() || null,
         inner_diameter_mm: Number(d.inner_diameter_mm),
         outer_diameter_mm: Number(d.outer_diameter_mm),
         control_var: d.control_var,
@@ -244,7 +246,7 @@
 
   function exportCsv() {
     const cols = [
-      'id', 'created_at', 'tubing_lot_id', 'inner_diameter_mm',
+      'id', 'created_at', 'tubing_lot_id', 'internal_ref', 'inner_diameter_mm',
       'outer_diameter_mm', 'control_var', 'setpoint',
       'density_g_per_ml', 'run_1_id', 'run_2_id', 'run_3_id', 'weight_1_g', 'weight_2_g',
       'weight_3_g', 'measured_1_ml_min', 'measured_2_ml_min', 'measured_3_ml_min',
@@ -256,7 +258,7 @@
     };
     const lines = history.map((c) =>
       [
-        c.id, c.created_at, c.tubing_lot_id, c.inner_diameter_mm,
+        c.id, c.created_at, c.tubing_lot_id, c.internal_ref, c.inner_diameter_mm,
         c.outer_diameter_mm, c.control_var, c.setpoint,
         c.density_g_per_ml, ...c.run_ids, ...c.weights_g, ...c.measured_ml_min,
         c.mean_measured_ml_min, c.cv_pct, c.c0, c.operator, c.note,
@@ -293,6 +295,9 @@
       <div class="grid">
         <label class="field"><span>Tubing lot</span>
           <input type="text" bind:value={d.tubing_lot_id} disabled={locked} onchange={persist} placeholder="e.g. LOT-2409" />
+        </label>
+        <label class="field"><span>Internal ref (optional)</span>
+          <input type="text" bind:value={d.internal_ref} disabled={locked} onchange={persist} />
         </label>
         <label class="field"><span>Inner Ø (mm)</span>
           <input type="number" step="0.1" min="0" bind:value={d.inner_diameter_mm} disabled={locked} onchange={persist} />
@@ -424,7 +429,7 @@
       {#if history.length}
         <table class="hist mono">
           <thead>
-            <tr><th>#</th><th>date</th><th>lot</th><th>Ø int / ext (mm)</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th></tr>
+            <tr><th>#</th><th>date</th><th>lot</th><th>internal ref</th><th>Ø int / ext (mm)</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th></tr>
           </thead>
           <tbody>
             {#each history as c (c.id)}
@@ -432,6 +437,7 @@
                 <td>{c.id}</td>
                 <td>{stamp(c.created_at)}</td>
                 <td>{c.tubing_lot_id}</td>
+                <td>{c.internal_ref ?? ''}</td>
                 <td>{num(c.inner_diameter_mm, 1)} / {num(c.outer_diameter_mm, 1)}</td>
                 <td>{num(c.setpoint, digitsFor(c.control_var))} {unitFor(c.control_var)}</td>
                 <td>{num(c.mean_measured_ml_min, 3)}</td>

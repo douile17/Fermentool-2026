@@ -6,6 +6,7 @@ CREATE TABLE tubing_calibrations (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at            TEXT    NOT NULL,
     tubing_lot_id         TEXT    NOT NULL,
+    internal_ref          TEXT,
     inner_diameter_mm     REAL    NOT NULL,
     outer_diameter_mm     REAL    NOT NULL,
     control_var           TEXT    NOT NULL CHECK (control_var IN ('rpm','ml_min')),
