@@ -1146,6 +1146,7 @@ impl<T: Transport> Engine<T> {
         let control_var = active.control_var;
         let duration_s = active.duration_s;
         let run_kind = active.kind;
+        let trimmed = active.gravimetric_trim;
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
         let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
@@ -1254,6 +1255,8 @@ impl<T: Transport> Engine<T> {
             written_ok,
             readback,
             note: None,
+            weight_g: self.live_weight.map(|(w, _)| w),
+            delivered_g: trimmed.then_some(self.tracker.delivered_g),
         }) {
             Ok(_) => self.journal_fails = 0,
             Err(e) => {
@@ -2818,6 +2821,46 @@ mod tests {
         }
         assert!(e.status().scale_ok);
         assert!((e.trim_c() - 1.0).abs() < 0.01, "c = {}", e.trim_c());
+    }
+
+    #[test]
+    fn tracking_survives_a_crash_resume() {
+        let db = TempDb::new();
+        let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
+        let before = {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+            a.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+            // 601 reads so the last one (t = 600) is also a saved update.
+            simulate(&mut a, &spec, |_| 1.0, 5_000.0, 0, 601);
+            a.status().tracking.unwrap()
+        };
+        // 60 s down, the pump kept delivering 1 g/s: the bottle is 60 g lighter.
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        b.resume(at(660), grace()).unwrap();
+        let w = 5_000.0 - before.delivered_ml - 60.0;
+        b.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+        b.scale_tick(at(660));
+        let after = b.status().tracking.unwrap();
+        assert!(
+            (after.delivered_ml - (before.delivered_ml + 60.0)).abs() < 0.5,
+            "{} vs {}",
+            after.delivered_ml,
+            before.delivered_ml + 60.0
+        );
+        assert!((after.required_ml - (before.required_ml + 60.0)).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_journal_records_the_weight_during_a_trimmed_run() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0])));
+        let id = e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
+        e.scale_tick(t0());
+        e.tick(at(1)).unwrap();
+        let t = e.store.last_tick(id).unwrap().unwrap();
+        assert_eq!(t.weight_g, Some(1000.0));
+        assert!(t.delivered_g.is_some());
     }
 
     #[test]

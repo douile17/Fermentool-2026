@@ -31,6 +31,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 3,
         sql: include_str!("migrations/0003_tubing_calibration.sql"),
     },
+    Migration {
+        version: 4,
+        sql: include_str!("migrations/0004_tick_weight.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -249,6 +253,10 @@ pub struct NewTick {
     pub written_ok: bool,
     pub readback: Option<f64>,
     pub note: Option<String>,
+    /// Balance reading at this tick, grams.
+    pub weight_g: Option<f64>,
+    /// Cumulative mass delivered since run start (trimmed runs), grams.
+    pub delivered_g: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -262,6 +270,8 @@ pub struct TickRow {
     pub written_ok: bool,
     pub readback: Option<f64>,
     pub note: Option<String>,
+    pub weight_g: Option<f64>,
+    pub delivered_g: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -301,7 +311,8 @@ const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
      c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref";
 
-const TICK_COLS: &str = "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note";
+const TICK_COLS: &str =
+    "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note, weight_g, delivered_g";
 
 const EVENT_COLS: &str = "id, run_id, wall_time, level, kind, detail";
 
@@ -596,8 +607,9 @@ impl Store {
 
     pub fn append_tick(&self, t: &NewTick) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO ticks (run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO ticks (run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note,
+                                weight_g, delivered_g)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 t.run_id,
                 t.seq,
@@ -607,6 +619,8 @@ impl Store {
                 t.written_ok as i64,
                 t.readback,
                 t.note,
+                t.weight_g,
+                t.delivered_g,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -787,6 +801,8 @@ fn row_to_tick(row: &rusqlite::Row<'_>) -> rusqlite::Result<TickRow> {
         written_ok: row.get::<_, i64>(6)? != 0,
         readback: row.get(7)?,
         note: row.get(8)?,
+        weight_g: row.get(9)?,
+        delivered_g: row.get(10)?,
     })
 }
 
@@ -844,7 +860,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
     }
 
     #[test]
@@ -856,7 +872,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
     }
 
     #[test]
@@ -917,6 +933,8 @@ mod tests {
                 written_ok: seq != 3,
                 readback: if seq == 0 { Some(1.9) } else { None },
                 note: None,
+                weight_g: None,
+                delivered_g: None,
             })
             .unwrap();
         }
@@ -942,6 +960,8 @@ mod tests {
             written_ok: true,
             readback: None,
             note: None,
+            weight_g: None,
+            delivered_g: None,
         };
         s.append_tick(&t).unwrap();
         assert!(s.append_tick(&t).is_err());
@@ -1045,6 +1065,28 @@ mod tests {
         for id in runs {
             assert!(s.run(id).unwrap().is_some(), "burst {id} was deleted");
         }
+    }
+
+    #[test]
+    fn a_tick_carries_the_weight_and_delivered_mass() {
+        let s = Store::open_in_memory().unwrap();
+        let run = s.insert_run(&sample_run()).unwrap();
+        s.append_tick(&NewTick {
+            run_id: run,
+            seq: 0,
+            wall_time: ts("2026-09-01T09:30:01Z"),
+            elapsed_s: 1.0,
+            target: 1.0,
+            written_ok: true,
+            readback: None,
+            note: None,
+            weight_g: Some(742.5),
+            delivered_g: Some(0.3),
+        })
+        .unwrap();
+        let t = s.last_tick(run).unwrap().unwrap();
+        assert_eq!(t.weight_g, Some(742.5));
+        assert_eq!(t.delivered_g, Some(0.3));
     }
 
     #[test]
