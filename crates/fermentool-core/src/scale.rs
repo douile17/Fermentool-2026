@@ -113,8 +113,17 @@ impl From<TransportError> for ScaleError {
     }
 }
 
+/// One MT-SICS weight reply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SicsReading {
+    pub weight_g: f64,
+    pub stable: bool,
+    /// The display step, read from the number's decimals (`740.5` -> 0.1 g).
+    pub resolution_g: f64,
+}
+
 /// Parse a MT-SICS "S"/"SI" reply: `"S <status> <value> <unit>\r\n"`.
-pub fn parse_sics_weight(reply: &[u8]) -> Result<(f64, bool), ScaleError> {
+pub fn parse_sics_weight(reply: &[u8]) -> Result<SicsReading, ScaleError> {
     let text = std::str::from_utf8(reply)
         .map_err(|e| ScaleError::Parse(e.to_string()))?
         .trim();
@@ -145,7 +154,12 @@ pub fn parse_sics_weight(reply: &[u8]) -> Result<(f64, bool), ScaleError> {
             parts[3]
         )));
     }
-    Ok((value, stable))
+    let decimals = parts[2].split_once('.').map_or(0, |(_, frac)| frac.len());
+    Ok(SicsReading {
+        weight_g: value,
+        stable,
+        resolution_g: 10f64.powi(-(decimals as i32)),
+    })
 }
 
 #[cfg(test)]
@@ -154,16 +168,23 @@ mod tests {
 
     #[test]
     fn parses_a_stable_reply() {
-        let (w, stable) = parse_sics_weight(b"S S      740.5 g\r\n").unwrap();
-        assert!((w - 740.5).abs() < 1e-9);
-        assert!(stable);
+        let r = parse_sics_weight(b"S S      740.5 g\r\n").unwrap();
+        assert!((r.weight_g - 740.5).abs() < 1e-9);
+        assert!(r.stable);
     }
 
     #[test]
     fn parses_a_dynamic_reply() {
-        let (w, stable) = parse_sics_weight(b"S D      740.6 g\r\n").unwrap();
-        assert!((w - 740.6).abs() < 1e-9);
-        assert!(!stable);
+        let r = parse_sics_weight(b"S D      740.6 g\r\n").unwrap();
+        assert!((r.weight_g - 740.6).abs() < 1e-9);
+        assert!(!r.stable);
+    }
+
+    #[test]
+    fn reads_the_resolution_from_the_decimals() {
+        assert_eq!(parse_sics_weight(b"S S      740.5 g\r\n").unwrap().resolution_g, 0.1);
+        assert_eq!(parse_sics_weight(b"S S     740.25 g\r\n").unwrap().resolution_g, 0.01);
+        assert_eq!(parse_sics_weight(b"S S        740 g\r\n").unwrap().resolution_g, 1.0);
     }
 
     #[test]

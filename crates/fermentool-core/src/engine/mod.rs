@@ -476,6 +476,9 @@ pub struct Engine<T: Transport> {
     /// Last balance reading `(grams, stable)`, for display only. `None` until
     /// a read succeeds, and again after any failed read.
     live_weight: Option<(f64, bool)>,
+    /// The balance's display step, from its last reply (sizes the tracking
+    /// window). 0.1 g until something has been read.
+    scale_resolution_g: f64,
     scale_density_g_per_ml: f64,
     /// Set from a tubing calibration (Task 12) for `control_var: Rpm` runs:
     /// mL/min delivered per commanded rpm, so `integrate_curve_mass` can
@@ -582,6 +585,7 @@ impl<T: Transport> Engine<T> {
             manual_refill_done_flag: false,
             last_rate_g_per_min: None,
             live_weight: None,
+            scale_resolution_g: 0.1,
             scale_density_g_per_ml: 1.0,
             rpm_to_ml_min: None,
         }
@@ -1351,8 +1355,10 @@ impl<T: Transport> Engine<T> {
             .map_err(scale::ScaleError::from)
             .and_then(|r| scale::parse_sics_weight(&r));
         match reply {
-            Ok(reading) => {
+            Ok(r) => {
+                let reading = (r.weight_g, r.stable);
                 self.scale_read_fails = 0;
+                self.scale_resolution_g = r.resolution_g;
                 self.live_weight = Some(reading);
                 Some(reading)
             }
