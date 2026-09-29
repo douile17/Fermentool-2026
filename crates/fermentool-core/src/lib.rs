@@ -10,5 +10,6 @@ pub mod control;
 pub mod engine;
 pub mod scale;
 pub mod store;
+pub mod tracking;
 pub mod trim;
 pub mod transport;
