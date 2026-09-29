@@ -150,6 +150,9 @@ pub struct DaemonStatus {
     /// `false`: the balance is unplugged or not answering. `None` when no
     /// scale is configured.
     pub scale_connected: Option<bool>,
+    /// Live balance reading, grams. `None` when unknown.
+    pub scale_weight_g: Option<f64>,
+    pub scale_stable: Option<bool>,
     pub scale_state: Option<crate::trim::ScaleState>,
     /// `None` when no scale is configured.
     pub trim_c: Option<f64>,
@@ -219,6 +222,8 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         allow_simulator: st.allow_simulator,
         scale_ok: st.scale_ok,
         scale_connected: st.scale_connected,
+        scale_weight_g: st.scale_weight_g,
+        scale_stable: st.scale_stable,
         scale_state: st.scale_state,
         trim_c: st.trim_c,
         rate_g_per_min: st.rate_g_per_min,
@@ -308,7 +313,22 @@ fn control_loop<T: Transport + SwapTransport>(
         if engine.tick_interval().is_none() {
             next_journal = None;
             next_write = None;
-            next_scale_probe = None;
+            // No run: read the balance about once a second, for the live
+            // weight on screen and to notice it being unplugged between runs.
+            if engine.scale_wanted() {
+                let due =
+                    *next_scale_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
+                if Instant::now() >= due {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        engine.probe_scale()
+                    }));
+                    let _ = events.send(current_status(engine, grace));
+                    next_scale_probe = Some(advance_past(due, LINK_PROBE_INTERVAL));
+                    continue;
+                }
+            } else {
+                next_scale_probe = None;
+            }
             // No run: keep the serial link's health current so a cable pulled
             // between runs still trips the alarm and the auto-reopen.
             if engine.serial_is_real() {
@@ -403,7 +423,10 @@ fn control_loop<T: Transport + SwapTransport>(
         let wait = match (next_journal, next_write) {
             (Some(j), Some(w)) => j.min(w).saturating_duration_since(Instant::now()),
             // Idle: wake for the link probe if one is scheduled, else just poll.
-            _ => next_probe
+            _ => [next_probe, next_scale_probe]
+                .into_iter()
+                .flatten()
+                .min()
                 .map(|p| p.saturating_duration_since(Instant::now()).min(IDLE_POLL))
                 .unwrap_or(IDLE_POLL),
         };

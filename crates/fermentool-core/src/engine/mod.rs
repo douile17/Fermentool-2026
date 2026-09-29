@@ -309,6 +309,11 @@ pub struct EngineStatus {
     /// reachable balance, both of which make `scale_ok` false. `None` when no
     /// scale is configured.
     pub scale_connected: Option<bool>,
+    /// Last balance reading in grams, and whether the balance called it
+    /// stable. `None` when no scale is configured, the link is down, or
+    /// nothing has been read yet.
+    pub scale_weight_g: Option<f64>,
+    pub scale_stable: Option<bool>,
     /// `None` when no scale is configured.
     pub scale_state: Option<trim::ScaleState>,
     /// `None` when no scale is configured.
@@ -468,6 +473,9 @@ pub struct Engine<T: Transport> {
     /// Diagnostic only (not fed back into `trim_c`, the cumulative mass
     /// balance drives the correction): the instantaneous measured rate.
     last_rate_g_per_min: Option<f64>,
+    /// Last balance reading `(grams, stable)`, for display only. `None` until
+    /// a read succeeds, and again after any failed read.
+    live_weight: Option<(f64, bool)>,
     scale_density_g_per_ml: f64,
     /// Set from a tubing calibration (Task 12) for `control_var: Rpm` runs:
     /// mL/min delivered per commanded rpm, so `integrate_curve_mass` can
@@ -573,6 +581,7 @@ impl<T: Transport> Engine<T> {
             manual_refill_mode: false,
             manual_refill_done_flag: false,
             last_rate_g_per_min: None,
+            live_weight: None,
             scale_density_g_per_ml: 1.0,
             rpm_to_ml_min: None,
         }
@@ -902,6 +911,8 @@ impl<T: Transport> Engine<T> {
             allow_simulator: self.allow_simulator,
             scale_ok: !scale_shown || (self.scale_ok && !self.scale_link_down()),
             scale_connected: scale_shown.then(|| !self.scale_link_down()),
+            scale_weight_g: self.live_weight.filter(|_| !self.scale_link_down()).map(|(w, _)| w),
+            scale_stable: self.live_weight.filter(|_| !self.scale_link_down()).map(|(_, s)| s),
             scale_state: scale_shown.then_some(self.scale_state),
             trim_c: scale_shown.then_some(self.trim_c),
             rate_g_per_min: scale_shown.then_some(self.last_rate_g_per_min).flatten(),
@@ -1321,6 +1332,49 @@ impl<T: Transport> Engine<T> {
         }
     }
 
+    /// One balance read, shared by [`scale_tick`](Self::scale_tick) and
+    /// [`probe_scale`](Self::probe_scale): updates the live weight and the
+    /// read-failure streak. `None` on any failure, or without asking at all
+    /// once the link is known down: each failed read can cost up to the
+    /// watchdog's timeout on the shared control thread, which would starve
+    /// the pump's 150 ms setpoint cadence. `recover_scale`, on its own
+    /// backoff, owns bringing the link back. A good read never clears
+    /// `scale_ok`: that alarm is sticky until `start_run`.
+    fn read_scale(&mut self) -> Option<(f64, bool)> {
+        if self.scale_link_down() {
+            return None;
+        }
+        let reply = self
+            .scale
+            .as_mut()?
+            .transaction(scale::SICS_IMMEDIATE)
+            .map_err(scale::ScaleError::from)
+            .and_then(|r| scale::parse_sics_weight(&r));
+        match reply {
+            Ok(reading) => {
+                self.scale_read_fails = 0;
+                self.live_weight = Some(reading);
+                Some(reading)
+            }
+            Err(_) => {
+                self.scale_read_fails = self.scale_read_fails.saturating_add(1);
+                self.live_weight = None;
+                None
+            }
+        }
+    }
+
+    /// Idle balance read, about once a second from the control loop: keeps
+    /// the live weight on screen and notices an unplugged balance between
+    /// runs. Does nothing while a run is active: a trimmed run reads the
+    /// balance through `scale_tick`, a plain one leaves it alone so its
+    /// setpoint writes are never held up.
+    pub fn probe_scale(&mut self) {
+        if self.active.is_none() {
+            let _ = self.read_scale();
+        }
+    }
+
     /// Read the scale (if configured and the active run opted in), advance the
     /// perturbation/refill state machine, and, while `Normal`, update `trim_c`
     /// from the cumulative mass balance. A no-op whenever there's no scale, no
@@ -1330,33 +1384,8 @@ impl<T: Transport> Engine<T> {
         if !wants_trim {
             return;
         }
-        // Once the link is known down, stop asking: each failed read can cost
-        // up to the watchdog's timeout on the shared control thread, which
-        // would starve the pump's 150 ms setpoint cadence. `recover_scale`,
-        // on its own backoff, owns bringing the link back.
-        if self.scale_link_down() {
+        let Some((weight_g, _stable)) = self.read_scale() else {
             return;
-        }
-        let Some(scale) = self.scale.as_mut() else {
-            return;
-        };
-        let reply = scale
-            .transaction(scale::SICS_IMMEDIATE)
-            .map_err(scale::ScaleError::from)
-            .and_then(|r| scale::parse_sics_weight(&r));
-
-        let weight_g = match reply {
-            Ok((w, _stable)) => {
-                // `scale_ok` is sticky: a good read clears the read-failure
-                // streak but must not erase an alarm the trim itself raised
-                // before the operator has seen it. Only `start_run` clears it.
-                self.scale_read_fails = 0;
-                w
-            }
-            Err(_) => {
-                self.scale_read_fails = self.scale_read_fails.saturating_add(1);
-                return;
-            }
         };
 
         // Snapshot so the (at most once per call) persistence write only
@@ -1524,6 +1553,7 @@ impl<T: Transport> Engine<T> {
         };
         self.scale = Some(Box::new(watchdog));
         self.scale_read_fails = 0;
+        self.live_weight = None;
         true
     }
 
@@ -2359,6 +2389,61 @@ mod tests {
             e.scale_tick(at(i));
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), at_trip);
+    }
+
+    #[test]
+    fn an_idle_probe_reports_the_live_weight() {
+        let mut e = engine();
+        e.attach_scale(
+            Some(Box::new(ScriptedScale::new(&[742.5]))),
+            scale_cfg("sim-scale"),
+        );
+        assert_eq!(e.status().scale_weight_g, None, "nothing read yet");
+        e.probe_scale();
+        let st = e.status();
+        assert_eq!(st.scale_weight_g, Some(742.5));
+        assert_eq!(st.scale_stable, Some(true));
+    }
+
+    #[test]
+    fn idle_probes_notice_an_unplugged_balance() {
+        let mut e = engine();
+        e.attach_scale(
+            Some(Box::new(ScriptedScale::new(&[742.5]))), // then times out
+            scale_cfg("sim-scale"),
+        );
+        e.probe_scale();
+        for _ in 0..REOPEN_AFTER_WRITE_FAILS {
+            e.probe_scale();
+        }
+        let st = e.status();
+        assert_eq!(st.scale_connected, Some(false));
+        assert_eq!(st.scale_weight_g, None, "a stale weight must not look live");
+    }
+
+    #[test]
+    fn the_idle_probe_does_nothing_while_a_run_is_active() {
+        // Mid-run the balance is read by scale_tick (trimmed runs) or not at
+        // all (plain runs), never by the idle probe.
+        let mut e = engine();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        e.attach_scale(
+            Some(Box::new(CountingFailingScale { calls: calls.clone() })),
+            scale_cfg("sim-scale"),
+        );
+        e.start_run(linear_cfg(), t0()).unwrap();
+        e.probe_scale();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_trimmed_run_keeps_the_live_weight_current() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0, 999.0])));
+        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
+        e.scale_tick(t0());
+        e.scale_tick(at(1));
+        assert_eq!(e.status().scale_weight_g, Some(999.0));
     }
 
     #[test]

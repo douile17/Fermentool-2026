@@ -54,9 +54,14 @@
     }
     const trimOn = !!s.active?.gravimetric_trim;
     const c = trimOn && s.trim_c != null ? ` · ×${s.trim_c.toFixed(3)}` : '';
+    // Live reading; "~" while the balance itself says it is still moving.
+    const w =
+      s.scale_weight_g != null
+        ? ` · ${s.scale_weight_g.toFixed(1)} g${s.scale_stable === false ? ' ~' : ''}`
+        : '';
     return {
       tone: 'ok',
-      label: `Balance · ${SCALE_STATES[s.scale_state] ?? s.scale_state}${c}`,
+      label: `Balance${w} · ${SCALE_STATES[s.scale_state] ?? s.scale_state}${c}`,
       title: trimOn
         ? `Gravimetric trim active: the pump setpoint is multiplied by ${s.trim_c?.toFixed(3)}.`
         : 'Balance connected. The trim applies only to runs started with it enabled.',
