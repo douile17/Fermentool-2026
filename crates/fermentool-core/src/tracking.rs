@@ -88,6 +88,59 @@ pub fn settle_anchor(
     }
 }
 
+/// Coefficient of determination of `delivered` against `required` (both
+/// cumulative, same length): `1 - sum((d - r)^2) / sum((r - mean r)^2)`.
+pub fn r_squared(required: &[f64], delivered: &[f64]) -> Option<f64> {
+    if required.len() != delivered.len() || required.len() < 2 {
+        return None;
+    }
+    let mean = required.iter().sum::<f64>() / required.len() as f64;
+    let ss_tot: f64 = required.iter().map(|r| (r - mean).powi(2)).sum();
+    let ss_res: f64 = required.iter().zip(delivered).map(|(r, d)| (d - r).powi(2)).sum();
+    (ss_tot > 0.0).then(|| 1.0 - ss_res / ss_tot)
+}
+
+/// µ (per hour) of the exponential feed that best explains a cumulative
+/// delivered volume: least squares on `V(t) = F0/µ (e^(µt) - 1)`, F0 in
+/// closed form for each µ, µ by golden-section search on `ln µ` over
+/// `[guess/4, guess*4]`. `points` are `(t_hours, delivered_ml)`.
+pub fn fit_exponential_mu(points: &[(f64, f64)], mu_guess: f64) -> Option<f64> {
+    if points.len() < 3 || mu_guess.is_nan() || mu_guess <= 0.0 {
+        return None;
+    }
+    let sse = |mu: f64| {
+        let g: Vec<f64> = points.iter().map(|(t, _)| ((mu * t).exp() - 1.0) / mu).collect();
+        let gg: f64 = g.iter().map(|x| x * x).sum();
+        if gg <= 0.0 {
+            return f64::INFINITY;
+        }
+        let f0 = points.iter().zip(&g).map(|((_, v), x)| v * x).sum::<f64>() / gg;
+        points.iter().zip(&g).map(|((_, v), x)| (v - f0 * x).powi(2)).sum::<f64>()
+    };
+    let phi = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut a, mut b) = ((mu_guess / 4.0).ln(), (mu_guess * 4.0).ln());
+    for _ in 0..100 {
+        let c = b - phi * (b - a);
+        let d = a + phi * (b - a);
+        if sse(c.exp()) < sse(d.exp()) {
+            b = d;
+        } else {
+            a = c;
+        }
+    }
+    let mu = ((a + b) / 2.0).exp();
+    mu.is_finite().then_some(mu)
+}
+
+/// The µ an exponential curve asks for, whatever its parameter mode.
+pub fn requested_mu_per_hour(spec: &fermentool_curves::CurveSpec) -> Option<f64> {
+    if spec.kind() != fermentool_curves::CurveKind::Exponential {
+        return None;
+    }
+    let (s, e, h) = (spec.start, spec.effective_end(), spec.duration_hours());
+    (s > 0.0 && e > 0.0 && h > 0.0).then(|| (e / s).ln() / h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +226,39 @@ mod tests {
     fn a_refill_is_estimated_from_the_ratio() {
         let a = Anchor { weight_g: 100.0, commanded_g: 50.0, refill: true };
         assert!((settle_anchor(&a, 1100.0, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn r_squared_is_one_for_a_perfect_track_and_lower_otherwise() {
+        let req: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        assert!((r_squared(&req, &req).unwrap() - 1.0).abs() < 1e-12);
+        let off: Vec<f64> = req.iter().map(|v| v * 0.9).collect();
+        assert!(r_squared(&req, &off).unwrap() < 0.99);
+    }
+
+    #[test]
+    fn fits_the_mu_of_an_exponential_cumulative_volume() {
+        // F(t) = 2 e^(0.15 t) mL/h, so V(t) = 2/0.15 (e^(0.15 t) - 1).
+        let pts: Vec<(f64, f64)> = (0..=200)
+            .map(|i| {
+                let t = i as f64 * 0.1;
+                (t, 2.0 / 0.15 * ((0.15 * t).exp() - 1.0))
+            })
+            .collect();
+        let mu = fit_exponential_mu(&pts, 0.1).unwrap();
+        assert!((mu - 0.15).abs() < 1e-4, "got {mu}");
+    }
+
+    #[test]
+    fn requested_mu_for_both_exponential_modes_and_none_otherwise() {
+        use fermentool_curves::CurveSpec;
+        use std::time::Duration;
+        let d = Duration::from_secs(10 * 3600);
+        let physio = CurveSpec::exponential_physio(1.0, 0.15, d);
+        assert!((requested_mu_per_hour(&physio).unwrap() - 0.15).abs() < 1e-9);
+        let ends = CurveSpec::exponential_endpoints(1.0, (1.5f64).exp(), d);
+        assert!((requested_mu_per_hour(&ends).unwrap() - 0.15).abs() < 1e-9);
+        assert_eq!(requested_mu_per_hour(&CurveSpec::linear(1.0, 2.0, d)), None);
     }
 
     #[test]
