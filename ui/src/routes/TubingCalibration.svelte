@@ -342,13 +342,17 @@
     <div class="group">
       <div class="eyebrow">Weighing</div>
       <div class="grid">
-        <label class="field"><span>Feed density (g/mL)</span>
-          <input type="number" step="0.01" min="0" bind:value={d.density_g_per_ml} disabled={locked} onchange={persist} />
+        <label class="field"><span>Liquid density (g/mL)</span>
+          <input type="number" step="0.001" min="0" bind:value={d.density_g_per_ml} disabled={locked} onchange={persist} />
         </label>
         <label class="field"><span>Operator (optional)</span>
           <input type="text" bind:value={d.operator} onchange={persist} />
         </label>
       </div>
+      <p class="help">
+        Density of the liquid pumped during the calibration, to turn the weighed grams into mL.
+        Water or dilute media ≈ 1.00 (not the concentration: 5 g/L is still ≈ 1.00 g/mL).
+      </p>
     </div>
 
     <div class="group">
