@@ -291,7 +291,7 @@
     <p class="muted">Loading…</p>
   {:else}
     <div class="group">
-      <div class="eyebrow">Tube and setpoint</div>
+      <div class="eyebrow">Tube</div>
       <div class="grid">
         <label class="field"><span>Tubing lot</span>
           <input type="text" bind:value={d.tubing_lot_id} disabled={locked} onchange={persist} placeholder="e.g. LOT-2409" />
@@ -305,6 +305,15 @@
         <label class="field"><span>Outer Ø (mm)</span>
           <input type="number" step="0.1" min="0" bind:value={d.outer_diameter_mm} disabled={locked} onchange={persist} />
         </label>
+      </div>
+      {#if Number(d.inner_diameter_mm) > 0 && Number(d.outer_diameter_mm) > 0 && Number(d.outer_diameter_mm) <= Number(d.inner_diameter_mm)}
+        <p class="warn">The outer Ø must be larger than the inner Ø.</p>
+      {/if}
+    </div>
+
+    <div class="group">
+      <div class="eyebrow">Pumping</div>
+      <div class="grid">
         <div class="field"><span>Control</span>
           <div class="seg">
             <button disabled={locked} class:on={d.control_var === 'ml_min'} onclick={() => { d.control_var = 'ml_min'; persist(); }}>ml/min</button>
@@ -320,11 +329,21 @@
         <label class="field"><span>Setpoint ({unit})</span>
           <input type="number" step="0.1" min="0" bind:value={d.setpoint} disabled={locked} onchange={persist} />
         </label>
-        <label class="field"><span>Feed density (g/mL)</span>
-          <input type="number" step="0.01" min="0" bind:value={d.density_g_per_ml} disabled={locked} onchange={persist} />
-        </label>
         <label class="field"><span>Calibration time (min)</span>
           <input type="number" step="0.5" min="0" bind:value={d.target_min} onchange={persist} />
+        </label>
+      </div>
+      <p class="help">
+        The pump runs each burst for the calibration time, then stops by itself (you can stop it
+        earlier). The flow is computed from the time it really pumped.
+      </p>
+    </div>
+
+    <div class="group">
+      <div class="eyebrow">Weighing</div>
+      <div class="grid">
+        <label class="field"><span>Feed density (g/mL)</span>
+          <input type="number" step="0.01" min="0" bind:value={d.density_g_per_ml} disabled={locked} onchange={persist} />
         </label>
         <label class="field"><span>Operator (optional)</span>
           <input type="text" bind:value={d.operator} onchange={persist} />
@@ -352,9 +371,6 @@
         {/each}
       </ol>
 
-      {#if Number(d.inner_diameter_mm) > 0 && Number(d.outer_diameter_mm) > 0 && Number(d.outer_diameter_mm) <= Number(d.inner_diameter_mm)}
-        <p class="warn">The outer Ø must be larger than the inner Ø.</p>
-      {/if}
       {#if otherRunActive}
         <p class="warn">Another run is active. Stop it before starting a burst.</p>
       {/if}
@@ -477,6 +493,7 @@
   .weigh { width: 180px; }
   .confirm { font-size: 13px; align-self: center; }
   .warn { font-size: 13px; color: var(--danger); margin: var(--s-3) 0 0; }
+  .help { font-size: 12px; color: var(--muted); margin: var(--s-3) 0 0; max-width: 70ch; line-height: 1.4; }
   .result {
     display: flex;
     flex-wrap: wrap;
