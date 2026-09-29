@@ -323,7 +323,7 @@
         <label class="field"><span>Feed density (g/mL)</span>
           <input type="number" step="0.01" min="0" bind:value={d.density_g_per_ml} disabled={locked} onchange={persist} />
         </label>
-        <label class="field"><span>Burst length (min, timer only)</span>
+        <label class="field"><span>Calibration time (min)</span>
           <input type="number" step="0.5" min="0" bind:value={d.target_min} onchange={persist} />
         </label>
         <label class="field"><span>Operator (optional)</span>
