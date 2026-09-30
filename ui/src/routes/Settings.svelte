@@ -37,6 +37,61 @@
     saving = false;
   }
 
+  // Balance: its own card and Save, applied live by the daemon (no restart).
+  let ports = $state([]);
+  let scalePort = $state('');
+  let scaleCustom = $state('');
+  let scaleBaud = $state(9600);
+  let scaleDensity = $state(1.0);
+  let scaleErr = $state(null);
+  let scaleMsg = $state(null);
+  let scaleSaving = $state(false);
+  let scaleLoaded = false;
+
+  function rescanPorts() {
+    get('/api/serial/ports')
+      .then((r) => (ports = r.ports ?? []))
+      .catch((e) => (scaleErr = e.message));
+  }
+  $effect(() => rescanPorts());
+
+  // Seed the balance fields once, from the first config load.
+  $effect(() => {
+    if (!cfg || scaleLoaded) return;
+    scaleLoaded = true;
+    const p = cfg.scale?.path?.trim() ?? '';
+    scalePort = p;
+    scaleCustom = p;
+    scaleBaud = cfg.scale?.baud ?? 9600;
+    scaleDensity = cfg.scale?.density_g_per_ml ?? 1.0;
+  });
+
+  const knownPort = $derived(scalePort === '' || ports.some((p) => p.name === scalePort));
+  const pumpPort = $derived(cfg?.serial?.path ?? '');
+
+  async function saveScale() {
+    scaleSaving = true;
+    scaleErr = null;
+    scaleMsg = null;
+    try {
+      const path = scalePort === '__custom' ? scaleCustom.trim() : scalePort;
+      if (path !== '' && path === pumpPort) throw new Error(`${path} is the pump's port, pick the balance's port`);
+      const density = Number(scaleDensity);
+      if (!(density > 0)) throw new Error('Liquid density must be a positive number (g/mL)');
+      const fresh = await get('/api/config');
+      fresh.scale = { path, baud: Number(scaleBaud), density_g_per_ml: density };
+      const r = await put('/api/config', fresh);
+      cfg.scale = fresh.scale;
+      if (path === '') scaleMsg = 'Saved: no balance.';
+      else if (r.scale_connected === false)
+        scaleMsg = `Saved, but the balance does not answer on ${path} yet. Check the port, the cable and the baud; Fermentool keeps retrying.`;
+      else scaleMsg = `Saved: balance on ${path}.`;
+    } catch (e) {
+      scaleErr = e.message;
+    }
+    scaleSaving = false;
+  }
+
   async function shutdown() {
     try {
       await post('/api/shutdown');
@@ -95,6 +150,67 @@
 
     <div class="foot">
       <button class="btn-primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
+    </div>
+  {/if}
+</section>
+
+<section class="card">
+  <div class="card-head"><div><div class="eyebrow">Settings</div><h2>Balance</h2></div></div>
+
+  {#if scaleErr}<div class="err" style="margin-bottom:16px">{scaleErr}</div>{/if}
+  {#if scaleMsg}<div class="ok" style="margin-bottom:16px">{scaleMsg}</div>{/if}
+
+  {#if !cfg}
+    <p class="muted">Loading…</p>
+  {:else}
+    <p class="field-note" style="margin-bottom:16px">
+      The balance under the feed bottle (Ohaus Ranger, MT-SICS) that the gravimetric trim reads.
+      Applied as soon as you save, no restart. Its live weight then shows at the bottom of the
+      sidebar.
+    </p>
+    <div class="grid">
+      <label class="field"><span>Port</span>
+        <select bind:value={scalePort}>
+          <option value="">No balance</option>
+          {#each ports as p}
+            <option value={p.name} disabled={p.name === pumpPort}>
+              {p.name}{p.product ? ` · ${p.product}` : ''}{p.name === pumpPort ? ' (pump)' : ''}
+            </option>
+          {/each}
+          {#if !knownPort && scalePort !== '__custom'}
+            <option value={scalePort}>{scalePort} (not detected)</option>
+          {/if}
+          <option value="__custom">Other port…</option>
+        </select>
+      </label>
+
+      {#if scalePort === '__custom'}
+        <label class="field"><span>Port name</span>
+          <input type="text" placeholder="COM5" bind:value={scaleCustom} />
+        </label>
+      {/if}
+
+      <label class="field"><span>Baud</span>
+        <select bind:value={scaleBaud}>
+          {#each [1200, 2400, 4800, 9600, 19200, 38400] as b}<option value={b}>{b}</option>{/each}
+        </select>
+      </label>
+
+      <label class="field"><span>Liquid density (g/mL)</span>
+        <input type="number" step="0.01" min="0.5" max="2" bind:value={scaleDensity} />
+      </label>
+
+      <p class="field-note">
+        Baud must match the balance's own Communications menu (9600 by default on the Ranger 7000).
+        Density converts the weighed grams to mL: water and dilute feeds ≈ 1.00.
+      </p>
+    </div>
+
+    <div class="foot">
+      <button class="btn-primary" disabled={scaleSaving} onclick={saveScale}>
+        {scaleSaving ? 'Connecting…' : 'Save balance'}
+      </button>
+      <button class="btn-ghost" onclick={rescanPorts}>Rescan ports</button>
     </div>
   {/if}
 </section>

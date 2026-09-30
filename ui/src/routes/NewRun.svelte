@@ -48,6 +48,9 @@
       })
       .catch(() => {});
   });
+  // The trim only applies with a balance configured; a "Run again" of a
+  // trimmed run on a PC without one keeps the wish but shows why it is off.
+  const trimOn = $derived(scaleConfigured && f.gravimetric_trim);
 
   const unit = $derived(unitFor(f.control_var));
   const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS);
@@ -153,20 +156,24 @@
   // Recorded tubing calibrations, newest first. Only those made in the run's
   // own unit can seed it (the daemon refuses the others).
   let calibrations = $state([]);
+  let calsLoaded = $state(false);
   $effect(() => {
     if (!f.gravimetric_trim) return;
     get('/api/calibrations')
       .then((rows) => (calibrations = rows ?? []))
-      .catch(() => (calibrations = []));
+      .catch(() => (calibrations = []))
+      .finally(() => (calsLoaded = true));
   });
   const calMatches = $derived(calibrations.filter((c) => c.control_var === f.control_var));
-  // Drop a selection that no longer matches the run's unit.
+  // Drop a selection that no longer matches the run's unit. Only once the list
+  // has loaded: before that, a calibration seeded by "Run again" would look
+  // unknown and be wiped.
   $effect(() => {
     const id = f.tubing_calibration_id;
-    if (id != null && !calMatches.some((c) => c.id === id)) f.tubing_calibration_id = null;
+    if (calsLoaded && id != null && !calMatches.some((c) => c.id === id)) f.tubing_calibration_id = null;
   });
   const needsCalibration = $derived(
-    f.gravimetric_trim && f.control_var === 'rpm' && f.tubing_calibration_id == null,
+    trimOn && f.control_var === 'rpm' && f.tubing_calibration_id == null,
   );
   const calLabel = (c) =>
     `${c.tubing_lot_id}${c.internal_ref ? ` (${c.internal_ref})` : ''} · Ø ${num(c.inner_diameter_mm, 1)}/${num(c.outer_diameter_mm, 1)} mm · ${stamp(c.created_at)} · CV ${num(c.cv_pct, 1)} %` +
@@ -185,8 +192,8 @@
         direction: f.direction,
         pump_addr: pumpAddr,
         curve: curveSpec(),
-        gravimetric_trim: f.gravimetric_trim,
-        tubing_calibration_id: f.gravimetric_trim ? f.tubing_calibration_id : null,
+        gravimetric_trim: trimOn,
+        tubing_calibration_id: trimOn ? f.tubing_calibration_id : null,
       });
       app.tab = 'overview';
     } catch (e) {
@@ -267,9 +274,13 @@
             <input type="checkbox" bind:checked={f.gravimetric_trim} />
             <span>Enable gravimetric trim (uses the configured scale to correct the feed rate over time)</span>
           </label>
+        {:else if f.gravimetric_trim}
+          <p class="cal-note">
+            This run used the gravimetric trim. Set up the balance in Settings to use it again.
+          </p>
         {/if}
       </div>
-      {#if f.gravimetric_trim}
+      {#if trimOn}
         <div class="cal">
           {#if calMatches.length}
             <label class="field"><span>Tubing calibration</span>

@@ -103,6 +103,8 @@
       value: c.start,
       mu_per_hour: c.params.mu_per_hour ?? 0.15,
       steepness: c.params.steepness ?? 8,
+      gravimetric_trim: !!run.gravimetric_trim,
+      tubing_calibration_id: run.gravimetric_trim ? (run.tubing_calibration_id ?? null) : null,
     };
     app.tab = 'new';
   }
