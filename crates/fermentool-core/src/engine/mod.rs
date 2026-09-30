@@ -1442,8 +1442,16 @@ impl<T: Transport> Engine<T> {
                 self.live_weight = Some(reading);
                 Some(reading)
             }
-            Err(_) => {
+            Err(e) => {
+                // Log the first failure of a streak and the one that takes
+                // the link down: enough to see why, without a line a second.
+                if self.scale_read_fails == 0 {
+                    tracing::warn!("{e}");
+                }
                 self.scale_read_fails = self.scale_read_fails.saturating_add(1);
+                if self.scale_read_fails == REOPEN_AFTER_WRITE_FAILS {
+                    tracing::warn!("{e}; balance link down after {REOPEN_AFTER_WRITE_FAILS} failed reads");
+                }
                 self.live_weight = None;
                 None
             }
@@ -1744,6 +1752,11 @@ impl<T: Transport> Engine<T> {
         if !self.scale_wanted() || !self.scale_link_down() {
             return true;
         }
+        // Let go of the stale link first: a COM port is exclusive on Windows,
+        // so opening it again while the old worker still holds it always
+        // fails. The worker closes it asynchronously; if this attempt is too
+        // early, the next retry (1 s later) gets the port.
+        self.scale = None;
         let Some(watchdog) = scale::open_watchdogged(&self.scale_cfg) else {
             return false;
         };
@@ -1751,6 +1764,38 @@ impl<T: Transport> Engine<T> {
         self.scale_read_fails = 0;
         self.live_weight = None;
         true
+    }
+
+    /// Apply a `[scale]` section saved from Settings, without a restart. A
+    /// density-only change keeps the open link; a new port or baud closes the
+    /// old link and opens the new one (an empty port removes the balance).
+    /// Refused while a trimmed run is active: its cumulative accounting is
+    /// tied to this balance and this density. Returns whether the balance is
+    /// connected afterwards; a port that does not open yet is left to the
+    /// background retry.
+    pub fn reconfigure_scale(&mut self, cfg: ScaleConfig) -> std::result::Result<bool, String> {
+        if self.active.as_ref().is_some_and(|a| a.gravimetric_trim) {
+            return Err("stop the gravimetric run before changing the balance settings".into());
+        }
+        let same_link = cfg.path.trim() == self.scale_cfg.path.trim() && cfg.baud == self.scale_cfg.baud;
+        if same_link && !self.scale_link_down() {
+            self.scale_density_g_per_ml = cfg.density_g_per_ml;
+            self.scale_cfg = cfg;
+            return Ok(true);
+        }
+        let had_link = self.scale.take().is_some();
+        self.scale_read_fails = 0;
+        self.live_weight = None;
+        self.attach_scale(None, cfg);
+        if !self.scale_wanted() {
+            return Ok(false);
+        }
+        if had_link {
+            // The old worker closes its port asynchronously; reopening the
+            // same COM port before that fails with "access denied".
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        Ok(self.recover_scale() && !self.scale_link_down())
     }
 
     #[cfg(test)]
@@ -2597,6 +2642,39 @@ mod tests {
         assert!(e.recover_scale());
     }
 
+    /// Always times out; flags when the engine lets go of it (the worker
+    /// closing its COM port, in the real transport).
+    struct DropFlagScale(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Transport for DropFlagScale {
+        fn transaction(&mut self, _: &[u8]) -> std::result::Result<Vec<u8>, fermentool_modbus::TransportError> {
+            Err(fermentool_modbus::TransportError::Timeout)
+        }
+    }
+    impl Drop for DropFlagScale {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn recover_scale_releases_the_stale_link_before_reopening_the_port() {
+        // A COM port is exclusive on Windows: reopening it while the stale
+        // link still holds it fails every time, so an idle balance that
+        // missed a few reads stayed "disconnected" for good.
+        let mut e = engine();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        e.attach_scale(
+            Some(Box::new(DropFlagScale(dropped.clone()))),
+            scale_cfg("NOPE_NOT_A_REAL_PORT_99999"),
+        );
+        for _ in 0..REOPEN_AFTER_WRITE_FAILS {
+            e.probe_scale();
+        }
+        assert!(e.scale_link_down());
+        assert!(!e.recover_scale());
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst), "stale link still holds the port");
+    }
+
     #[test]
     fn recover_scale_stays_down_when_the_port_will_not_open() {
         let mut e = engine();
@@ -2605,6 +2683,50 @@ mod tests {
         assert!(e.scale_link_down());
         assert!(!e.recover_scale());
         assert!(e.scale_link_down());
+    }
+
+    // ---- scale settings from the UI ----
+
+    #[test]
+    fn configuring_a_scale_from_settings_shows_it_without_a_restart() {
+        let mut e = engine();
+        assert_eq!(e.status().scale_state, None, "fresh install: no balance");
+        let connected = e.reconfigure_scale(scale_cfg("NOPE_NOT_A_REAL_PORT_99999")).unwrap();
+        assert!(!connected);
+        let st = e.status();
+        assert_eq!(st.scale_connected, Some(false));
+        assert!(st.scale_state.is_some());
+        assert!(e.scale_recovery_wanted(), "the background retry takes over");
+    }
+
+    #[test]
+    fn clearing_the_scale_port_removes_the_balance() {
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[1000.0]))), scale_cfg("sim-scale"));
+        e.reconfigure_scale(ScaleConfig::default()).unwrap();
+        let st = e.status();
+        assert_eq!(st.scale_state, None);
+        assert_eq!(st.scale_connected, None);
+        assert!(!e.scale_recovery_wanted());
+    }
+
+    #[test]
+    fn a_density_change_keeps_the_open_link() {
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[742.5]))), scale_cfg("sim-scale"));
+        let mut cfg = scale_cfg("sim-scale");
+        cfg.density_g_per_ml = 1.18;
+        assert!(e.reconfigure_scale(cfg).unwrap());
+        e.probe_scale();
+        assert_eq!(e.status().scale_weight_g, Some(742.5), "same scripted link, not reopened");
+    }
+
+    #[test]
+    fn the_scale_cannot_be_changed_during_a_trimmed_run() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0; 10])));
+        e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
+        assert!(e.reconfigure_scale(ScaleConfig::default()).is_err());
     }
 
     // ---- tubing calibration gate (Task 12) ----

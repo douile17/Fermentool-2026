@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, oneshot};
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::Transport;
 
-use crate::config::SerialConfig;
+use crate::config::{ScaleConfig, SerialConfig};
 use crate::engine::{
     ActiveStatus, Engine, ErrDetail, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome,
     REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
@@ -104,6 +104,9 @@ pub enum Command {
     /// engine, so enabling simulator runs in Settings takes effect without a
     /// reconnect or restart.
     SetAllowSimulator(bool, oneshot::Sender<()>),
+    /// Apply a `[scale]` section saved from Settings to the live engine.
+    /// Replies whether the balance is connected afterwards.
+    SetScale(ScaleConfig, oneshot::Sender<Result<bool, String>>),
     /// Operator-declared "about to change the bottle", ahead of the automatic
     /// weight-jump threshold.
     TriggerRefillMode(oneshot::Sender<()>),
@@ -742,6 +745,10 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         Command::SetAllowSimulator(allow, reply) => {
             engine.set_allow_simulator(allow);
             let _ = reply.send(());
+            true
+        }
+        Command::SetScale(cfg, reply) => {
+            let _ = reply.send(engine.reconfigure_scale(cfg));
             true
         }
         Command::TriggerRefillMode(reply) => {

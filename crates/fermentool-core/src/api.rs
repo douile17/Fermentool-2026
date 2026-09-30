@@ -162,6 +162,27 @@ async fn get_config(State(s): State<AppState>) -> Response {
 }
 
 async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiResult<Response> {
+    if !(new.scale.density_g_per_ml.is_finite() && new.scale.density_g_per_ml > 0.0) {
+        return Err(ApiError::Bad("liquid density must be a positive number (g/mL)".into()));
+    }
+    // A changed `[scale]` is applied live (Settings, Balance section), before
+    // saving: a refusal (trimmed run active) must not leave the file ahead of
+    // the engine.
+    let old_scale = s.config.read().await.scale.clone();
+    let scale_changed = old_scale.path.trim() != new.scale.path.trim()
+        || old_scale.baud != new.scale.baud
+        || old_scale.density_g_per_ml != new.scale.density_g_per_ml;
+    let scale_connected = if scale_changed {
+        Some(
+            s.control
+                .call(|reply| Command::SetScale(new.scale.clone(), reply))
+                .await
+                .map_err(|_| ApiError::Down)?
+                .map_err(ApiError::Conflict)?,
+        )
+    } else {
+        None
+    };
     new.save(&s.config_path)
         .map_err(|e| ApiError::Bad(e.to_string()))?;
     *s.config.write().await = new.clone();
@@ -174,7 +195,8 @@ async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiRe
         .await;
     Ok(Json(json!({
         "saved": true,
-        "note": "serial port, baud and pump address changes apply on the next Connect; other changes take effect on restart"
+        "scale_connected": scale_connected,
+        "note": "pump port, baud and address changes apply on the next Connect; balance changes apply now; API port and log level on restart"
     }))
     .into_response())
 }
