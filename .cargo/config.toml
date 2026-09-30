@@ -1,0 +1,7 @@
+# Link the MSVC C runtime statically so the daemon (and every exe built here)
+# runs on a fresh Windows without the Visual C++ Redistributable. Without
+# this, fermentool-core.exe needs VCRUNTIME140.dll and, spawned detached by the
+# Tauri window (which Tauri already links statically), fails silently on a
+# clean machine: the window opens but never reaches its daemon.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
