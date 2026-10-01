@@ -18,6 +18,9 @@
   --muted: #64797d;
   --danger: #d64545;
   --danger-bg: #fbecec;
+  /* Measured (weighed) feed: warm, so it stands out against the teal/green
+     requested curve without reading as an alarm red. */
+  --measured: #e07800;
 
   --radius: 14px;
   --radius-ctl: 9px;
@@ -49,6 +52,7 @@
     --muted: #8ea5a5;
     --danger: #f4756f;
     --danger-bg: #35201f;
+    --measured: #ffad42;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.55);
   }
@@ -70,6 +74,7 @@
   --muted: #8ea5a5;
   --danger: #f4756f;
   --danger-bg: #35201f;
+  --measured: #ffad42;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.55);
 }

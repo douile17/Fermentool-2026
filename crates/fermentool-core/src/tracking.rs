@@ -5,9 +5,49 @@ use serde::{Deserialize, Serialize};
 
 use crate::trim::{decimate, theil_sen_slope, MAX_SLOPE_POINTS, TRIM_MAX, TRIM_MIN};
 
+/// How far c may move from 1: `[1/(1+p), 1+p]` for a ±p limit, so a pump
+/// running short and one running long get the same room. The default ±25 %
+/// is `[0.80, 1.25]`. Set per bench in Settings (`[scale] trim_limit_pct`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bounds {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Bounds {
+    pub fn from_limit_pct(pct: f64) -> Self {
+        let max = 1.0 + pct.max(0.0) / 100.0;
+        Self { min: 1.0 / max, max }
+    }
+
+    pub fn clamp(self, c: f64) -> f64 {
+        c.clamp(self.min, self.max)
+    }
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self { min: TRIM_MIN, max: TRIM_MAX }
+    }
+}
+
 /// A slope needs at least this many balance steps of commanded mass, so the
-/// balance's rounding is a small part of what it measures.
-pub const MIN_WINDOW_RESOLUTIONS: f64 = 200.0;
+/// balance's rounding is a small part of what it measures. 50 steps (5 g on
+/// a 0.1 g balance) give a first estimate within a few %, early in the run;
+/// 200 made a 2 ml/min run wait 10 min before any correction.
+pub const MIN_WINDOW_RESOLUTIONS: f64 = 50.0;
+/// Once this much history exists, the slope is taken over it instead: a 5 g
+/// window kept for the whole run made c swing ±10 % in minutes on balance
+/// noise and pump pulsation (run 19, 2 ml/min). 20 g, and at least 5 min.
+pub const SETTLED_WINDOW_RESOLUTIONS: f64 = 200.0;
+pub const SETTLED_WINDOW_S: f64 = 300.0;
+/// Largest change of c per update once the ratio rests on a settled window:
+/// slow drift (tube wear, temperature) needs no more, and it keeps a noisy
+/// update from moving the pump by more than 3 % a minute.
+pub const SETTLED_C_STEP: f64 = 0.005;
+/// Before the first ratio exists, a deficit this many balance steps wide is
+/// read as rounding and start-up noise, not as the pump being off.
+pub const EARLY_DEADBAND_RESOLUTIONS: f64 = 3.0;
 /// ...and at least this long, so pump pulsation averages out.
 pub const MIN_WINDOW_S: f64 = 120.0;
 /// Time over which a cumulative deficit is paid back (10 min time constant).
@@ -27,21 +67,35 @@ pub struct TrackPoint {
     pub delivered_g: f64,
 }
 
-/// The pump's real delivered / commanded ratio: Theil-Sen slope of delivered
-/// vs commanded over the shortest recent window holding enough mass and
-/// time. `None` until such a window exists.
-pub fn delivery_ratio(points: &[TrackPoint], resolution_g: f64) -> Option<f64> {
+/// The pump's real delivered / commanded ratio, and whether it rests on a
+/// settled window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ratio {
+    pub k: f64,
+    pub settled: bool,
+}
+
+/// Theil-Sen slope of delivered vs commanded over the shortest recent window
+/// holding the settled mass and time when the history allows it, else over
+/// the shortest one holding the minimum. `None` until even that exists.
+pub fn delivery_ratio(points: &[TrackPoint], resolution_g: f64) -> Option<Ratio> {
     let last = points.last()?;
-    let min_mass = MIN_WINDOW_RESOLUTIONS * resolution_g;
-    let start = points.iter().rposition(|p| {
-        last.commanded_g - p.commanded_g >= min_mass && last.t_s - p.t_s >= MIN_WINDOW_S
-    })?;
+    let window = |mass_steps: f64, secs: f64| {
+        let mass = mass_steps * resolution_g;
+        points
+            .iter()
+            .rposition(|p| last.commanded_g - p.commanded_g >= mass && last.t_s - p.t_s >= secs)
+    };
+    let (start, settled) = match window(SETTLED_WINDOW_RESOLUTIONS, SETTLED_WINDOW_S) {
+        Some(s) => (s, true),
+        None => (window(MIN_WINDOW_RESOLUTIONS, MIN_WINDOW_S)?, false),
+    };
     let xy: Vec<(f64, f64)> = points[start..]
         .iter()
         .map(|p| (p.commanded_g, p.delivered_g))
         .collect();
     let k = theil_sen_slope(&decimate(&xy, MAX_SLOPE_POINTS))?;
-    k.is_finite().then_some(k.max(0.0))
+    k.is_finite().then_some(Ratio { k: k.max(0.0), settled })
 }
 
 /// Bound the point history to `cap`: the newer half stays at full density,
@@ -65,20 +119,96 @@ pub fn thin(points: &[TrackPoint], cap: usize) -> Vec<TrackPoint> {
 
 /// Next c: feed-forward `1/k`, plus paying back the cumulative deficit over
 /// `DEFICIT_HORIZON_S`, moved by at most `MAX_C_STEP` and kept in bounds.
-pub fn next_c(prev_c: f64, k: f64, deficit_g: f64, demand_rate_g_s: f64) -> f64 {
-    let base = if k > 1e-9 { 1.0 / k } else { TRIM_MAX };
+pub fn next_c(prev_c: f64, k: f64, deficit_g: f64, demand_rate_g_s: f64, bounds: Bounds) -> f64 {
+    next_c_stepped(prev_c, k, deficit_g, demand_rate_g_s, MAX_C_STEP, bounds)
+}
+
+/// [`next_c`] for a ratio from [`delivery_ratio`]: the full step while the
+/// ratio is still a first, short-window estimate, [`SETTLED_C_STEP`] once it
+/// rests on a settled window.
+pub fn next_c_for(prev_c: f64, ratio: Ratio, deficit_g: f64, demand_rate_g_s: f64, bounds: Bounds) -> f64 {
+    let step = if ratio.settled { SETTLED_C_STEP } else { MAX_C_STEP };
+    next_c_stepped(prev_c, ratio.k, deficit_g, demand_rate_g_s, step, bounds)
+}
+
+fn next_c_stepped(
+    prev_c: f64,
+    k: f64,
+    deficit_g: f64,
+    demand_rate_g_s: f64,
+    max_step: f64,
+    bounds: Bounds,
+) -> f64 {
+    let base = if k > 1e-9 { 1.0 / k } else { bounds.max };
     let repay = if demand_rate_g_s > 1e-9 {
         deficit_g / (demand_rate_g_s * DEFICIT_HORIZON_S)
     } else {
         0.0
     };
-    let target = (base * (1.0 + repay)).clamp(TRIM_MIN, TRIM_MAX);
-    (prev_c + (target - prev_c).clamp(-MAX_C_STEP, MAX_C_STEP)).clamp(TRIM_MIN, TRIM_MAX)
+    let target = bounds.clamp(base * (1.0 + repay));
+    bounds.clamp(prev_c + (target - prev_c).clamp(-max_step, max_step))
 }
 
-/// Whether `k` needs a c outside `[TRIM_MIN, TRIM_MAX]`.
-pub fn needs_alarm(k: f64) -> bool {
-    k < 1.0 / TRIM_MAX || k > 1.0 / TRIM_MIN
+/// Before the first ratio window is full, a deficit at least this many
+/// balance steps, and this share of what was asked, is no start-up noise:
+/// the pump is really off (tube moved, wrong calibration), so the early law
+/// estimates the ratio from what it has instead of nudging around the seed.
+pub const EARLY_SIGNIFICANT_RESOLUTIONS: f64 = 10.0;
+pub const EARLY_SIGNIFICANT_FRACTION: f64 = 0.05;
+/// ...and that early estimate needs this much history to mean anything.
+pub const EARLY_RATIO_MIN_S: f64 = 20.0;
+
+/// Whether a deficit (either sign) before the first ratio is a real offset.
+pub fn deficit_is_significant(deficit_g: f64, required_g: f64, resolution_g: f64) -> bool {
+    deficit_g.abs() >= (EARLY_SIGNIFICANT_RESOLUTIONS * resolution_g).max(EARLY_SIGNIFICANT_FRACTION * required_g)
+}
+
+/// A first, rough ratio from all the points so far: the Theil-Sen slope of
+/// delivered vs commanded. A slope, not `delivered / commanded`, so the
+/// constant start-up lag (pump spinning up, balance filter: ~2 s of flow)
+/// does not read as the pump running short. `None` under
+/// `EARLY_RATIO_MIN_S` or `EARLY_SIGNIFICANT_RESOLUTIONS` of command.
+pub fn early_ratio(points: &[TrackPoint], resolution_g: f64) -> Option<f64> {
+    let (first, last) = (points.first()?, points.last()?);
+    if last.t_s - first.t_s < EARLY_RATIO_MIN_S
+        || last.commanded_g - first.commanded_g < EARLY_SIGNIFICANT_RESOLUTIONS * resolution_g
+    {
+        return None;
+    }
+    let xy: Vec<(f64, f64)> = points.iter().map(|p| (p.commanded_g, p.delivered_g)).collect();
+    let k = theil_sen_slope(&decimate(&xy, MAX_SLOPE_POINTS))?;
+    (k.is_finite() && k > 0.0).then_some(k)
+}
+
+/// Next c before the delivery ratio can be measured: the run's starting c
+/// (1.0, or the tubing calibration's c0) as the feed-forward, plus paying
+/// back the cumulative deficit, less a dead band of balance rounding. Same
+/// horizon, step and bounds as [`next_c`], so the run is corrected from its
+/// first seconds instead of after a full ratio window. Anchored on `seed_c`,
+/// not on `prev_c`, so it stays a proportional term on the cumulative
+/// deficit (a PI on the flow) and cannot wind up.
+pub fn next_c_early(
+    prev_c: f64,
+    seed_c: f64,
+    deficit_g: f64,
+    demand_rate_g_s: f64,
+    resolution_g: f64,
+    bounds: Bounds,
+) -> f64 {
+    let band = EARLY_DEADBAND_RESOLUTIONS * resolution_g;
+    let deficit = deficit_g.signum() * (deficit_g.abs() - band).max(0.0);
+    let repay = if demand_rate_g_s > 1e-9 {
+        deficit / (demand_rate_g_s * DEFICIT_HORIZON_S)
+    } else {
+        0.0
+    };
+    let target = bounds.clamp(seed_c * (1.0 + repay));
+    bounds.clamp(prev_c + (target - prev_c).clamp(-MAX_C_STEP, MAX_C_STEP))
+}
+
+/// Whether `k` needs a c outside `bounds`.
+pub fn needs_alarm(k: f64, bounds: Bounds) -> bool {
+    k < 1.0 / bounds.max || k > 1.0 / bounds.min
 }
 
 /// Where the balance stood when it last left `Normal`.
@@ -177,14 +307,21 @@ mod tests {
 
     #[test]
     fn delivery_ratio_recovers_k_through_balance_quantisation() {
-        let k = delivery_ratio(&line(0.85, 600, 1.0, 1.0), 0.1).unwrap();
+        let k = delivery_ratio(&line(0.85, 600, 1.0, 1.0), 0.1).unwrap().k;
         assert!((k - 0.85).abs() < 0.005, "got {k}");
     }
 
     #[test]
     fn no_ratio_until_the_window_holds_enough_mass() {
-        // 0.01 g/s for 600 s = 6 g, below 200 x 0.1 g = 20 g.
-        assert_eq!(delivery_ratio(&line(1.0, 600, 1.0, 0.01), 0.1), None);
+        // 0.01 g/s for 400 s = 4 g, below 50 x 0.1 g = 5 g.
+        assert_eq!(delivery_ratio(&line(1.0, 400, 1.0, 0.01), 0.1), None);
+    }
+
+    #[test]
+    fn a_five_gram_window_is_still_accurate_on_a_0_1_g_balance() {
+        // 2 ml/min at 90 %: 5 g of command after 150 s, read in 0.1 g steps.
+        let k = delivery_ratio(&line(0.9, 160, 1.0, 2.0 / 60.0), 0.1).unwrap().k;
+        assert!((k - 0.9).abs() < 0.03, "got {k}");
     }
 
     #[test]
@@ -207,7 +344,7 @@ mod tests {
                 pts = thin(&pts, 800);
             }
         }
-        let k = delivery_ratio(&pts, 0.1).expect("the span must survive thinning");
+        let k = delivery_ratio(&pts, 0.1).expect("the span must survive thinning").k;
         assert!((k - 0.95).abs() < 0.02, "got {k}");
     }
 
@@ -215,14 +352,14 @@ mod tests {
     fn next_c_is_the_inverse_ratio_when_on_track() {
         let mut c = 1.0;
         for _ in 0..20 {
-            c = next_c(c, 0.9, 0.0, 1.0);
+            c = next_c(c, 0.9, 0.0, 1.0, Bounds::default());
         }
         assert!((c - 1.0 / 0.9).abs() < 1e-9, "got {c}");
     }
 
     #[test]
     fn next_c_moves_at_most_one_step() {
-        assert!((next_c(1.0, 0.8, 0.0, 1.0) - 1.02).abs() < 1e-12);
+        assert!((next_c(1.0, 0.8, 0.0, 1.0, Bounds::default()) - 1.02).abs() < 1e-12);
     }
 
     #[test]
@@ -230,33 +367,103 @@ mod tests {
         // 60 g behind at 1 g/s: pay back 60 g over 600 s, +10 %.
         let mut c = 1.0;
         for _ in 0..50 {
-            c = next_c(c, 1.0, 60.0, 1.0);
+            c = next_c(c, 1.0, 60.0, 1.0, Bounds::default());
         }
         assert!((c - 1.1).abs() < 1e-9, "got {c}");
     }
 
     #[test]
     fn zero_demand_rate_holds_the_feed_forward() {
-        let c = next_c(1.0, 1.0, 5.0, 0.0);
+        let c = next_c(1.0, 1.0, 5.0, 0.0, Bounds::default());
         assert!(c.is_finite());
         assert_eq!(c, 1.0);
+    }
+
+    #[test]
+    fn early_c_ignores_rounding_and_pays_back_a_real_deficit() {
+        // 2 ml/min = 1/30 g/s: 600 s of it is 20 g.
+        let rate = 1.0 / 30.0;
+        // Within the 0.3 g dead band: stays on the calibration's c0.
+        assert_eq!(next_c_early(1.007, 1.007, 0.25, rate, 0.1, Bounds::default()), 1.007);
+        // 0.93 g behind (run 17 at 5.5 min): 0.63 g past the band, +3.15 %.
+        let mut c = 1.007;
+        for _ in 0..10 {
+            c = next_c_early(c, 1.007, 0.93, rate, 0.1, Bounds::default());
+        }
+        assert!((c - 1.007 * 1.0315).abs() < 1e-9, "got {c}");
+        // Ahead of the curve: below c0, symmetric.
+        assert!(next_c_early(1.0, 1.0, -2.0, rate, 0.1, Bounds::default()) < 1.0);
+        // Anchored on the seed, not on the last c: a constant deficit gives a
+        // constant c, it does not keep climbing.
+        let mut settled = 1.0;
+        for _ in 0..10 {
+            settled = next_c_early(settled, 1.0, 0.93, rate, 0.1, Bounds::default());
+        }
+        let again = next_c_early(settled, 1.0, 0.93, rate, 0.1, Bounds::default());
+        assert!((again - settled).abs() < 1e-12, "{settled} -> {again}");
     }
 
     #[test]
     fn next_c_stays_within_bounds() {
         let mut c = 1.0;
         for _ in 0..100 {
-            c = next_c(c, 0.1, 1e6, 1.0);
+            c = next_c(c, 0.1, 1e6, 1.0, Bounds::default());
         }
         assert_eq!(c, TRIM_MAX);
     }
 
     #[test]
     fn alarm_only_outside_what_c_can_correct() {
-        assert!(!needs_alarm(0.85));
-        assert!(needs_alarm(0.75)); // would need c = 1.33
-        assert!(needs_alarm(0.0)); // nothing leaves the bottle
-        assert!(needs_alarm(1.30)); // would need c = 0.77
+        assert!(!needs_alarm(0.85, Bounds::default()));
+        assert!(needs_alarm(0.75, Bounds::default())); // would need c = 1.33
+        assert!(needs_alarm(0.0, Bounds::default())); // nothing leaves the bottle
+        assert!(needs_alarm(1.30, Bounds::default())); // would need c = 0.77
+    }
+
+    #[test]
+    fn the_limit_widens_the_bounds_symmetrically() {
+        let b = Bounds::from_limit_pct(25.0);
+        assert!((b.max - 1.25).abs() < 1e-12 && (b.min - 0.8).abs() < 1e-12);
+        assert_eq!(Bounds::default(), b);
+        // Run 39: the moved tube delivered 79 %, c needed 1.27.
+        let wide = Bounds::from_limit_pct(40.0);
+        assert!(needs_alarm(0.79, Bounds::default()));
+        assert!(!needs_alarm(0.79, wide));
+        let mut c = 1.0;
+        for _ in 0..50 {
+            c = next_c(c, 0.79, 0.0, 1.0, wide);
+        }
+        assert!((c - 1.0 / 0.79).abs() < 1e-9, "got {c}");
+    }
+
+    #[test]
+    fn a_real_early_offset_is_told_from_start_up_noise() {
+        // 9 ml/min = 0.15 g/s on a 0.1 g balance.
+        let rate = 0.15;
+        // The usual start-up lag, ~0.5 g at 10 s: not significant.
+        assert!(!deficit_is_significant(0.5, 10.0 * rate, 0.1));
+        // Run 39 at 30 s: 1.16 g behind of 4.5 g asked, 26 %: significant.
+        assert!(deficit_is_significant(1.16, 30.0 * rate, 0.1));
+        // Over a long run, 1 g of 200 g (0.5 %) is not.
+        assert!(!deficit_is_significant(1.0, 200.0, 0.1));
+    }
+
+    #[test]
+    fn the_early_ratio_ignores_the_start_up_lag() {
+        // Pump at 78 %, but nothing arrives for the first 2 s (spin-up and
+        // balance filter): delivered/commanded would read ~0.70 at 20 s, the
+        // slope still reads the pump.
+        let pts: Vec<TrackPoint> = (0..=25)
+            .map(|i| {
+                let t = i as f64;
+                let commanded = 0.15 * t;
+                let delivered = (0.78 * 0.15 * (t - 2.0).max(0.0) * 10.0).round() / 10.0;
+                TrackPoint { t_s: t, commanded_g: commanded, delivered_g: delivered }
+            })
+            .collect();
+        let k = early_ratio(&pts, 0.1).expect("25 s and 3.75 g of history");
+        assert!((k - 0.78).abs() < 0.05, "got {k}");
+        assert_eq!(early_ratio(&pts[..10], 0.1), None, "under 20 s");
     }
 
     #[test]

@@ -167,13 +167,25 @@ async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiRe
     if !(new.scale.density_g_per_ml.is_finite() && new.scale.density_g_per_ml > 0.0) {
         return Err(ApiError::Bad("liquid density must be a positive number (g/mL)".into()));
     }
+    let lim = new.scale.trim_limit_pct;
+    if !(lim.is_finite()
+        && (crate::config::TRIM_LIMIT_PCT_MIN..=crate::config::TRIM_LIMIT_PCT_MAX).contains(&lim))
+    {
+        return Err(ApiError::Bad(format!(
+            "correction limit must be between {} and {} %",
+            crate::config::TRIM_LIMIT_PCT_MIN,
+            crate::config::TRIM_LIMIT_PCT_MAX
+        )));
+    }
     // A changed `[scale]` is applied live (Settings, Balance section), before
     // saving: a refusal (trimmed run active) must not leave the file ahead of
     // the engine.
     let old_scale = s.config.read().await.scale.clone();
     let scale_changed = old_scale.path.trim() != new.scale.path.trim()
         || old_scale.baud != new.scale.baud
-        || old_scale.density_g_per_ml != new.scale.density_g_per_ml;
+        || old_scale.density_g_per_ml != new.scale.density_g_per_ml
+        || old_scale.position != new.scale.position
+        || old_scale.trim_limit_pct != new.scale.trim_limit_pct;
     let scale_connected = if scale_changed {
         Some(
             s.control
@@ -1020,7 +1032,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pump_stop_releases_a_completed_run_hold() {
+    async fn a_finished_curve_stays_active_and_stop_completes_it() {
         let app = router(test_state());
 
         let start = post_json(
@@ -1034,21 +1046,23 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            app.clone().oneshot(start).await.unwrap().status(),
-            StatusCode::CREATED
-        );
+        let res = app.clone().oneshot(start).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = body_json(res).await["run_id"].as_i64().unwrap();
 
         tokio::time::sleep(Duration::from_millis(2500)).await;
         let st = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
-        assert!(st["active"].is_null(), "run should have completed: {st}");
-        assert!(!st["holding"].is_null(), "expected a hold: {st}");
+        assert_eq!(st["active"]["curve_done"], json!(true), "still active, holding: {st}");
+        assert!(st["holding"].is_null(), "{st}");
 
         let res = app
-            .oneshot(post_json("/api/pump/stop", json!({})))
+            .clone()
+            .oneshot(post_json(&format!("/api/runs/{id}/stop"), json!({})))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        let run = body_json(app.oneshot(get(&format!("/api/runs/{id}"))).await.unwrap()).await;
+        assert_eq!(run["status"], json!("completed"), "{run}");
     }
 
     #[tokio::test]

@@ -962,7 +962,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_pump_releases_a_completed_run_hold() {
+    async fn a_finished_curve_keeps_the_run_active_until_stop() {
         let engine = Engine::new(
             Pump::new(SimPump::new(1), 1),
             Store::open_in_memory().unwrap(),
@@ -981,21 +981,26 @@ mod tests {
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
         };
-        handle
+        let id = handle
             .call(|reply| Command::StartRun(cfg, reply))
             .await
             .unwrap()
             .unwrap();
 
-        // let the 1 s journal tick fire and complete the run
+        // Let the 1 s curve run out: the run stays active, holding its end
+        // value and still ticking, with no separate "hold" left behind.
         tokio::time::sleep(Duration::from_millis(2500)).await;
         let st = handle.call(Command::Status).await.unwrap();
-        assert!(st.active.is_none(), "run should have completed");
-        assert!(st.holding.is_some(), "pump should be holding the final setpoint");
-
-        handle.call(Command::StopPump).await.unwrap().unwrap();
-        let st = handle.call(Command::Status).await.unwrap();
+        let a = st.active.expect("the run stays active past its curve");
+        assert!(a.curve_done);
+        assert!(a.last_seq.unwrap() >= 1, "journal keeps ticking in the hold");
         assert!(st.holding.is_none());
+
+        handle.call(Command::StopRun).await.unwrap().unwrap();
+        let st = handle.call(Command::Status).await.unwrap();
+        assert!(st.active.is_none());
+        let run = handle.call(|r| Command::GetRun(id, r)).await.unwrap().unwrap().unwrap();
+        assert_eq!(run.status, crate::store::RunStatus::Completed);
 
         handle.shutdown();
     }

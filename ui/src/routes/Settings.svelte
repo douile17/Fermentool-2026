@@ -43,6 +43,8 @@
   let scaleCustom = $state('');
   let scaleBaud = $state(9600);
   let scaleDensity = $state(1.0);
+  let scalePosition = $state('feed');
+  let trimLimit = $state(25);
   let scaleErr = $state(null);
   let scaleMsg = $state(null);
   let scaleSaving = $state(false);
@@ -64,6 +66,8 @@
     scaleCustom = p;
     scaleBaud = cfg.scale?.baud ?? 9600;
     scaleDensity = cfg.scale?.density_g_per_ml ?? 1.0;
+    scalePosition = cfg.scale?.position ?? 'feed';
+    trimLimit = cfg.scale?.trim_limit_pct ?? 25;
   });
 
   const knownPort = $derived(scalePort === '' || ports.some((p) => p.name === scalePort));
@@ -78,8 +82,16 @@
       if (path !== '' && path === pumpPort) throw new Error(`${path} is the pump's port, pick the balance's port`);
       const density = Number(scaleDensity);
       if (!(density > 0)) throw new Error('Liquid density must be a positive number (g/mL)');
+      const limit = Number(trimLimit);
+      if (!(limit >= 5 && limit <= 100)) throw new Error('Correction limit must be between 5 and 100 %');
       const fresh = await get('/api/config');
-      fresh.scale = { path, baud: Number(scaleBaud), density_g_per_ml: density };
+      fresh.scale = {
+        path,
+        baud: Number(scaleBaud),
+        density_g_per_ml: density,
+        position: scalePosition,
+        trim_limit_pct: limit,
+      };
       const r = await put('/api/config', fresh);
       cfg.scale = fresh.scale;
       if (path === '') scaleMsg = 'Saved: no balance.';
@@ -164,8 +176,8 @@
     <p class="muted">Loading…</p>
   {:else}
     <p class="field-note" style="margin-bottom:16px">
-      The balance under the feed bottle (Ohaus Ranger, MT-SICS) that the gravimetric trim reads.
-      Applied as soon as you save, no restart. Its live weight then shows at the bottom of the
+      The balance (Ohaus Ranger, MT-SICS) that the gravimetric trim reads, under the feed bottle
+      or under the receiving vessel. Applied as soon as you save, no restart. Its live weight then shows at the bottom of the
       sidebar.
     </p>
     <div class="grid">
@@ -199,6 +211,33 @@
       <label class="field"><span>Liquid density (g/mL)</span>
         <input type="number" step="0.01" min="0.5" max="2" bind:value={scaleDensity} />
       </label>
+
+      <label class="field"><span>Balance weighs</span>
+        <select bind:value={scalePosition}>
+          <option value="feed">the feed bottle (weight falls)</option>
+          <option value="receiver">the receiving vessel (weight rises)</option>
+        </select>
+      </label>
+
+      <label class="field"><span>Correction limit (± %)</span>
+        <input type="number" step="1" min="5" max="100" bind:value={trimLimit} />
+      </label>
+      <p class="field-note">
+        How far the balance correction may push the pump before it alarms instead
+        (±{Number(trimLimit) || 25} %: factor ×{(1 / (1 + (Number(trimLimit) || 25) / 100)).toFixed(2)} to
+        ×{(1 + (Number(trimLimit) || 25) / 100).toFixed(2)}). 25 by default. Wider tolerates a tube
+        that delivers far from its calibration, but hides a slipping tube, a leak or a bad reading
+        for longer. Can be changed during a run (the other balance settings cannot): widening it
+        lifts an alarm raised by the old limit.
+      </p>
+
+      {#if scalePosition === 'receiver'}
+        <p class="field-note">
+          Under the receiving vessel, everything else added to it (pH base, antifoam) counts as
+          delivered feed, and samples or evaporation count as missing. Under the feed bottle, only
+          the pump is measured.
+        </p>
+      {/if}
 
       <p class="field-note">
         Baud must match the balance's own Communications menu (9600 by default on the Ranger 7000).

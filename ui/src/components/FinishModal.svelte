@@ -2,7 +2,7 @@
   import { post } from '../lib/api.js';
   import { num, unitFor, digitsFor } from '../lib/fmt.js';
 
-  /** @type {{ hold: { run_id:number, name:string, control_var:string, value:number, finished_at:string }, ondismiss: () => void }} */
+  /** @type {{ hold: { run_id:number, name:string, control_var:string, value:number, regulating?:boolean, trimmed?:boolean }, ondismiss: () => void }} */
   let { hold, ondismiss } = $props();
 
   const unit = $derived(unitFor(hold.control_var));
@@ -11,11 +11,13 @@
   let busy = $state(false);
   let err = $state(null);
 
-  async function stopPump() {
+  // A regulating run is closed like any run (recorded `completed`); a legacy
+  // hold from an older daemon only has its pump to stop.
+  async function stop() {
     busy = true;
     err = null;
     try {
-      await post('/api/pump/stop');
+      await post(hold.regulating ? `/api/runs/${hold.run_id}/stop` : '/api/pump/stop');
       ondismiss();
     } catch (e) {
       err = e.message;
@@ -41,22 +43,33 @@
       </svg>
     </div>
 
-    <div class="eyebrow">Run complete</div>
-    <h2 id="ft-done">“{hold.name}” finished</h2>
+    <div class="eyebrow">{hold.regulating ? 'Curve finished' : 'Run complete'}</div>
+    <h2 id="ft-done">“{hold.name}” reached the end of its curve</h2>
 
-    <p class="lede">
-      The pump is <b>still running</b> at the profile's final rate
-      (<b class="mono">{num(hold.value, digits)}&nbsp;{unit}</b>) and holds there
-      until you stop it.
-    </p>
+    {#if hold.regulating}
+      <p class="lede">
+        The run <b>goes on</b> at the curve's final rate
+        (<b class="mono">{num(hold.value, digits)}&nbsp;{unit}</b>){hold.trimmed
+          ? ', still corrected by the balance'
+          : ''}, and every second is still recorded, until you stop it.
+      </p>
+    {:else}
+      <p class="lede">
+        The pump is <b>still running</b> at the profile's final rate
+        (<b class="mono">{num(hold.value, digits)}&nbsp;{unit}</b>) and holds there
+        until you stop it.
+      </p>
+    {/if}
 
     {#if err}<div class="err">{err}</div>{/if}
 
     <div class="row">
-      <button class="btn-danger" disabled={busy} onclick={stopPump}>
-        {busy ? 'Stopping…' : 'Stop pump'}
+      <button class="btn-danger" disabled={busy} onclick={stop}>
+        {busy ? 'Stopping…' : hold.regulating ? 'Stop run' : 'Stop pump'}
       </button>
-      <button class="btn-ghost" disabled={busy} onclick={ondismiss}>Keep it running</button>
+      <button class="btn-ghost" disabled={busy} onclick={ondismiss}>
+        {hold.regulating ? 'Keep regulating' : 'Keep it running'}
+      </button>
     </div>
   </div>
 </div>

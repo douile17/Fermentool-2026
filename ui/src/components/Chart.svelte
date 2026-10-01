@@ -10,9 +10,26 @@
    *   unit?: string,
    *   digits?: number,
    *   nowVolumeMl?: number | null,
+   *   actualColor?: string,
+   *   actualOpacity?: number,
+   *   markers?: { t: number, label: string }[],
    * }}
    */
-  let { planned = [], actual = [], nowS = null, durationS, unit = 'rpm', digits = 1, nowVolumeMl = null } = $props();
+  let {
+    planned = [],
+    actual = [],
+    nowS = null,
+    durationS,
+    unit = 'rpm',
+    digits = 1,
+    nowVolumeMl = null,
+    // Stroke of the `actual` trace; the tracking chart sets a contrasting one,
+    // slightly see-through so the planned curve shows where they overlap.
+    actualColor = 'var(--green-500)',
+    actualOpacity = 1,
+    // Vertical time markers (e.g. when the regulation acted), dashed, labelled.
+    markers = [],
+  } = $props();
 
   const W = 960;
   const H = 240;
@@ -108,6 +125,23 @@
   const nowLabelBelow = $derived(nowV == null ? false : y(nowV) < plotMidY);
   const nowLabelOffset = 22;
 
+  // Numbered marker badges, in time order. Two markers closer than a badge
+  // keep their own line but the later badge steps right, so both stay legible.
+  const BADGE_R = 7;
+  const markerBadges = $derived.by(() => {
+    const out = [];
+    let lastBx = -Infinity;
+    [...markers]
+      .sort((a, b) => a.t - b.t)
+      .forEach((m, i) => {
+        const lx = clampX(x(m.t));
+        const bx = Math.min(W - BADGE_R - 1, Math.max(lx, lastBx + 2 * BADGE_R + 3, BADGE_R + 1));
+        lastBx = bx;
+        out.push({ lx, bx, n: i + 1 });
+      });
+    return out;
+  });
+
   // Journalled setpoints drawn as one continuous trace rather than a dot per tick.
   const actualLine = $derived(
     actual.length
@@ -158,9 +192,17 @@
       <path class="progress" d={progressLine} fill="none" stroke="var(--green-500)"
             stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" />
     {:else if actualLine}
-      <path d={actualLine} fill="none" stroke="var(--green-500)" stroke-width="2"
+      <path d={actualLine} fill="none" stroke={actualColor} stroke-opacity={actualOpacity} stroke-width="2.5"
             stroke-linejoin="round" stroke-linecap="round" />
     {/if}
+
+    <!-- Markers: a dashed line and a numbered badge in the top margin, out of
+         the curves' way; the caller explains the numbers under the chart. -->
+    {#each markerBadges as m}
+      <line x1={m.lx} x2={m.lx} y1={padT} y2={H - padB} class="marker" />
+      <circle cx={m.bx} cy={BADGE_R + 1} r={BADGE_R} class="badge" />
+      <text x={m.bx} y={BADGE_R + 4.5} text-anchor="middle" class="badge-n">{m.n}</text>
+    {/each}
 
     {#if nowX != null && nowS < dspan}
       <line x1={nowX} x2={nowX} y1={padT} y2={H - padB}
@@ -185,5 +227,8 @@
   svg { width: 100%; aspect-ratio: 960 / 240; height: auto; display: block; }
   .axl { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
   .now-vol { fill: var(--ink); font-weight: 600; }
+  .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
+  .badge { fill: var(--surface); stroke: var(--ink); stroke-opacity: 0.55; stroke-width: 1; }
+  .badge-n { font-family: var(--mono); font-size: 10px; font-weight: 600; fill: var(--ink); }
   .progress { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--green-500) 55%, transparent)); }
 </style>

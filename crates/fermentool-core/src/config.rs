@@ -103,6 +103,41 @@ pub struct ScaleConfig {
     /// Feed density (g/mL), used to convert a measured mass rate to a volume
     /// rate. Water ~= 1.0; a 500 g/L glucose feed ~= 1.18.
     pub density_g_per_ml: f64,
+    /// What the balance weighs: the feed bottle (its weight falls as the
+    /// pump draws) or the receiving vessel (its weight rises).
+    pub position: ScalePosition,
+    /// How far the gravimetric trim may push the pump, ± percent of its
+    /// setpoint, before it alarms instead. 25 = c in [0.80, 1.25]. Wider
+    /// tolerates a worse-calibrated tube, but hides a slipping tube, a leak
+    /// or a bad reading for longer.
+    pub trim_limit_pct: f64,
+}
+
+/// Bounds accepted for `trim_limit_pct`.
+pub const TRIM_LIMIT_PCT_MIN: f64 = 5.0;
+pub const TRIM_LIMIT_PCT_MAX: f64 = 100.0;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScalePosition {
+    /// Under the feed bottle. Delivered mass = weight lost.
+    #[default]
+    Feed,
+    /// Under the receiving vessel. Delivered mass = weight gained; it also
+    /// counts anything else added to the vessel (base, antifoam) and misses
+    /// what leaves it (samples, evaporation).
+    Receiver,
+}
+
+impl ScalePosition {
+    /// Sign that turns a balance reading into a feed-bottle-equivalent
+    /// weight, falling as feed is delivered, which is what the trim expects.
+    pub fn sign(self) -> f64 {
+        match self {
+            ScalePosition::Feed => 1.0,
+            ScalePosition::Receiver => -1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +187,8 @@ impl Default for ScaleConfig {
             path: String::new(),
             baud: 9600,
             density_g_per_ml: 1.0,
+            position: ScalePosition::Feed,
+            trim_limit_pct: 25.0,
         }
     }
 }
@@ -313,5 +350,17 @@ mod tests {
         assert!(cfg.scale.configured());
         assert_eq!(cfg.scale.path, "COM5");
         assert_eq!(cfg.scale.density_g_per_ml, 1.18);
+        // A file written before `position` existed means the feed bottle,
+        // and one before `trim_limit_pct` the historical ±25 %.
+        assert_eq!(cfg.scale.position, ScalePosition::Feed);
+        assert_eq!(cfg.scale.trim_limit_pct, 25.0);
+    }
+
+    #[test]
+    fn scale_position_round_trips_through_toml() {
+        let cfg = Config::from_toml("[scale]\npath = \"COM7\"\nposition = \"receiver\"\n").unwrap();
+        assert_eq!(cfg.scale.position, ScalePosition::Receiver);
+        let back = Config::from_toml(&cfg.to_toml().unwrap()).unwrap();
+        assert_eq!(back.scale.position, ScalePosition::Receiver);
     }
 }

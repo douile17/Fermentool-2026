@@ -44,7 +44,15 @@ pub fn theil_sen_slope(points: &[(f64, f64)]) -> Option<f64> {
     })
 }
 
+/// A jump between two reads is a perturbation (bottle touched, tube pulled,
+/// something set on the pan) when it exceeds `PERTURBATION_FLOW_FACTOR` times
+/// what the pump should move in that read, bounded to
+/// `[PERTURBATION_FLOOR_G, PERTURBATION_MIN_G]`. A fixed 5 g let a 3.4 g
+/// bump at 2 ml/min (0.03 g/s) pass as flow and the trim chase it to +25 %;
+/// the floor stays above the 0.1 g balance's own ±0.5 g read-to-read jitter.
 pub const PERTURBATION_MIN_G: f64 = 5.0;
+pub const PERTURBATION_FLOOR_G: f64 = 1.0;
+pub const PERTURBATION_FLOW_FACTOR: f64 = 5.0;
 pub const REFILL_THRESHOLD_G: f64 = 50.0;
 pub const REFILL_SETTLE_VARIANCE_G: f64 = 0.5;
 pub const REFILL_SETTLE_SECONDS: f64 = 10.0;
@@ -66,6 +74,14 @@ pub struct StateInput {
     pub seconds_in_settling: f64,
     pub manual_refill_mode: bool,
     pub manual_refill_done: bool,
+    /// Mass the pump was commanded to move since the previous read.
+    pub expected_step_g: f64,
+}
+
+/// Largest jump between two reads still taken as pumping.
+pub fn perturbation_limit_g(expected_step_g: f64) -> f64 {
+    (PERTURBATION_FLOW_FACTOR * expected_step_g.max(0.0))
+        .clamp(PERTURBATION_FLOOR_G, PERTURBATION_MIN_G)
 }
 
 /// Learning (the trim update, Task 6) is only allowed while this returns
@@ -79,7 +95,7 @@ pub fn next_state(current: ScaleState, input: &StateInput) -> ScaleState {
         ScaleState::Normal | ScaleState::Perturbation => {
             if input.manual_refill_mode || jump > REFILL_THRESHOLD_G {
                 ScaleState::RefillPending
-            } else if jump > PERTURBATION_MIN_G {
+            } else if jump > perturbation_limit_g(input.expected_step_g) {
                 ScaleState::Perturbation
             } else {
                 ScaleState::Normal
@@ -123,7 +139,33 @@ mod state_tests {
             seconds_in_settling: 0.0,
             manual_refill_mode: false,
             manual_refill_done: false,
+            expected_step_g: 0.0,
         }
+    }
+
+    #[test]
+    fn a_small_bump_at_low_flow_is_a_perturbation_not_flow() {
+        // Run 16: 2 ml/min is ~0.034 g per 1 s read; the pan gained 3.4 g.
+        let mut i = input(432.9, 429.5);
+        i.expected_step_g = 2.0 / 60.0;
+        assert_eq!(next_state(ScaleState::Normal, &i), ScaleState::Perturbation);
+        // ...while the balance's own ±0.5 g read-to-read jitter stays flow.
+        let mut i = input(423.5, 423.0);
+        i.expected_step_g = 2.0 / 60.0;
+        assert_eq!(next_state(ScaleState::Normal, &i), ScaleState::Normal);
+    }
+
+    #[test]
+    fn the_limit_follows_the_flow_between_its_bounds() {
+        assert_eq!(perturbation_limit_g(0.0), PERTURBATION_FLOOR_G);
+        assert_eq!(perturbation_limit_g(0.5), 2.5);
+        // 60 ml/min and up keep the historical 5 g.
+        assert_eq!(perturbation_limit_g(1.0), PERTURBATION_MIN_G);
+        assert_eq!(perturbation_limit_g(10.0), PERTURBATION_MIN_G);
+        // A 3.4 g move at 60 ml/min is ordinary pumping.
+        let mut i = input(96.6, 100.0);
+        i.expected_step_g = 1.0;
+        assert_eq!(next_state(ScaleState::Normal, &i), ScaleState::Normal);
     }
 
     #[test]

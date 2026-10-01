@@ -106,6 +106,16 @@
   );
   // Off the smooth clock so the progress bar fills continuously, not per tick.
   const pct = $derived(run && run.duration_s ? Math.min(100, (elapsedAnim / run.duration_s) * 100) : 0);
+  // Past its curve a dosing run holds the end value, still regulated and
+  // journalled, until Stop: show how long it has been holding.
+  // The run's volume is stated in one place only. With the balance trim on,
+  // that is the tracking panel (weighed vs requested): `volume_added_ml` is
+  // what the pump was *told* (setpoint x time, including the correction
+  // factor), not what went in, so it is not shown at all. Without the
+  // balance it is the only figure there is, shown once, marked estimated.
+  const estimatedMl = $derived(active?.gravimetric_trim ? null : (active?.volume_added_ml ?? null));
+  const inHold = $derived(!!active?.curve_done);
+  const holdS = $derived(inHold && run ? Math.max(0, elapsed - run.duration_s) : 0);
 
   // The pump holds at a constant rate after natural completion, so the volume
   // delivered since then is just rate * elapsed, no curve integration needed.
@@ -253,9 +263,15 @@
     {#if run}
       <div class="live">
         <span class="live-dot" aria-hidden="true"></span>
-        <span class="live-cell mono">{dur(Math.max(0, run.duration_s - elapsed))} left</span>
-        <span class="live-cell mono">{pct.toFixed(0)}%</span>
-        <span class="live-cell mono">of {dur(run.duration_s)}</span>
+        {#if inHold}
+          <span class="live-cell mono">curve done</span>
+          <span class="live-cell mono">holding {dur(holdS)}</span>
+          <span class="live-cell mono">{active.gravimetric_trim ? 'regulated · recorded' : 'recorded'}</span>
+        {:else}
+          <span class="live-cell mono">{dur(Math.max(0, run.duration_s - elapsed))} left</span>
+          <span class="live-cell mono">{pct.toFixed(0)}%</span>
+          <span class="live-cell mono">of {dur(run.duration_s)}</span>
+        {/if}
       </div>
     {/if}
 
@@ -264,7 +280,7 @@
         <div class="eyebrow">Feed profile · {run ? run.curve.params.kind : ''}</div>
         <h2>{run?.name ?? 'Loading…'}</h2>
       </div>
-      <span class="pill running">running</span>
+      <span class="pill running">{inHold ? 'holding end value' : 'running'}</span>
     </div>
 
     {#if err}<div class="err" style="margin-bottom:16px">{err}</div>{/if}
@@ -283,10 +299,9 @@
       <div class="progress">
         <div class="bar"><span style="width:{pct}%"></span></div>
         <div class="cap mono">
-          <span>{dur(elapsed)} elapsed · {pct.toFixed(0)}%</span>
-          {#if run.control_var === 'ml_min' && active?.volume_added_ml != null}
-            <span>{vol(active.volume_added_ml)} delivered</span>
-          {/if}
+          <span>
+            {dur(elapsed)} elapsed · {inHold ? `curve done, holding for ${dur(holdS)}` : `${pct.toFixed(0)}%`}
+          </span>
         </div>
       </div>
 
@@ -296,29 +311,30 @@
         nowS={Math.min(elapsedAnim, run.duration_s - 0.05)}
         durationS={run.duration_s}
         {unit}
-        {digits}
-        nowVolumeMl={run.control_var === 'ml_min' ? active?.volume_added_ml : null}
-      />
+        {digits}      />
 
       {#if active?.gravimetric_trim}
-        <TrackingPanel runId={active.run_id} durationS={run.duration_s} live />
+        <TrackingPanel runId={active.run_id} durationS={Math.max(run.duration_s, elapsed)} live />
       {/if}
 
       <div class="meta">
         <div><div class="k">Direction</div><div class="v mono">{run.direction === 'cw' ? 'clockwise' : 'counter-cw'}</div></div>
         <div><div class="k">Started</div><div class="v mono">{stamp(run.started_at)}</div></div>
-        {#if run.control_var === 'ml_min' && active?.volume_added_ml != null}
+        {#if run.control_var === 'ml_min' && estimatedMl != null}
           <div>
-            <div class="k" title="Integrated from the commanded setpoint, not a measured flow, actual delivered volume can drift over a long run.">
-              Volume added (live, est.)
+            <div class="k" title="Integrated from the commanded setpoint, not a measured flow: no balance on this run.">
+              Volume added (est.)
             </div>
-            <div class="v mono">{vol(active.volume_added_ml)}</div>
+            <div class="v mono">{vol(estimatedMl)}</div>
           </div>
         {/if}
       </div>
 
       <div class="foot">
         <button class="btn-danger" disabled={stopping} onclick={stop}>Stop run</button>
+        {#if inHold}
+          <span class="hold-note">Stopping now records the run as completed.</span>
+        {/if}
       </div>
     {/if}
   </section>
@@ -455,7 +471,8 @@
   .meta .k { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
   .meta .v { font-size: 13px; margin-top: 3px; }
 
-  .foot { margin-top: var(--s-6); }
+  .foot { margin-top: var(--s-6); display: flex; gap: var(--s-4); align-items: center; flex-wrap: wrap; }
+  .hold-note { font-size: 12px; color: var(--muted); }
 
   .acts { display: flex; flex-direction: column; }
   .act {

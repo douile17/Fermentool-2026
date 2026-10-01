@@ -11,10 +11,12 @@
   import { canStartRun } from '../lib/link.js';
   import ErrorText from '../components/ErrorText.svelte';
 
-  // Mirrors trim::CALIBRATION_CV_WARN_PCT and the trim bounds: warnings only.
+  // Mirrors trim::CALIBRATION_CV_WARN_PCT and the trim bounds (Settings,
+  // correction limit): warnings only.
   const CV_WARN_PCT = 5;
-  const C0_MIN = 0.8;
-  const C0_MAX = 1.25;
+  let trimLimit = $state(25);
+  const C0_MAX = $derived(Number((1 + trimLimit / 100).toFixed(2)));
+  const C0_MIN = $derived(Number((1 / (1 + trimLimit / 100)).toFixed(2)));
 
   const blank = () => ({
     tubing_lot_id: '',
@@ -43,7 +45,10 @@
   let pumpAddr = $state(1);
   $effect(() => {
     get('/api/config')
-      .then((c) => (pumpAddr = c.pump.address))
+      .then((c) => {
+        pumpAddr = c.pump.address;
+        trimLimit = c.scale?.trim_limit_pct ?? 25;
+      })
       .catch(() => {});
   });
 

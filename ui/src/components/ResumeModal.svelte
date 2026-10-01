@@ -42,6 +42,10 @@
       <b class="mono">{dur(info.duration_s)}</b>.
       {#if info.past_end}
         The curve already finished while the app was down, so you can only close it out.
+      {:else if info.curve_done}
+        The curve had reached its end: resuming holds its final value
+        (<b class="mono">{num(info.resume_target, digits)} {unit}</b>), regulated and recorded
+        until you stop the run, after re-running the full pump start sequence.
       {:else}
         Resuming applies the profile value for the real elapsed time now
         (<b class="mono">{num(info.resume_target, digits)} {unit}</b>) and re-runs the full pump

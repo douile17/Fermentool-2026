@@ -44,12 +44,20 @@
         title: 'The balance is not answering. Check its cable; the daemon keeps retrying.',
       };
     }
+    if (s.tracking?.wrong_side) {
+      return {
+        tone: 'bad',
+        label: 'Balance on the other side · trim frozen',
+        title:
+          'The weight moves the wrong way for where Settings says the balance is (feed bottle or receiving vessel). Fix "Balance weighs" in Settings for the next run; this run keeps its pump setpoint, uncorrected.',
+      };
+    }
     if (!s.scale_ok) {
       return {
         tone: 'bad',
         label: 'Balance · trim alarm',
         title:
-          'The weighed flow is more than 20 % off the curve. The correction is frozen until the next run.',
+          'The pump has needed more correction than the limit set in Settings (Balance, correction limit) for 5 minutes: check the tube in the head, leaks, the bottle. The correction is frozen until the next run.',
       };
     }
     const trimOn = !!s.active?.gravimetric_trim;
@@ -124,8 +132,24 @@
     }
   };
   let finishAck = $state(readFinishAck());
-  const hold = $derived(app.status?.holding ?? null);
-  const showFinish = $derived(!!hold && !app.status?.active && hold.run_id !== finishAck);
+  // A dosing run whose curve ended stays active, still regulated and
+  // journalled: the pop-up only tells so. `holding` is a hold left by a daemon
+  // from before that (no regulation), still shown so it can be stopped.
+  const hold = $derived.by(() => {
+    const a = app.status?.active;
+    if (a?.curve_done) {
+      return {
+        run_id: a.run_id,
+        name: a.name,
+        control_var: a.control_var,
+        value: a.last_target,
+        regulating: true,
+        trimmed: a.gravimetric_trim,
+      };
+    }
+    return app.status?.active ? null : (app.status?.holding ?? null);
+  });
+  const showFinish = $derived(!!hold && hold.run_id !== finishAck);
   function dismissFinish() {
     if (hold) {
       try {
