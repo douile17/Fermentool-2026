@@ -1030,6 +1030,11 @@ impl<T: Transport> Engine<T> {
                 let cal = self.store.calibration(cal_id)?.ok_or_else(|| {
                     EngineError::Config(format!("tubing calibration {cal_id} does not exist"))
                 })?;
+                if cal.archived_at.is_some() {
+                    return Err(EngineError::Config(format!(
+                        "tubing calibration {cal_id} is archived, restore it first"
+                    )));
+                }
                 if cal.control_var != cfg.control_var {
                     return Err(EngineError::Config(format!(
                         "tubing calibration {cal_id} was made in {}, this run is in {}",
@@ -3092,6 +3097,20 @@ mod tests {
         let cfg = RunConfig { tubing_calibration_id: Some(9999), ..trim_cfg() };
         assert!(matches!(e.start_run(cfg, t0()), Err(EngineError::Config(_))));
         assert!(e.status().active.is_none());
+    }
+
+    #[test]
+    fn an_archived_calibration_is_refused_until_restored() {
+        let mut e = engine();
+        let cal = seed_calibration(&e.store, trim_cfg().control_var, 10.0, 50.0);
+        e.store.set_calibration_archived(cal, true).unwrap();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig { tubing_calibration_id: Some(cal), ..trim_cfg() };
+        assert!(matches!(e.start_run(cfg.clone(), t0()), Err(EngineError::Config(_))));
+        assert!(e.status().active.is_none());
+
+        e.store.set_calibration_archived(cal, false).unwrap();
+        assert!(e.start_run(cfg, t0()).is_ok());
     }
 
     #[test]

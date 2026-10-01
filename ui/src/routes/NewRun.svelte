@@ -153,8 +153,8 @@
     return () => clearTimeout(debounce);
   });
 
-  // Recorded tubing calibrations, newest first. Only those made in the run's
-  // own unit can seed it (the daemon refuses the others).
+  // Recorded tubing calibrations, newest first. Only active ones made in the
+  // run's own unit can seed it (the daemon refuses the others).
   let calibrations = $state([]);
   let calsLoaded = $state(false);
   $effect(() => {
@@ -164,7 +164,9 @@
       .catch(() => (calibrations = []))
       .finally(() => (calsLoaded = true));
   });
-  const calMatches = $derived(calibrations.filter((c) => c.control_var === f.control_var));
+  const calMatches = $derived(
+    calibrations.filter((c) => c.control_var === f.control_var && !c.archived_at),
+  );
   // Drop a selection that no longer matches the run's unit. Only once the list
   // has loaded: before that, a calibration seeded by "Run again" would look
   // unknown and be wiped.

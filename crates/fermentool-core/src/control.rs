@@ -118,6 +118,12 @@ pub enum Command {
         lot_id: Option<String>,
         reply: oneshot::Sender<Result<Vec<CalibrationRow>, String>>,
     },
+    /// Archive (`true`) or restore (`false`) a calibration; `None` = no such id.
+    SetCalibrationArchived {
+        id: i64,
+        archived: bool,
+        reply: oneshot::Sender<Result<Option<CalibrationRow>, String>>,
+    },
     /// The in-progress calibration session, as the UI saved it (opaque JSON).
     GetCalibrationDraft(oneshot::Sender<Result<Option<String>, String>>),
     /// Save (`Some`) or drop (`None`) the in-progress calibration session.
@@ -778,6 +784,14 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let res = engine
                 .store()
                 .list_calibrations(lot_id.as_deref())
+                .map_err(|e| e.to_string());
+            let _ = reply.send(res);
+            false
+        }
+        Command::SetCalibrationArchived { id, archived, reply } => {
+            let res = engine
+                .store()
+                .set_calibration_archived(id, archived)
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
             false

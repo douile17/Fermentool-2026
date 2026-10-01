@@ -35,6 +35,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 4,
         sql: include_str!("migrations/0004_tick_weight.sql"),
     },
+    Migration {
+        version: 5,
+        sql: include_str!("migrations/0005_calibration_archive.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -241,6 +245,8 @@ pub struct CalibrationRow {
     pub c0: f64,
     pub operator: Option<String>,
     pub note: Option<String>,
+    /// Set when the tube is retired: hidden from New run, kept for history.
+    pub archived_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,7 +315,7 @@ const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, cont
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
      measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
-     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref";
+     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref, archived_at";
 
 const TICK_COLS: &str =
     "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note, weight_g, delivered_g";
@@ -588,8 +594,29 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    /// Calibrations newest first, optionally narrowed to one tubing lot and/or
-    /// (exact match).
+    /// Archive (`true`) or restore (`false`) a calibration. Archiving an
+    /// already archived one keeps its first date. `None` if no such id.
+    pub fn set_calibration_archived(
+        &self,
+        id: i64,
+        archived: bool,
+    ) -> Result<Option<CalibrationRow>> {
+        let at = archived.then(|| Timestamp::now().to_string());
+        let n = self.conn.execute(
+            "UPDATE tubing_calibrations
+             SET archived_at = CASE WHEN ?2 IS NULL THEN NULL
+                                    ELSE COALESCE(archived_at, ?2) END
+             WHERE id = ?1",
+            params![id, at],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.calibration(id)
+    }
+
+    /// Calibrations newest first, archived ones included, optionally narrowed
+    /// to one tubing lot (exact match).
     pub fn list_calibrations(
         &self,
         tubing_lot_id: Option<&str>,
@@ -809,6 +836,7 @@ fn row_to_calibration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalibrationRo
         c0: row.get("c0")?,
         operator: row.get("operator")?,
         note: row.get("note")?,
+        archived_at: row.get::<_, Option<String>>("archived_at")?.map(parse_ts).transpose()?,
     })
 }
 
@@ -882,7 +910,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
     }
 
     #[test]
@@ -894,7 +922,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
     }
 
     #[test]
@@ -1215,6 +1243,24 @@ mod tests {
         assert_eq!(all.len(), 4);
         let lot_a = s.list_calibrations(Some("A")).unwrap();
         assert_eq!(lot_a.iter().map(|c| c.id).collect::<Vec<_>>(), vec![ids[3], ids[1], ids[0]]);
+    }
+
+    #[test]
+    fn archive_and_restore_a_calibration() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_calibration(&new_calibration(three_bursts(&s), [50.0; 3])).unwrap();
+        assert!(s.calibration(id).unwrap().unwrap().archived_at.is_none());
+
+        let first = s.set_calibration_archived(id, true).unwrap().unwrap().archived_at;
+        assert!(first.is_some());
+        // Archiving twice keeps the first date; the row stays listed.
+        let again = s.set_calibration_archived(id, true).unwrap().unwrap().archived_at;
+        assert_eq!(again, first);
+        assert_eq!(s.list_calibrations(None).unwrap().len(), 1);
+
+        let restored = s.set_calibration_archived(id, false).unwrap().unwrap();
+        assert!(restored.archived_at.is_none());
+        assert!(s.set_calibration_archived(id + 1, true).unwrap().is_none());
     }
 
     #[test]

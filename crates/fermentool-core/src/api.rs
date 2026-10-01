@@ -71,6 +71,8 @@ pub fn router(state: AppState) -> Router {
                 .post(save_calibration_draft)
                 .delete(delete_calibration_draft),
         )
+        .route("/api/calibrations/{id}/archive", post(archive_calibration))
+        .route("/api/calibrations/{id}/restore", post(restore_calibration))
         .route("/api/shutdown", post(shutdown))
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
@@ -406,6 +408,26 @@ async fn create_calibration(
             other => ApiError::Conflict(other.to_string()),
         })?;
     Ok((StatusCode::CREATED, Json(row)).into_response())
+}
+
+/// Retire a tube: hidden from New run, kept for the runs that used it.
+async fn archive_calibration(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    set_calibration_archived(&s, id, true).await
+}
+
+async fn restore_calibration(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    set_calibration_archived(&s, id, false).await
+}
+
+async fn set_calibration_archived(s: &AppState, id: i64, archived: bool) -> ApiResult<Response> {
+    let row = s
+        .control
+        .call(|reply| Command::SetCalibrationArchived { id, archived, reply })
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(row).into_response())
 }
 
 /// The in-progress calibration session, or `null` when there is none.
@@ -1173,6 +1195,40 @@ mod tests {
         let list = body_json(res).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!(list[0]["id"].as_i64(), Some(id));
+    }
+
+    #[tokio::test]
+    async fn archive_and_restore_a_calibration_over_http() {
+        let (state, runs) = state_with_three_bursts();
+        let app = router(state);
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/calibrations", calibration_body(runs, [50.0; 3])))
+            .await
+            .unwrap();
+        let id = body_json(res).await["id"].as_i64().unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(post_json(&format!("/api/calibrations/{id}/archive"), json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_json(res).await["archived_at"].is_string());
+
+        let res = app
+            .clone()
+            .oneshot(post_json(&format!("/api/calibrations/{id}/restore"), json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_json(res).await["archived_at"].is_null());
+
+        let res = app
+            .oneshot(post_json(&format!("/api/calibrations/{}/archive", id + 1), json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

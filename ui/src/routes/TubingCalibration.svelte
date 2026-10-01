@@ -64,6 +64,25 @@
       .catch(() => {});
   }
 
+  // Archived tubes stay on record (past runs point at them) but leave New run.
+  let showArchived = $state(false);
+  let archivedCount = $derived(history.filter((c) => c.archived_at).length);
+  let listed = $derived(showArchived ? history : history.filter((c) => !c.archived_at));
+  let archiving = $state(null); // id being archived/restored
+
+  async function setArchived(c, archived) {
+    err = null;
+    archiving = c.id;
+    try {
+      const row = await post(`/api/calibrations/${c.id}/${archived ? 'archive' : 'restore'}`);
+      history = history.map((h) => (h.id === row.id ? row : h));
+    } catch (e) {
+      err = { message: e.message, hint: null };
+    } finally {
+      archiving = null;
+    }
+  }
+
   function persist() {
     return post('/api/calibrations/draft', $state.snapshot(d)).catch(() => {});
   }
@@ -155,12 +174,42 @@
     }
   }
 
+  // A burst left pumping by an older session (e.g. one discarded before
+  // discard stopped the pump). Only calibration runs: a dosing run is stopped
+  // from its own panel.
+  async function stopOther() {
+    err = null;
+    working = true;
+    try {
+      await post(`/api/runs/${active.run_id}/stop`);
+    } catch (e) {
+      err = { message: e.message, hint: null };
+    } finally {
+      working = false;
+    }
+  }
+
   let weightInput = $state('');
   async function saveWeight() {
     const w = Number(weightInput);
     if (!(w > 0)) return;
     current.weight_g = w;
     weightInput = '';
+    await persist();
+  }
+
+  // Fix a mistyped weight on a burst already weighed, without pumping again.
+  let editing = $state(null); // burst index
+  let editInput = $state('');
+  function startEdit(i) {
+    editing = i;
+    editInput = String(d.bursts[i].weight_g);
+  }
+  async function saveEdit() {
+    const w = Number(editInput);
+    if (!(w > 0) || editing == null) return;
+    d.bursts[editing].weight_g = w;
+    editing = null;
     await persist();
   }
 
@@ -174,6 +223,20 @@
   let confirmDiscard = $state(false);
   async function discard() {
     confirmDiscard = false;
+    err = null;
+    // A burst still pumping must stop with its session: once the draft is
+    // gone nothing on this page knows the run is ours, and it would pump on.
+    if (burstRunning) {
+      working = true;
+      try {
+        await post(`/api/runs/${current.run_id}/stop`);
+      } catch (e) {
+        err = { message: `Could not stop the pump: ${e.message}`, hint: null };
+        return;
+      } finally {
+        working = false;
+      }
+    }
     await del('/api/calibrations/draft').catch(() => {});
     Object.assign(d, blank());
     saved = null;
@@ -250,7 +313,7 @@
       'outer_diameter_mm', 'control_var', 'setpoint',
       'density_g_per_ml', 'run_1_id', 'run_2_id', 'run_3_id', 'weight_1_g', 'weight_2_g',
       'weight_3_g', 'measured_1_ml_min', 'measured_2_ml_min', 'measured_3_ml_min',
-      'mean_measured_ml_min', 'cv_pct', 'c0', 'operator', 'note',
+      'mean_measured_ml_min', 'cv_pct', 'c0', 'operator', 'note', 'archived_at',
     ];
     const cell = (v) => {
       const s = v == null ? '' : String(v);
@@ -261,7 +324,7 @@
         c.id, c.created_at, c.tubing_lot_id, c.internal_ref, c.inner_diameter_mm,
         c.outer_diameter_mm, c.control_var, c.setpoint,
         c.density_g_per_ml, ...c.run_ids, ...c.weights_g, ...c.measured_ml_min,
-        c.mean_measured_ml_min, c.cv_pct, c.c0, c.operator, c.note,
+        c.mean_measured_ml_min, c.cv_pct, c.c0, c.operator, c.note, c.archived_at,
       ].map(cell).join(','),
     );
     const blob = new Blob([[cols.join(','), ...lines].join('\n') + '\n'], { type: 'text/csv' });
@@ -368,15 +431,29 @@
               <span>pumping, run #{b.run_id}{remainingS != null ? `, ${clock(remainingS)} left` : ''}</span>
             {:else if b.weight_g == null}
               <span>stopped, run #{b.run_id}: weigh the collected feed</span>
+            {:else if editing === i}
+              <input class="edit-w" type="number" step="0.01" min="0" bind:value={editInput}
+                onkeydown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') editing = null; }} />
+              <span>g</span>
+              <button class="btn-ghost small" disabled={!(Number(editInput) > 0)} onclick={saveEdit}>Save</button>
+              <button class="btn-ghost small" onclick={() => (editing = null)}>Cancel</button>
             {:else}
               <span class="mono">{num(b.weight_g, 2)} g{durations[b.run_id] ? ` in ${num(durations[b.run_id], 2)} min` : ''}</span>
+              <button class="btn-ghost small" disabled={working} onclick={() => startEdit(i)}>Edit</button>
             {/if}
           </li>
         {/each}
       </ol>
 
       {#if otherRunActive}
-        <p class="warn">Another run is active. Stop it before starting a burst.</p>
+        <p class="warn">
+          {active.kind === 'calibration'
+            ? `Calibration burst run #${active.run_id} is still pumping, outside this session.`
+            : 'Another run is active. Stop it before starting a burst.'}
+          {#if active.kind === 'calibration'}
+            <button class="btn-ghost" disabled={working} onclick={stopOther}>Stop it</button>
+          {/if}
+        </p>
       {/if}
 
       <div class="actions">
@@ -396,8 +473,10 @@
           <button class="btn-ghost" onclick={redoLast}>Redo burst {d.bursts.length}</button>
         {/if}
         {#if confirmDiscard}
-          <span class="confirm">Discard this session? The bursts stay in the run history.</span>
-          <button class="btn-danger" onclick={discard}>Discard</button>
+          <span class="confirm">
+            Discard this session?{burstRunning ? ' The pump stops now.' : ''} The bursts stay in the run history.
+          </span>
+          <button class="btn-danger" disabled={working} onclick={discard}>{burstRunning ? 'Stop and discard' : 'Discard'}</button>
           <button class="btn-ghost" onclick={() => (confirmDiscard = false)}>Keep</button>
         {:else if locked || d.tubing_lot_id}
           <button class="btn-danger" onclick={() => (confirmDiscard = true)}>Discard session</button>
@@ -444,16 +523,21 @@
     <div class="group">
       <div class="eyebrow row">
         <span>Recorded calibrations</span>
-        {#if history.length}<button class="btn-ghost" onclick={exportCsv}>Export CSV</button>{/if}
+        <span class="head-actions">
+          {#if archivedCount}
+            <label class="toggle"><input type="checkbox" bind:checked={showArchived} /> Show archived ({archivedCount})</label>
+          {/if}
+          {#if history.length}<button class="btn-ghost" onclick={exportCsv}>Export CSV</button>{/if}
+        </span>
       </div>
-      {#if history.length}
+      {#if listed.length}
         <table class="hist mono">
           <thead>
-            <tr><th>#</th><th>date</th><th>lot</th><th>internal ref</th><th>Ø int / ext (mm)</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th></tr>
+            <tr><th>#</th><th>date</th><th>lot</th><th>internal ref</th><th>Ø int / ext (mm)</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th><th></th></tr>
           </thead>
           <tbody>
-            {#each history as c (c.id)}
-              <tr>
+            {#each listed as c (c.id)}
+              <tr class:archived={c.archived_at}>
                 <td>{c.id}</td>
                 <td>{stamp(c.created_at)}</td>
                 <td>{c.tubing_lot_id}</td>
@@ -463,10 +547,24 @@
                 <td>{num(c.mean_measured_ml_min, 3)}</td>
                 <td class:bad={cvBad(c.cv_pct)}>{num(c.cv_pct, 2)}</td>
                 <td class:bad={c0Bad(c.control_var, c.c0)}>{c.control_var === 'ml_min' ? num(c.c0, 4) : '·'}</td>
+                <td class="row-action">
+                  {#if c.archived_at}
+                    <span class="tag" title="Archived {stamp(c.archived_at)}">archived</span>
+                    <button class="btn-ghost" disabled={archiving === c.id} onclick={() => setArchived(c, false)}>Restore</button>
+                  {:else}
+                    <button class="btn-ghost" disabled={archiving === c.id} onclick={() => setArchived(c, true)}>Archive</button>
+                  {/if}
+                </td>
               </tr>
             {/each}
           </tbody>
         </table>
+        <p class="help">
+          Archive a tube you no longer use: it leaves the New run list but stays on record, with
+          the runs that used it. Restore brings it back.
+        </p>
+      {:else if history.length}
+        <p class="muted">All calibrations are archived.</p>
       {:else}
         <p class="muted">None yet.</p>
       {/if}
@@ -493,6 +591,9 @@
   .bursts li { display: flex; gap: var(--s-3); align-items: baseline; font-size: 13px; }
   .bursts .n { color: var(--muted); min-width: 3ch; }
   .bursts li.done .n { color: var(--green-600); }
+  .bursts li { align-items: center; }
+  .edit-w { width: 90px; }
+  .btn-ghost.small { padding: 2px var(--s-2); font-size: 12px; }
   .actions { display: flex; gap: var(--s-3); align-items: flex-end; flex-wrap: wrap; margin-top: var(--s-3); }
   .weigh { width: 180px; }
   .confirm { font-size: 13px; align-self: center; }
@@ -511,6 +612,12 @@
   .hist { width: 100%; border-collapse: collapse; font-size: 12px; }
   .hist th { text-align: left; color: var(--muted); font-weight: 500; padding: var(--s-1) var(--s-2); }
   .hist td { padding: var(--s-1) var(--s-2); border-top: 1px solid var(--line); }
+  .hist tr.archived td { color: var(--muted); }
+  .hist .row-action { text-align: right; white-space: nowrap; }
+  .hist .row-action .btn-ghost { padding: 2px var(--s-2); font-size: 12px; }
+  .tag { font-size: 11px; margin-right: var(--s-2); color: var(--muted); }
+  .head-actions { display: flex; align-items: center; gap: var(--s-3); }
+  .toggle { font-size: 12px; font-weight: 400; color: var(--muted); display: flex; align-items: center; gap: var(--s-1); }
   @media (max-width: 720px) {
     .hist { display: block; overflow-x: auto; }
   }
