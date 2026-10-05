@@ -79,24 +79,102 @@ pub struct Ratio {
 /// holding the settled mass and time when the history allows it, else over
 /// the shortest one holding the minimum. `None` until even that exists.
 pub fn delivery_ratio(points: &[TrackPoint], resolution_g: f64) -> Option<Ratio> {
+    match window_start(points, resolution_g, SETTLED_WINDOW_RESOLUTIONS, SETTLED_WINDOW_S) {
+        Some(s) => slope_from(points, s).map(|k| Ratio { k, settled: true }),
+        None => recent_ratio(points, resolution_g).map(|k| Ratio { k, settled: false }),
+    }
+}
+
+/// The ratio over the shortest recent window holding the minimum mass and
+/// time only, never the settled one: what the pump does *now*. Used to see
+/// a feed flowing again after an alarm, which a 20 g window still full of
+/// the stopped stretch would hide for many minutes.
+pub fn recent_ratio(points: &[TrackPoint], resolution_g: f64) -> Option<f64> {
+    slope_from(points, window_start(points, resolution_g, MIN_WINDOW_RESOLUTIONS, MIN_WINDOW_S)?)
+}
+
+fn window_start(points: &[TrackPoint], resolution_g: f64, mass_steps: f64, secs: f64) -> Option<usize> {
     let last = points.last()?;
-    let window = |mass_steps: f64, secs: f64| {
-        let mass = mass_steps * resolution_g;
-        points
-            .iter()
-            .rposition(|p| last.commanded_g - p.commanded_g >= mass && last.t_s - p.t_s >= secs)
-    };
-    let (start, settled) = match window(SETTLED_WINDOW_RESOLUTIONS, SETTLED_WINDOW_S) {
-        Some(s) => (s, true),
-        None => (window(MIN_WINDOW_RESOLUTIONS, MIN_WINDOW_S)?, false),
-    };
+    let mass = mass_steps * resolution_g;
+    points
+        .iter()
+        .rposition(|p| last.commanded_g - p.commanded_g >= mass && last.t_s - p.t_s >= secs)
+}
+
+fn slope_from(points: &[TrackPoint], start: usize) -> Option<f64> {
     let xy: Vec<(f64, f64)> = points[start..]
         .iter()
         .map(|p| (p.commanded_g, p.delivered_g))
         .collect();
     let k = theil_sen_slope(&decimate(&xy, MAX_SLOPE_POINTS))?;
-    k.is_finite().then_some(Ratio { k: k.max(0.0), settled })
+    k.is_finite().then_some(k.max(0.0))
 }
+
+/// Why the trim stopped regulating. Raised with c restored to its value from
+/// before the problem and frozen; `FeedStopped` and `Saturated` clear by
+/// themselves once the feed flows within bounds again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrimAlarm {
+    /// The pump runs but the bottle's weight does not move: bottle empty,
+    /// line blocked or disconnected.
+    FeedStopped,
+    /// The pump delivers outside what the correction limit can make up.
+    Saturated,
+    /// The weight moves the wrong way for the configured balance position.
+    WrongSide,
+}
+
+impl TrimAlarm {
+    pub fn event_kind(self) -> &'static str {
+        match self {
+            TrimAlarm::FeedStopped => "alarm_feed_stopped",
+            TrimAlarm::Saturated => "alarm_saturated",
+            TrimAlarm::WrongSide => "alarm_wrong_side",
+        }
+    }
+}
+
+/// The weight must fall this many balance steps for the feed to count as
+/// leaving the bottle (one step is rounding and jitter).
+pub const FLOW_MOVE_RESOLUTIONS: f64 = 2.0;
+/// No such fall for this long, while the pump was told to move at least
+/// `FEED_STOP_RESOLUTIONS` balance steps: the feed has stopped. 3 min, and
+/// 1 g on a 0.1 g balance (10 g on a 1 g one), so neither a slow feed nor a
+/// coarse balance reads as stopped.
+pub const FEED_STOP_MIN_S: f64 = 180.0;
+pub const FEED_STOP_RESOLUTIONS: f64 = 10.0;
+
+/// Where the feed was last seen leaving the bottle.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FlowRef {
+    pub t_s: f64,
+    pub weight_g: f64,
+    pub commanded_g: f64,
+}
+
+/// Update the flow reference with a `Normal` read: it moves on each real fall.
+pub fn track_flow(r: Option<FlowRef>, t_s: f64, weight_g: f64, commanded_g: f64, resolution_g: f64) -> FlowRef {
+    match r {
+        Some(r) if r.weight_g - weight_g < FLOW_MOVE_RESOLUTIONS * resolution_g => r,
+        _ => FlowRef { t_s, weight_g, commanded_g },
+    }
+}
+
+/// Whether the pump has been told to move feed that never left the bottle.
+pub fn feed_stopped(r: Option<FlowRef>, t_s: f64, commanded_g: f64, resolution_g: f64) -> bool {
+    r.is_some_and(|r| {
+        t_s - r.t_s >= FEED_STOP_MIN_S && commanded_g - r.commanded_g >= FEED_STOP_RESOLUTIONS * resolution_g
+    })
+}
+
+/// c as it was at `t_s`, from the `(t_s, c)` samples kept at each update.
+pub fn c_at(history: &std::collections::VecDeque<(f64, f64)>, t_s: f64) -> Option<f64> {
+    history.iter().rev().find(|(t, _)| *t <= t_s).map(|(_, c)| *c)
+}
+
+/// How long the c history reaches back: an alarm's onset is never older.
+pub const C_HISTORY_S: f64 = 3600.0;
 
 /// Bound the point history to `cap`: the newer half stays at full density,
 /// the older half is evenly thinned. The span back to the first point is

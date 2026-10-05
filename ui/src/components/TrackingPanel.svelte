@@ -5,6 +5,7 @@
   import { get } from '../lib/api.js';
   import { num, dur } from '../lib/fmt.js';
   import { app } from '../lib/state.svelte.js';
+  import { bottleWeights } from '../lib/balance.js';
   import Chart from './Chart.svelte';
 
   let { runId, durationS, live = false } = $props();
@@ -72,7 +73,20 @@
     return `${top.join(' ')} ${bottom.join(' ')} Z`;
   });
   // When the regulation acted, from the daemon's journal.
-  const MARKER_LABELS = { trim_start: 'correction starts', trim_ratio: 'pump ratio measured' };
+  const MARKER_LABELS = {
+    trim_start: 'correction starts',
+    trim_ratio: 'pump ratio measured',
+    alarm_feed_stopped: 'feed stopped (alarm)',
+    alarm_saturated: 'correction out of bounds (alarm)',
+    alarm_wrong_side: 'balance on the other side (alarm)',
+    alarm_cleared: 'feed flowing again, regulation resumed',
+    refill: 'bottle refilled',
+  };
+  const bottle = $derived(bottleWeights(report));
+  // Feed missed during alarms: part of the gap above, deliberately not paid back.
+  const missedMl = $derived(
+    live && app.status?.active?.run_id === runId ? (app.status?.tracking?.missed_ml ?? 0) : 0,
+  );
   // In time order: the chart numbers its badges the same way.
   const markers = $derived(
     (report?.markers ?? [])
@@ -101,6 +115,22 @@
         <b class="mono" class:ok={inBand} class:off={!inBand}>{gapNow >= 0 ? '+' : ''}{num(gapNow, 2)} mL</b>,
         {inBand ? 'within' : 'outside'} ±{TOL * 100} %
       </p>
+      {#if bottle}
+        <p class="bottle mono">
+          Balance: <b>{num(bottle.start, 1)} g</b> at start
+          {#each bottle.refills as r}
+            · refill at {dur(r.t_s)}: <b>{num(r.before_g, 1)} → {num(r.after_g, 1)} g</b>
+          {/each}
+          · <b>{num(bottle.end, 1)} g</b> {live ? 'now' : 'at end'}
+          · weighed {bottle.weighedOut >= 0 ? 'out' : 'in'} <b>{num(Math.abs(bottle.weighedOut), 1)} g</b>
+        </p>
+      {/if}
+      {#if missedMl > 0.05}
+        <p class="missed">
+          Of which <b>{num(missedMl, 1)} mL</b> missed while the feed was stopped: kept in the
+          totals, not caught up, to avoid a burst of overfeed.
+        </p>
+      {/if}
     {/if}
     <div class="legend">
       <span><i class="sw req"></i>requested</span>
@@ -178,6 +208,10 @@
   }
   .headline .off { color: var(--danger); }
   .headline .ok { color: var(--green-600); }
+  .bottle { font-size: 12px; color: var(--muted); margin: calc(var(--s-2) * -1) 0 var(--s-3); line-height: 1.6; }
+  .bottle b { color: var(--ink); font-weight: 600; }
+  .missed { font-size: 12px; color: var(--muted); margin: calc(var(--s-2) * -1) 0 var(--s-3); }
+  .missed b { color: var(--ink); }
   .gap-head {
     display: flex;
     justify-content: space-between;

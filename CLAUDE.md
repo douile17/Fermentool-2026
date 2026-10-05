@@ -138,6 +138,93 @@ flooded the log with `system clock stepped mid-run`. If you touch `run_now` /
 `run_epoch`, keep that term; a regression here is invisible until a real
 crash-resume happens hours into a run.
 
+## Run end: the hold phase
+
+A dosing run does **not** finish when its curve does: past `duration_s` it
+holds the curve's end value (`value_at` is flat there), still trimmed and
+journalled every second, until Stop, which records it `completed` (`stopped`
+before the curve end). `ActiveStatus::curve_done` marks the phase; the
+end-of-curve pop-up only informs. A crash in the hold resumes into it, any
+time later. Calibration bursts are the exception: they still finish and stop
+the pump at their duration (their weighing window). `HoldingStatus` /
+`stop_pump` remain only for a hold left by an older daemon.
+
+## Gravimetric trim: regulation and alarms (`tracking.rs`, `engine::scale_tick`)
+
+- c starts at the tubing calibration's `c0` (`Tracker::c_seed`). Before the
+  delivery ratio exists, `next_c_early` pays back the cumulative deficit
+  around the seed (0.3 g dead band); a deficit past noise (10 balance steps
+  and 5 %) uses `early_ratio` (a slope, so the ~2 s start-up lag does not read
+  as a short pump) at full speed.
+- Ratio window: 50 balance steps / 120 s first, then 200 steps / 300 s
+  ("settled") with 0.5 % steps instead of 2 %. A 5 g window kept for a whole
+  run made c hunt ±10 % (run 19); the settled window fixed it. Every
+  threshold is in **balance steps** (`scale_resolution_g`), so a 1 g balance
+  scales them, except `WRONG_SIDE_MIN_G` (still 2 g fixed).
+- Bounds come from `[scale] trim_limit_pct` (`Bounds::from_limit_pct`,
+  symmetric: `[1/(1+p), 1+p]`), changeable during a run (only the limit; port,
+  baud, density and position are refused mid-run).
+- Alarms (`TrimAlarm`): `FeedStopped` (pump commanded 10 steps in 3 min, the
+  weight never fell by 2 steps), `Saturated` (ratio out of bounds 5 min),
+  `WrongSide`. Raising one puts c back to its value **from before the onset**
+  (`c_hist`, last hour), freezes it, clears the ratio points.
+  `FeedStopped`/`Saturated` clear by themselves once `recent_ratio` (minimum
+  window only, never the settled one) is back in bounds; the deficit
+  accumulated meanwhile is written off (`forgiven_g`), never paid back in a
+  burst. A wider limit lifts a `Saturated` alarm the same way.
+- The perturbation threshold follows the flow (`perturbation_limit_g`, 5x the
+  expected step, 1..5 g): a fixed 5 g let a 3.4 g bump at 2 ml/min pass as
+  flow.
+- Events journalled for the chart markers and notifications: `trim_start`,
+  `trim_ratio`, `alarm_*`, `alarm_cleared`, `refill` (`refill_detail` /
+  `parse_refill` must stay in step), `trim_limit`, `scale_lost`,
+  `scale_recovered`.
+
+## Notifications (`notify.rs`)
+
+A `notifier` thread follows the `events` table through its **own** SQLite
+connection (cursor in `app_state`, starts at "now" on first run, never
+replays history) and sends the notable events of a run to its
+`responsible` person only: ntfy (JSON publish to the server root, priority 5
+for alarms, 2 for info) and/or a Teams Workflow webhook (Adaptive Card).
+Never on the control thread: a dead service delays a message, never a pump
+write. Link up/down messages are rate-limited to one per 15 min per run.
+Alarms with an ongoing condition (`family_of`) become a `Page` that is resent
+on ntfy every `REPEAT` (3 min) until acknowledged, its condition clears
+(`clears`) or the run stops: shared with the API (`/api/notify/pages`,
+`/api/notify/ack`, the UI banner). The ntfy "Acknowledge" button posts
+`ack <run_id>` to `<topic>-ack`, polled every 15 s (ntfy.sh rate limit), so
+the phone never needs to reach this PC and nobody configures anything.
+Pages live in memory only; an ack is journalled as `alarm_ack`.
+`POST /api/runs` refuses a dosing run without a known responsible once
+`[notify] people` is non-empty. Calibration runs are never notified. Teams
+private messages need a Power Automate flow (the ready-made "to a chat"
+template only targets group chats), which is why ntfy is the default.
+
+## Working on this PC (2026-10)
+
+- Build from a Visual Studio **Community** environment:
+  `cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" && cargo ...'`.
+  The VS 2022 Build Tools on this PC are a broken install that `cargo` picks
+  by default (SQLite's C build then fails).
+- `rustc` occasionally dies with `STATUS_HEAP_CORRUPTION` here: retry once
+  before suspecting the code (and suspect the PC's RAM/disk, see
+  `docs/notes-de-session-2026-09-30.md`).
+- The running daemon is `target\release\fermentool-core.exe`, started by hand
+  with `FERMENTOOL_NO_BROWSER=1`, windowless. **Never run the debug build for
+  the user**: its console, once clicked into selection mode, blocks every
+  `WriteConsoleW` and froze the control thread.
+- Deploy: re-check `/api/status`, stop an active run through the API only when
+  the user asked for the deploy, `POST /api/shutdown`, `cargo build
+  --release`, start the exe, check `/api/status` and that the served bundle
+  contains the change; tell the user to Ctrl+F5 (an open tab keeps the old UI
+  in memory).
+- Rewriting a file through PowerShell `Get-Content`/`Set-Content` mangles its
+  UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
+  tools.
+- The session log, findings on the hardware and the to-do list:
+  `docs/notes-de-session-2026-09-30.md`.
+
 ## Curve engine (`crates/fermentool-curves`)
 
 `CurveSpec::value_at(elapsed)` is the single entry point and is **pure in

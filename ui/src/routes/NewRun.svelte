@@ -30,7 +30,17 @@
     gravimetric_trim: false,
     // tubing calibration picked for the gravimetric trim
     tubing_calibration_id: null,
+    // who the run belongs to: its Teams alerts go to them only
+    responsible: '',
   });
+
+  // The last person who started a run on this PC, as a starting choice.
+  const LAST_RESPONSIBLE = 'ft-last-responsible';
+  try {
+    f.responsible = localStorage.getItem(LAST_RESPONSIBLE) ?? '';
+  } catch {
+    /* private mode: no default */
+  }
 
   // "Run again" from History drops a seed here; apply it once, then clear.
   if (app.prefill) {
@@ -40,14 +50,20 @@
 
   let pumpAddr = $state(1);
   let scaleConfigured = $state(false);
+  let people = $state([]);
   $effect(() => {
     get('/api/config')
       .then((c) => {
         pumpAddr = c.pump.address;
         scaleConfigured = (c.scale?.path?.length ?? 0) > 0;
+        people = (c.notify?.people ?? []).map((p) => p.name);
+        // A remembered name no longer in Settings is no choice at all.
+        if (!people.some((n) => n.toLowerCase() === f.responsible.trim().toLowerCase())) f.responsible = '';
       })
       .catch(() => {});
   });
+  // Required once anyone is set up for notifications (the daemon checks too).
+  const needsResponsible = $derived(people.length > 0 && !f.responsible);
   // The trim only applies with a balance configured; a "Run again" of a
   // trimmed run on a PC without one keeps the wish but shows why it is off.
   const trimOn = $derived(scaleConfigured && f.gravimetric_trim);
@@ -196,7 +212,13 @@
         curve: curveSpec(),
         gravimetric_trim: trimOn,
         tubing_calibration_id: trimOn ? f.tubing_calibration_id : null,
+        responsible: f.responsible || null,
       });
+      try {
+        if (f.responsible) localStorage.setItem(LAST_RESPONSIBLE, f.responsible);
+      } catch {
+        /* private mode */
+      }
       app.tab = 'overview';
     } catch (e) {
       startErr = { message: e.message, hint: e.hint ?? null };
@@ -230,6 +252,15 @@
       <label class="field"><span>Run name</span>
         <input type="text" bind:value={f.name} placeholder="e.g. ferment-A2" />
       </label>
+
+      {#if people.length}
+        <label class="field"><span>Responsible</span>
+          <select bind:value={f.responsible} class:missing={needsResponsible}>
+            <option value="" disabled>Who is this run for?</option>
+            {#each people as n}<option value={n}>{n}</option>{/each}
+          </select>
+        </label>
+      {/if}
 
       <div class="field dur-field"><span>Duration</span>
         <div class="dur">
@@ -425,7 +456,10 @@
   {/if}
 
   <div class="foot">
-    <button class="btn-primary" disabled={starting || busy || cannotStart || needsCalibration || !!previewErr || durationS <= 0} onclick={start}>
+    {#if needsResponsible}
+      <span class="need">Choose who is responsible: the run's alerts go to them.</span>
+    {/if}
+    <button class="btn-primary" disabled={starting || busy || cannotStart || needsCalibration || needsResponsible || !!previewErr || durationS <= 0} onclick={start}>
       {starting ? 'Starting…' : 'Start run'}
     </button>
   </div>
@@ -527,7 +561,9 @@
   }
   .pv-cap { font-size: 12px; color: var(--muted); margin-top: var(--s-2); }
   .muted { color: var(--muted); }
-  .foot { margin-top: var(--s-6); }
+  .foot { margin-top: var(--s-6); display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap; }
+  .need { font-size: 13px; color: var(--danger); }
+  select.missing { border-color: var(--danger); }
 
   .fb {
     margin-top: var(--s-5);

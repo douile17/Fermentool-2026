@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ScaleConfig, SerialConfig};
 use crate::scale;
 use crate::store::{
-    ControlVar, Direction, EventLevel, NewEvent, NewRun, NewTick, RunKind, RunStatus, Store,
-    StoreError,
+    ControlVar, Direction, EventLevel, EventRow, NewEvent, NewRun, NewTick, RunKind, RunStatus,
+    Store, StoreError,
 };
 use crate::transport::{SwapTransport, TransportKind};
 use crate::tracking;
@@ -235,6 +235,10 @@ pub struct RunConfig {
     /// mode its rpm-to-volume conversion). Required for a trimmed rpm run.
     #[serde(default)]
     pub tubing_calibration_id: Option<i64>,
+    /// Who the run belongs to (a `[notify]` person): its notifications go to
+    /// them only. Required by the API for a dosing run once people exist.
+    #[serde(default)]
+    pub responsible: Option<String>,
 }
 
 /// What [`Engine::pending_recovery`] found: a run that was `running` when the
@@ -417,6 +421,20 @@ struct ActiveRun {
     kind: RunKind,
 }
 
+/// The `refill` event's detail. [`parse_refill`] reads it back for the
+/// tracking report: keep the two in step.
+fn refill_detail(before_g: f64, after_g: f64) -> String {
+    format!("bottle refilled: {before_g:.1} g -> {after_g:.1} g ({:+.1} g)", after_g - before_g)
+}
+
+/// `(before_g, after_g)` from a [`refill_detail`] string.
+fn parse_refill(detail: &str) -> Option<(f64, f64)> {
+    let rest = detail.strip_prefix("bottle refilled: ")?;
+    let (before, rest) = rest.split_once(" g -> ")?;
+    let (after, _) = rest.split_once(" g")?;
+    Some((before.trim().parse().ok()?, after.trim().parse().ok()?))
+}
+
 /// Up to which elapsed time commanded volume is counted. A calibration burst
 /// ends at its duration, so a finishing tick's scheduling overshoot must not
 /// add time at the end rate. A dosing run keeps pumping through its hold
@@ -490,6 +508,10 @@ pub struct Engine<T: Transport> {
     /// cumulative mass balance measures from.
     refill_weight_g: Option<f64>,
     refill_at: Option<Timestamp>,
+    /// The balance reading (raw, as displayed) just before the current
+    /// refill began, journalled with the reading after it in a `refill`
+    /// event so a run's bottle weights can be checked end to end.
+    refill_before_g: Option<f64>,
     /// `(seconds_since_refill, weight_g)` samples since `refill_at`, feeding
     /// the Theil-Sen rate estimate. Cleared on every new refill reference.
     weight_buffer: Vec<(f64, f64)>,
@@ -593,6 +615,20 @@ struct Tracker {
     c_seed: Option<f64>,
     /// The `trim_start` event (c first moved) was journalled for this run.
     start_logged: bool,
+    /// Why the trim stopped regulating, if it did. c is frozen meanwhile.
+    alarm: Option<tracking::TrimAlarm>,
+    /// Where the feed was last seen leaving the bottle (feed-stop detection).
+    flow_ref: Option<tracking::FlowRef>,
+    /// Deficit written off when the feed came back after an alarm: what was
+    /// missed while it was stopped stays in the totals but is not paid back,
+    /// a burst of overfeed being worse for a culture than the gap itself.
+    forgiven_g: f64,
+    /// `(t_s, c)` at each update over the last hour: an alarm puts c back to
+    /// its value from before the problem started, not where it ended up.
+    #[serde(skip)]
+    c_hist: std::collections::VecDeque<(f64, f64)>,
+    /// When the current run of saturated updates began.
+    saturated_since_t: Option<f64>,
 }
 
 /// Delivered mass below `-max(WRONG_SIDE_MIN_G, WRONG_SIDE_FRACTION *
@@ -619,6 +655,20 @@ pub struct TrackingReport {
     /// When the regulation acted, for the chart: `trim_start` (c first
     /// moved) and `trim_ratio` (pump ratio first measured).
     pub markers: Vec<TrackMarker>,
+    /// Balance reading (as displayed) at the first and the last journalled
+    /// tick, and around each refill: the bottle's weights end to end, to
+    /// check the weighed-out total by hand.
+    pub weight_start_g: Option<f64>,
+    pub weight_end_g: Option<f64>,
+    pub refills: Vec<RefillRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RefillRecord {
+    /// Run elapsed time when the refill settled, seconds.
+    pub t_s: f64,
+    pub before_g: f64,
+    pub after_g: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -640,6 +690,10 @@ pub struct TrackingStatus {
     /// The weight moves the wrong way for the configured balance position
     /// (Settings, Balance): the trim is frozen, the numbers are not meaningful.
     pub wrong_side: bool,
+    /// Why the trim stopped regulating, if it did.
+    pub alarm: Option<tracking::TrimAlarm>,
+    /// Feed missed during past alarms, in the totals but not paid back, mL.
+    pub missed_ml: f64,
 }
 
 impl<T: Transport> Engine<T> {
@@ -694,6 +748,7 @@ impl<T: Transport> Engine<T> {
             scale_ok: true,
             refill_weight_g,
             refill_at,
+            refill_before_g: None,
             weight_buffer: Vec::new(),
             last_weight_g: None,
             settling_since: None,
@@ -1050,6 +1105,8 @@ impl<T: Transport> Engine<T> {
                         .then(|| 100.0 * (tr.required_g - tr.delivered_g) / tr.required_g),
                     delivery_ratio: tr.k,
                     wrong_side: tr.wrong_side,
+                    alarm: tr.alarm,
+                    missed_ml: ml(tr.forgiven_g),
                 }
             }),
         }
@@ -1125,6 +1182,7 @@ impl<T: Transport> Engine<T> {
         self.scale_state = trim::ScaleState::Normal;
         self.refill_weight_g = None;
         self.refill_at = None;
+        self.refill_before_g = None;
         self.weight_buffer.clear();
         self.last_weight_g = None;
         self.settling_since = None;
@@ -1185,6 +1243,7 @@ impl<T: Transport> Engine<T> {
             gravimetric_trim: cfg.gravimetric_trim,
             kind: cfg.kind,
             tubing_calibration_id: cfg.tubing_calibration_id,
+            responsible: cfg.responsible.clone(),
         })?;
         self.store.log_event(&NewEvent {
             run_id: Some(id),
@@ -1548,18 +1607,39 @@ impl<T: Transport> Engine<T> {
                 .collect();
             tracking::fit_exponential_mu(&pts, mu)
         });
-        let markers = self
-            .store
-            .events(Some(run_id), 10_000)?
-            .into_iter()
-            .filter(|e| e.kind == "trim_start" || e.kind == "trim_ratio")
-            .map(|e| TrackMarker {
-                t_s: e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0),
-                kind: e.kind,
+        let events = self.store.events(Some(run_id), 10_000)?;
+        let at = |e: &EventRow| e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0);
+        let markers = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind.as_str(),
+                    "trim_start"
+                        | "trim_ratio"
+                        | "alarm_feed_stopped"
+                        | "alarm_saturated"
+                        | "alarm_wrong_side"
+                        | "alarm_cleared"
+                        | "refill"
+                )
+            })
+            .map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() })
+            .collect();
+        let mut refills: Vec<RefillRecord> = events
+            .iter()
+            .filter(|e| e.kind == "refill")
+            .filter_map(|e| {
+                let (before_g, after_g) = parse_refill(e.detail.as_deref()?)?;
+                Some(RefillRecord { t_s: at(e), before_g, after_g })
             })
             .collect();
+        refills.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
+        let (weight_start_g, weight_end_g) = self.store.weight_bounds(run_id)?;
         Ok(Some(TrackingReport {
             markers,
+            weight_start_g,
+            weight_end_g,
+            refills,
             points: sampled
                 .iter()
                 .zip(required_ml.iter().zip(&delivered_ml))
@@ -1645,6 +1725,12 @@ impl<T: Transport> Engine<T> {
         if next == trim::ScaleState::RefillSettling && self.scale_state != trim::ScaleState::RefillSettling {
             self.settling_since = Some(now);
         }
+        // A refill begins: keep the last reading before the bottle was
+        // touched (the previous read, in the balance's own sign).
+        let refilling = |s| matches!(s, trim::ScaleState::RefillPending | trim::ScaleState::RefillSettling);
+        if refilling(next) && !refilling(self.scale_state) {
+            self.refill_before_g = Some(prev * self.scale_cfg.position.sign());
+        }
         // Only a real refill completing resets the cumulative reference. A
         // bump up to 50 g (Perturbation -> Normal) is transient: freeze, don't
         // reset, or a routine touch of the bottle would throw away hours of
@@ -1657,6 +1743,18 @@ impl<T: Transport> Engine<T> {
             // operator never calls refill_done, or the next tick would go
             // straight back to RefillPending and cycle forever.
             self.manual_refill_mode = false;
+            // Journal the bottle weights around the refill (raw readings).
+            if let (Some(before), Some(run_id)) =
+                (self.refill_before_g.take(), self.active.as_ref().map(|a| a.id))
+            {
+                let _ = self.store.log_event(&NewEvent {
+                    run_id: Some(run_id),
+                    wall_time: now,
+                    level: EventLevel::Info,
+                    kind: "refill".into(),
+                    detail: Some(refill_detail(before, raw_g)),
+                });
+            }
         }
         self.scale_state = next;
 
@@ -1672,6 +1770,9 @@ impl<T: Transport> Engine<T> {
                 refill: false,
             });
             anchor.refill |= refill;
+            // A touch or a refill moves the weight for reasons of its own:
+            // feed-stop detection re-anchors once the balance is Normal again.
+            self.tracker.flow_ref = None;
             if self.tracker.anchor != before {
                 self.save_trim_state();
             }
@@ -1721,6 +1822,7 @@ impl<T: Transport> Engine<T> {
         if tr.points.len() > WEIGHT_BUFFER_CAP {
             tr.points = tracking::thin(&tr.points, WEIGHT_BUFFER_CAP);
         }
+        tr.flow_ref = Some(tracking::track_flow(tr.flow_ref, t, weight_g, tr.commanded_g, resolution_g));
 
         if t - tr.last_update_t_s >= tracking::UPDATE_EVERY_S {
             save = true;
@@ -1739,7 +1841,14 @@ impl<T: Transport> Engine<T> {
             }
             return;
         }
-        if self.scale_ok
+        tr.c_hist.push_back((t, self.trim_c));
+        while tr.c_hist.front().is_some_and(|(t0, _)| *t0 < t - tracking::C_HISTORY_S) {
+            tr.c_hist.pop_front();
+        }
+        // An alarm to raise (kind, onset time, detail), applied once the
+        // tracker borrow ends: it restores c, so it needs the whole engine.
+        let mut raise: Option<(tracking::TrimAlarm, f64, String)> = None;
+        if tr.alarm.is_none()
             && tr.delivered_g < -(WRONG_SIDE_FRACTION * tr.required_g).max(WRONG_SIDE_MIN_G)
         {
             // Correcting against a mirrored measurement would drive c to its
@@ -1750,7 +1859,27 @@ impl<T: Transport> Engine<T> {
                 "balance weight moves the wrong way for its configured position; trim frozen"
             );
             tr.wrong_side = true;
-            self.scale_ok = false;
+            raise = Some((
+                tracking::TrimAlarm::WrongSide,
+                0.0,
+                "balance weight moves the wrong way for its configured position".into(),
+            ));
+        }
+        if raise.is_none()
+            && tr.alarm.is_none()
+            && tracking::feed_stopped(tr.flow_ref, t, tr.commanded_g, resolution_g)
+        {
+            let r = tr.flow_ref.expect("feed_stopped implies a reference");
+            raise = Some((
+                tracking::TrimAlarm::FeedStopped,
+                r.t_s,
+                format!(
+                    "feed stopped: bottle empty or line blocked ({:.1} g commanded in {:.0} s, \
+                     weight did not move)",
+                    tr.commanded_g - r.commanded_g,
+                    t - r.t_s
+                ),
+            ));
         }
         let rate = spec.value_at(Duration::from_secs_f64(t)) * ml_per_unit * density / 60.0;
         // The two moments the tracking chart marks: c first moves, and the
@@ -1758,7 +1887,37 @@ impl<T: Transport> Engine<T> {
         // they survive a restart and show in History.
         let mut trim_events: Vec<(&str, String)> = Vec::new();
         let c_before = self.trim_c;
-        if self.scale_ok {
+        // An alarm that clears by itself: the pump delivers within bounds
+        // again (bottle refilled, tube put back). Judged on the recent window
+        // only, the history is still full of the stopped stretch.
+        let mut cleared = false;
+        if raise.is_none()
+            && matches!(tr.alarm, Some(tracking::TrimAlarm::FeedStopped | tracking::TrimAlarm::Saturated))
+        {
+            if let Some(k) = tracking::recent_ratio(&tr.points, resolution_g) {
+                if !tracking::needs_alarm(k, bounds) {
+                    let missed = tr.required_g - tr.delivered_g - tr.forgiven_g;
+                    tr.forgiven_g += missed;
+                    tr.alarm = None;
+                    tr.k = Some(k);
+                    tr.saturated_updates = 0;
+                    tr.saturated_since_t = None;
+                    tr.flow_ref = None;
+                    cleared = true;
+                    trim_events.push((
+                        "alarm_cleared",
+                        format!(
+                            "feed flowing again (pump ratio {k:.3}), regulation resumed at x{:.3}; \
+                             {missed:.1} g missed meanwhile are not caught up",
+                            self.trim_c
+                        ),
+                    ));
+                }
+            }
+        }
+        if cleared {
+            self.scale_ok = true;
+        } else if self.scale_ok && raise.is_none() && tr.alarm.is_none() {
             let ratio = tracking::delivery_ratio(&tr.points, resolution_g);
             if ratio.is_none() && tr.k.is_none() {
                 // No ratio yet (the first few g of a slow feed). A deficit well
@@ -1766,7 +1925,7 @@ impl<T: Transport> Engine<T> {
                 // wrong calibration): estimate the ratio from what there is and
                 // correct at full speed, as the ratio path would. Otherwise
                 // nudge around the starting c on the cumulative deficit.
-                let deficit = tr.required_g - tr.delivered_g;
+                let deficit = tr.required_g - tr.delivered_g - tr.forgiven_g;
                 let early_k = tracking::deficit_is_significant(deficit, tr.required_g, resolution_g)
                     .then(|| tracking::early_ratio(&tr.points, resolution_g))
                     .flatten();
@@ -1785,17 +1944,27 @@ impl<T: Transport> Engine<T> {
                     ));
                 }
                 tr.k = Some(k);
-                tr.saturated_updates = if tracking::needs_alarm(k, bounds) {
-                    tr.saturated_updates + 1
+                if tracking::needs_alarm(k, bounds) {
+                    tr.saturated_updates += 1;
+                    tr.saturated_since_t.get_or_insert(t);
                 } else {
-                    0
-                };
+                    tr.saturated_updates = 0;
+                    tr.saturated_since_t = None;
+                }
                 if tr.saturated_updates >= tracking::ALARM_AFTER_SATURATED_UPDATES {
                     // The pump can't be brought on track within the c bounds:
-                    // freeze c and say so. Accounting goes on for the record.
-                    self.scale_ok = false;
+                    // c goes back to before it started chasing, frozen.
+                    // Accounting goes on for the record.
+                    raise = Some((
+                        tracking::TrimAlarm::Saturated,
+                        tr.saturated_since_t.unwrap_or(t),
+                        format!(
+                            "pump delivers {:.0} % of its setpoint, beyond the correction limit",
+                            100.0 * k
+                        ),
+                    ));
                 } else {
-                    let deficit = tr.required_g - tr.delivered_g;
+                    let deficit = tr.required_g - tr.delivered_g - tr.forgiven_g;
                     self.trim_c = tracking::next_c_for(self.trim_c, r, deficit, rate, bounds);
                 }
             }
@@ -1825,9 +1994,47 @@ impl<T: Transport> Engine<T> {
                 });
             }
         }
+        if let Some((kind, onset_t, detail)) = raise {
+            self.raise_trim_alarm(kind, onset_t, now, detail);
+        }
         if save {
             self.save_trim_state();
         }
+    }
+
+    /// Stop regulating, say why, and put c back to its value from before the
+    /// problem began (`onset_t`), not the one it reached chasing it: a run
+    /// left on that alarm, or whose bottle is refilled, then delivers its
+    /// last known-good flow instead of overfeeding at the bound. The ratio
+    /// history is dropped so the recovery check sees only what follows.
+    fn raise_trim_alarm(&mut self, kind: tracking::TrimAlarm, onset_t: f64, now: Timestamp, detail: String) {
+        let tr = &mut self.tracker;
+        let restored = match kind {
+            // Chasing a mirrored deficit since the start: back to the seed.
+            tracking::TrimAlarm::WrongSide => tr.c_seed,
+            _ => tracking::c_at(&tr.c_hist, onset_t).or(tr.c_seed),
+        };
+        let before = self.trim_c;
+        if let Some(c) = restored {
+            self.trim_c = c;
+        }
+        tr.alarm = Some(kind);
+        tr.points.clear();
+        tr.k = None;
+        tr.saturated_updates = 0;
+        tr.saturated_since_t = None;
+        self.scale_ok = false;
+        tracing::warn!(?kind, before, after = self.trim_c, "trim alarm: {detail}");
+        if let Some(run_id) = self.active.as_ref().map(|a| a.id) {
+            let _ = self.store.log_event(&NewEvent {
+                run_id: Some(run_id),
+                wall_time: now,
+                level: EventLevel::Error,
+                kind: kind.event_kind().into(),
+                detail: Some(format!("{detail}; correction frozen at x{:.3} (was x{before:.3})", self.trim_c)),
+            });
+        }
+        self.save_trim_state();
     }
 
     /// Operator-declared "I'm about to change the bottle": forces the state
@@ -1872,10 +2079,20 @@ impl<T: Transport> Engine<T> {
         }
         self.scale_cfg.trim_limit_pct = pct;
         self.trim_c = self.trim_bounds().clamp(self.trim_c);
-        let lifted = !self.scale_ok && !self.tracker.wrong_side;
+        // Only a saturation alarm is about the limit; a stopped feed or a
+        // mirrored balance is not fixed by allowing more correction.
+        let lifted = self.tracker.alarm == Some(tracking::TrimAlarm::Saturated);
+        let mut missed = 0.0;
         if lifted {
+            // Same as a recovery: what the pump fell short by while out of
+            // bounds is written off, not paid back in a burst.
+            let tr = &mut self.tracker;
+            missed = tr.required_g - tr.delivered_g - tr.forgiven_g;
+            tr.forgiven_g += missed;
+            tr.alarm = None;
+            tr.saturated_updates = 0;
+            tr.saturated_since_t = None;
             self.scale_ok = true;
-            self.tracker.saturated_updates = 0;
         }
         if let Some(run_id) = self.active.as_ref().map(|a| a.id) {
             let _ = self.store.log_event(&NewEvent {
@@ -1885,7 +2102,11 @@ impl<T: Transport> Engine<T> {
                 kind: "trim_limit".into(),
                 detail: Some(format!(
                     "correction limit ±{old}% -> ±{pct}%{}",
-                    if lifted { ", saturation alarm lifted" } else { "" }
+                    if lifted {
+                        format!(", saturation alarm lifted ({missed:.1} g missed meanwhile are not caught up)")
+                    } else {
+                        String::new()
+                    }
                 )),
             });
         }
@@ -2129,6 +2350,11 @@ impl<T: Transport> Engine<T> {
             if let Some(cal_id) = run.tubing_calibration_id {
                 self.rpm_to_ml_min = self.store.calibration(cal_id)?.map(|c| calibration_ml_per_rpm(&c));
             }
+        }
+        // An alarm saved before the crash still stands: the trim stays frozen
+        // until the feed is seen flowing within bounds again.
+        if run.gravimetric_trim && self.tracker.alarm.is_some() {
+            self.scale_ok = false;
         }
         // The tracker was restored with the trim. Anchor it on the last weight
         // seen before the crash, so the downtime (the pump kept going) is
@@ -2429,6 +2655,7 @@ mod tests {
             gravimetric_trim: false,
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
+            responsible: None,
         }
     }
 
@@ -2961,6 +3188,7 @@ mod tests {
                     gravimetric_trim: false,
                     kind: RunKind::Calibration,
                     tubing_calibration_id: None,
+                    responsible: None,
                 })
                 .unwrap();
             store
@@ -3014,6 +3242,7 @@ mod tests {
             control_var: ControlVar::Rpm,
             gravimetric_trim: true,
             tubing_calibration_id: None,
+            responsible: None,
             ..linear_cfg()
         };
         let err = e.start_run(cfg, t0()).unwrap_err();
@@ -3158,6 +3387,130 @@ mod tests {
         (e, spec)
     }
 
+    /// Run 48 replayed: 0.9 ml/min on a pump delivering 92 %; the bottle
+    /// runs dry at `dry_at` s, is refilled (+300 g) at `refill_at` s, and the
+    /// run goes on to `end` s. Returns (engine, run id, c every second).
+    fn bottle_runs_dry(dry_at: i64, refill_at: i64, end: i64) -> (Engine<SimPump>, i64, Vec<f64>) {
+        let spec = CurveSpec::linear(0.9, 0.9, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let mut w = 450.0;
+        let mut cs = Vec::new();
+        for i in 0..end {
+            if i == refill_at {
+                w += 300.0;
+            }
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            cs.push(e.trim_c());
+            if !(dry_at..refill_at).contains(&i) {
+                w -= 0.92 * spec.value_at(Duration::from_secs(i as u64)) / 60.0 * e.trim_c();
+            }
+        }
+        (e, id, cs)
+    }
+
+    fn event_times(e: &Engine<SimPump>, id: i64, kind: &str) -> Vec<i64> {
+        let mut v: Vec<i64> = e
+            .store()
+            .events(Some(id), 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == kind)
+            .map(|ev| ev.wall_time.duration_since(t0()).as_secs())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn an_empty_bottle_is_called_out_fast_and_c_goes_back_to_before_it() {
+        let (dry_at, refill_at) = (1500, 2700);
+        let (e, id, cs) = bottle_runs_dry(dry_at, refill_at, refill_at);
+        let alarm = event_times(&e, id, "alarm_feed_stopped");
+        assert_eq!(alarm.len(), 1, "one alarm");
+        // Run 48 took 9 min to alarm, as a saturation; now ~3 min, by name.
+        assert!(alarm[0] - dry_at <= 240, "alarm {} s after the bottle ran dry", alarm[0] - dry_at);
+        let st = e.status();
+        assert_eq!(st.tracking.as_ref().unwrap().alarm, Some(tracking::TrimAlarm::FeedStopped));
+        assert!(!st.scale_ok);
+        // c is back to where it was when the feed last flowed (not where the
+        // chase took it), and stays there while the alarm stands.
+        let before = cs[dry_at as usize];
+        let chased = cs[dry_at as usize..alarm[0] as usize].iter().cloned().fold(0.0, f64::max);
+        let frozen = cs[(alarm[0] + 1) as usize];
+        assert!((frozen - before).abs() < 0.011, "frozen at {frozen}, was {before} when the bottle ran dry");
+        assert!(frozen < chased, "restored below the chase ({chased})");
+        assert!(cs[(alarm[0] + 1) as usize..].iter().all(|&c| c == frozen), "c moved during the alarm");
+        assert!((before - 1.0 / 0.92).abs() < 0.03, "c before = {before}");
+    }
+
+    #[test]
+    fn a_refill_is_journalled_with_the_bottle_weights_around_it() {
+        // The dry bottle stood at 450 - ~22.4 g; refilled +300 g at 2700 s.
+        let (dry_at, refill_at, end) = (1500, 2700, 3000);
+        let (mut e, id, _) = bottle_runs_dry(dry_at, refill_at, end);
+        for i in 0..3 {
+            e.tick(at(end + i)).unwrap(); // a few journal rows for the report
+        }
+        let report = e.tracking_report(id).unwrap().expect("a trimmed run has a report");
+        assert_eq!(report.refills.len(), 1, "{:?}", report.refills);
+        let r = &report.refills[0];
+        // "After" is read once the balance has settled (~10 s), the pump
+        // drawing meanwhile: a few tenths under the 300 g poured.
+        assert!((r.after_g - r.before_g - 300.0).abs() < 0.5, "{r:?}");
+        assert!(r.before_g < 430.0 && r.before_g > 420.0, "{r:?}");
+        assert!(report.markers.iter().any(|m| m.kind == "refill"));
+        assert_eq!(parse_refill(&refill_detail(413.5, 753.5)), Some((413.5, 753.5)));
+    }
+
+    #[test]
+    fn after_a_refill_the_regulation_resumes_without_a_catch_up_burst() {
+        let (dry_at, refill_at, end) = (1500, 2700, 4500);
+        let (e, id, cs) = bottle_runs_dry(dry_at, refill_at, end);
+        let cleared = event_times(&e, id, "alarm_cleared");
+        assert_eq!(cleared.len(), 1, "cleared once");
+        assert!(cleared[0] > refill_at && cleared[0] - refill_at <= 600, "cleared {} s after the refill", cleared[0] - refill_at);
+        let st = e.status();
+        let tr = st.tracking.unwrap();
+        assert!(st.scale_ok && tr.alarm.is_none());
+        // The ~18 g missed while dry are written off, not paid back: c never
+        // shoots up after the refill.
+        let missed = 0.9 * (refill_at - dry_at) as f64 / 60.0;
+        assert!((tr.missed_ml - missed).abs() < 4.0, "missed {} vs ~{missed}", tr.missed_ml);
+        let peak = cs[refill_at as usize..].iter().cloned().fold(0.0, f64::max);
+        assert!(peak < 1.0 / 0.92 + 0.04, "c peaked at {peak} after the refill");
+        assert!((e.trim_c() - 1.0 / 0.92).abs() < 0.03, "c = {}", e.trim_c());
+    }
+
+    #[test]
+    fn a_feed_stop_alarm_survives_a_restart() {
+        let db = TempDb::new();
+        let spec = CurveSpec::linear(0.9, 0.9, Duration::from_secs(36_000));
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+            a.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+            let mut w = 450.0;
+            for i in 0..900i64 {
+                a.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+                a.scale_tick(at(i));
+                a.tick(at(i)).unwrap();
+                if i < 300 {
+                    w -= 0.9 / 60.0 * a.trim_c();
+                }
+            }
+            assert_eq!(a.status().tracking.unwrap().alarm, Some(tracking::TrimAlarm::FeedStopped));
+        }
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        b.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        b.resume(at(960), grace()).unwrap();
+        let st = b.status();
+        assert!(!st.scale_ok, "still frozen after the restart");
+        assert_eq!(st.tracking.unwrap().alarm, Some(tracking::TrimAlarm::FeedStopped));
+    }
+
     #[test]
     fn a_large_offset_is_corrected_at_full_speed_before_the_ratio_window() {
         let (mut e, spec) = moved_tube_run(25.0);
@@ -3177,11 +3530,15 @@ mod tests {
         assert!((e.trim_c() - 1.0 / 0.78).abs() < 0.03, "c = {}", e.trim_c());
         assert!(st.tracking.unwrap().deficit_pct.unwrap().abs() < 2.0);
 
-        // The default ±25 % pins c at 1.25 and, 5 min later, alarms.
+        // The default ±25 % cannot cover it: after 5 min out of bounds it
+        // alarms, with c put back to where it stood when that began, not
+        // left pinned at 1.25 to overfeed once the tube is fixed.
         let (mut e, spec) = moved_tube_run(25.0);
         simulate(&mut e, &spec, |_| 0.78, 780.0, 0, 900);
-        assert_eq!(e.trim_c(), 1.25);
-        assert!(!e.status().scale_ok);
+        let st = e.status();
+        assert!(!st.scale_ok);
+        assert_eq!(st.tracking.unwrap().alarm, Some(tracking::TrimAlarm::Saturated));
+        assert!(e.trim_c() < 1.25, "c = {}", e.trim_c());
     }
 
     #[test]
@@ -3342,18 +3699,23 @@ mod tests {
     }
 
     #[test]
-    fn a_blocked_line_alarms_after_five_minutes_and_freezes_c() {
+    fn a_blocked_line_is_called_a_stopped_feed_after_three_minutes() {
+        // Nothing leaves the bottle from the start. It used to take the
+        // saturation path (5 min of c pinned at its bound); it is now named
+        // for what it is, after FEED_STOP_MIN_S, with c back at its start.
         let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
         let mut e = engine();
         e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
         e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
-        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 0, 120 + 10 * 29);
-        assert!(e.status().scale_ok, "not before 30 saturated updates");
-        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 410, 30);
-        assert!(!e.status().scale_ok, "a line delivering nothing must alarm");
-        let c = e.trim_c();
-        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 440, 60);
-        assert_eq!(e.trim_c(), c, "c frozen by the alarm");
+        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 0, 170);
+        assert!(e.status().scale_ok, "not before 3 min");
+        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 170, 30);
+        let st = e.status();
+        assert!(!st.scale_ok, "a line delivering nothing must alarm");
+        assert_eq!(st.tracking.unwrap().alarm, Some(tracking::TrimAlarm::FeedStopped));
+        assert_eq!(e.trim_c(), 1.0, "back to the starting c");
+        simulate(&mut e, &spec, |_| 0.0, 2_000.0, 200, 120);
+        assert_eq!(e.trim_c(), 1.0, "c frozen by the alarm");
     }
 
     #[test]

@@ -51,6 +51,86 @@ pub struct Config {
     pub storage: StorageConfig,
     pub log: LogConfig,
     pub scale: ScaleConfig,
+    pub notify: NotifyConfig,
+}
+
+/// Notifications: who can run experiments, each with their own channel, so a
+/// run's alerts reach the person who started it only. The usual channel is
+/// ntfy (a phone app, one secret topic per person); a Teams Workflow webhook
+/// works too where the organisation allows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    pub people: Vec<Person>,
+    /// The ntfy server: the public one, or a lab-hosted instance.
+    pub ntfy_server: String,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self { people: Vec::new(), ntfy_server: "https://ntfy.sh".into() }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Person {
+    pub name: String,
+    /// Their ntfy topic. A secret: anyone who knows it can read and post.
+    pub ntfy_topic: String,
+    /// A Teams Workflow webhook URL, optional. A secret too.
+    pub webhook: String,
+}
+
+/// An ntfy topic must be hard to guess (it is the only access control on a
+/// public server) and made of the characters ntfy accepts.
+pub const NTFY_TOPIC_MIN_LEN: usize = 12;
+
+impl NotifyConfig {
+    /// The person called `name` (case-insensitive, trimmed).
+    pub fn person(&self, name: &str) -> Option<&Person> {
+        let name = name.trim();
+        self.people.iter().find(|p| p.name.trim().eq_ignore_ascii_case(name))
+    }
+
+    /// What a save checks: names set and distinct, each person reachable
+    /// (an ntfy topic, a Teams webhook, or both), topics well formed and not
+    /// shared, webhooks and the server https.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.ntfy_server.trim().starts_with("https://") {
+            return Err("the ntfy server must be an https:// URL".into());
+        }
+        for (i, p) in self.people.iter().enumerate() {
+            let name = p.name.trim();
+            if name.is_empty() {
+                return Err("every person needs a name".into());
+            }
+            if self.people[..i].iter().any(|q| q.name.trim().eq_ignore_ascii_case(name)) {
+                return Err(format!("\"{name}\" is listed twice"));
+            }
+            let (topic, hook) = (p.ntfy_topic.trim(), p.webhook.trim());
+            if topic.is_empty() && hook.is_empty() {
+                return Err(format!("{name} needs an ntfy topic (or a Teams webhook)"));
+            }
+            if !topic.is_empty() {
+                if topic.len() < NTFY_TOPIC_MIN_LEN
+                    || !topic.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(format!(
+                        "{name}'s ntfy topic must be at least {NTFY_TOPIC_MIN_LEN} letters, digits, - or _ \
+                         (use Generate)"
+                    ));
+                }
+                if self.people[..i].iter().any(|q| q.ntfy_topic.trim() == topic) {
+                    return Err(format!("{name}'s ntfy topic is already someone else's"));
+                }
+            }
+            if !hook.is_empty() && !hook.starts_with("https://") {
+                return Err(format!("{name}'s webhook must be an https:// URL"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +240,7 @@ impl Default for Config {
             storage: StorageConfig::default(),
             log: LogConfig::default(),
             scale: ScaleConfig::default(),
+            notify: NotifyConfig::default(),
         }
     }
 }
@@ -354,6 +435,37 @@ mod tests {
         // and one before `trim_limit_pct` the historical ±25 %.
         assert_eq!(cfg.scale.position, ScalePosition::Feed);
         assert_eq!(cfg.scale.trim_limit_pct, 25.0);
+    }
+
+    #[test]
+    fn notify_people_round_trip_and_validate() {
+        let toml = "[[notify.people]]\nname = \"Drew\"\nwebhook = \"https://example.invalid/hook\"\n";
+        let cfg = Config::from_toml(toml).unwrap();
+        assert_eq!(cfg.notify.person(" drew ").map(|p| p.name.as_str()), Some("Drew"));
+        assert!(cfg.notify.validate().is_ok());
+        let back = Config::from_toml(&cfg.to_toml().unwrap()).unwrap();
+        assert_eq!(back.notify.people, cfg.notify.people);
+        // A file from before has nobody.
+        assert!(Config::from_toml("port = 8730\n").unwrap().notify.people.is_empty());
+
+        let person = |name: &str, topic: &str, hook: &str| Person {
+            name: name.into(),
+            ntfy_topic: topic.into(),
+            webhook: hook.into(),
+        };
+        let with = |people: Vec<Person>| NotifyConfig { people, ..NotifyConfig::default() };
+        let mut bad = cfg.notify.clone();
+        bad.people.push(person("DREW", "", "https://x"));
+        assert!(bad.validate().is_err(), "duplicate name");
+        assert!(with(vec![person("A", "", "http://x")]).validate().is_err(), "not https");
+        assert!(with(vec![person("A", "", "")]).validate().is_err(), "unreachable");
+        // ntfy alone is enough; a short or odd topic is not.
+        assert!(with(vec![person("A", "fermentool-a-7x92kq", "")]).validate().is_ok());
+        assert!(with(vec![person("A", "andrew", "")]).validate().is_err(), "guessable");
+        assert!(with(vec![person("A", "fermentool a 7x92kq", "")]).validate().is_err(), "space");
+        let shared = with(vec![person("A", "fermentool-shared-1", ""), person("B", "fermentool-shared-1", "")]);
+        assert!(shared.validate().is_err(), "shared topic");
+        assert_eq!(NotifyConfig::default().ntfy_server, "https://ntfy.sh");
     }
 
     #[test]

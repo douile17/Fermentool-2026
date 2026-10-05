@@ -28,6 +28,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 anyhow = "1"
+# Teams notifications (HTTPS POST to a Workflow webhook), on the notifier's
+# own thread: a blocking client is the simple fit, rustls keeps the binary
+# free of system TLS libraries.
+ureq = { version = "2", features = ["json"] }
 # Later milestones add: tower-http (static serving), rust-embed (embed ui/dist).
 
 [dev-dependencies]

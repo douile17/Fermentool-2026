@@ -24,6 +24,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use fermentool_core::api::{self, AppState};
 use fermentool_core::config::{self, Config};
 use fermentool_core::control;
+use fermentool_core::notify;
 use fermentool_core::engine::Engine;
 use fermentool_core::scale;
 use fermentool_core::store::Store;
@@ -226,7 +227,13 @@ async fn main() -> anyhow::Result<()> {
         config_path: Arc::new(paths.config.clone()),
         shutdown: Arc::clone(&shutdown),
         events,
+        pages: notify::Pages::default(),
     };
+    // Notifications follow the journal on their own thread, reading the
+    // people/channels from the live config (Settings edits apply at once).
+    if let Err(e) = notify::spawn(paths.db.clone(), Arc::clone(&state.config), Arc::clone(&state.pages)) {
+        tracing::error!("cannot start the notifier ({e}); runs go on without alerts");
+    }
 
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {

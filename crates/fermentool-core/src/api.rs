@@ -24,7 +24,7 @@ use fermentool_modbus::serial::available_ports;
 use crate::config::Config;
 use crate::control::{Command, ControlHandle, DaemonStatus};
 use crate::engine::{ErrDetail, RunConfig};
-use crate::store::{NewCalibration, RunStatus, StoreError};
+use crate::store::{NewCalibration, RunKind, RunStatus, StoreError};
 
 /// The built Svelte UI (`ui/dist/`), baked into the binary. The folder path is
 /// resolved relative to this crate's `Cargo.toml`.
@@ -41,6 +41,8 @@ pub struct AppState {
     pub shutdown: Arc<Notify>,
     /// Status fan-out to `/api/ws` subscribers.
     pub events: broadcast::Sender<DaemonStatus>,
+    /// Alarms ringing until acknowledged, shared with the notifier.
+    pub pages: crate::notify::Pages,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -73,6 +75,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/calibrations/{id}/archive", post(archive_calibration))
         .route("/api/calibrations/{id}/restore", post(restore_calibration))
+        .route("/api/notify/test", post(notify_test))
+        .route("/api/notify/pages", get(notify_pages))
+        .route("/api/notify/ack", post(notify_ack))
         .route("/api/shutdown", post(shutdown))
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
@@ -167,6 +172,7 @@ async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiRe
     if !(new.scale.density_g_per_ml.is_finite() && new.scale.density_g_per_ml > 0.0) {
         return Err(ApiError::Bad("liquid density must be a positive number (g/mL)".into()));
     }
+    new.notify.validate().map_err(ApiError::Bad)?;
     let lim = new.scale.trim_limit_pct;
     if !(lim.is_finite()
         && (crate::config::TRIM_LIMIT_PCT_MIN..=crate::config::TRIM_LIMIT_PCT_MAX).contains(&lim))
@@ -256,7 +262,113 @@ async fn list_runs(State(s): State<AppState>, Query(q): Query<LimitQuery>) -> Ap
     Ok(Json(runs).into_response())
 }
 
-async fn create_run(State(s): State<AppState>, Json(cfg): Json<RunConfig>) -> ApiResult<Response> {
+#[derive(Deserialize)]
+struct NotifyTest {
+    #[serde(default)]
+    name: String,
+    /// The channels as typed in Settings (before a save); when both are
+    /// absent, the saved ones of `name`.
+    #[serde(default)]
+    ntfy_topic: Option<String>,
+    #[serde(default)]
+    webhook: Option<String>,
+    /// A test alarm instead: it rings every minute until acknowledged.
+    #[serde(default)]
+    alarm: bool,
+}
+
+/// Send a test message on every channel of a person, so they can check it
+/// reaches their phone / chat from Settings. Off the async workers (a
+/// blocking client, up to its own timeout).
+async fn notify_test(State(s): State<AppState>, Json(t): Json<NotifyTest>) -> ApiResult<Response> {
+    let notify = s.config.read().await.notify.clone();
+    let typed = crate::config::Person {
+        name: t.name.clone(),
+        ntfy_topic: t.ntfy_topic.unwrap_or_default(),
+        webhook: t.webhook.unwrap_or_default(),
+    };
+    let person = if typed.ntfy_topic.trim().is_empty() && typed.webhook.trim().is_empty() {
+        notify
+            .person(&t.name)
+            .cloned()
+            .ok_or_else(|| ApiError::Bad(format!("\"{}\" is not in Settings, Notifications", t.name)))?
+    } else {
+        typed
+    };
+    let check = crate::config::NotifyConfig {
+        people: vec![crate::config::Person { name: "x".into(), ..person.clone() }],
+        ntfy_server: notify.ntfy_server.clone(),
+    };
+    check.validate().map_err(ApiError::Bad)?;
+    let targets = crate::notify::targets(&person, &notify.ntfy_server);
+    let name = if t.name.trim().is_empty() { "You".to_string() } else { t.name.trim().to_string() };
+    if t.alarm {
+        let ntfy = targets
+            .into_iter()
+            .find(|t| matches!(t, crate::notify::Target::Ntfy { .. }))
+            .ok_or_else(|| ApiError::Bad("a test alarm needs an ntfy topic".into()))?;
+        let mut pages = s.pages.lock().unwrap_or_else(|p| p.into_inner());
+        pages.retain(|p| p.run_id != crate::notify::TEST_RUN);
+        pages.push(crate::notify::test_page(&name, ntfy));
+        return Ok(Json(json!({ "sent": true })).into_response());
+    }
+    let errors = tokio::task::spawn_blocking(move || {
+        let note = crate::notify::test_note(&name);
+        targets
+            .iter()
+            .filter_map(|t| crate::notify::deliver(t, &note).err())
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|_| ApiError::Down)?;
+    if !errors.is_empty() {
+        return Err(ApiError::Conflict(format!("test not delivered: {}", errors.join("; "))));
+    }
+    Ok(Json(json!({ "sent": true })).into_response())
+}
+
+/// The alarms still ringing, for the UI's banner.
+async fn notify_pages(State(s): State<AppState>) -> Json<Vec<crate::notify::Page>> {
+    let pages = s.pages.lock().unwrap_or_else(|p| p.into_inner());
+    Json(pages.iter().filter(|p| p.acked_by.is_none()).cloned().collect())
+}
+
+#[derive(Deserialize)]
+struct NotifyAck {
+    run_id: i64,
+}
+
+/// Acknowledge a run's ringing alarms from the UI. The notifier journals it
+/// and stops the reminders on its next pass (within seconds).
+async fn notify_ack(State(s): State<AppState>, Json(a): Json<NotifyAck>) -> ApiResult<Response> {
+    let at = jiff::Timestamp::now().as_second();
+    let mut pages = s.pages.lock().unwrap_or_else(|p| p.into_inner());
+    if !crate::notify::apply_ack(&mut pages, a.run_id, at, "the Fermentool UI") {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(json!({ "acknowledged": true })).into_response())
+}
+
+async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -> ApiResult<Response> {
+    // A dosing run names who it belongs to, so its alerts reach them and no
+    // one else: required once anyone is set up for notifications. The name
+    // is stored as configured (its case), a calibration burst goes without.
+    if cfg.kind == RunKind::Dosing {
+        let notify = s.config.read().await.notify.clone();
+        if !notify.people.is_empty() {
+            let given = cfg.responsible.as_deref().unwrap_or("").trim().to_string();
+            let Some(p) = notify.person(&given) else {
+                return Err(ApiError::Bad(if given.is_empty() {
+                    "choose who is responsible for this run (their alerts go to them)".into()
+                } else {
+                    format!("\"{given}\" is not in Settings, Notifications")
+                }));
+            };
+            cfg.responsible = Some(p.name.trim().to_string());
+        }
+    } else {
+        cfg.responsible = None;
+    }
     let id = s
         .control
         .call(|reply| Command::StartRun(cfg, reply))
@@ -745,6 +857,7 @@ mod tests {
             config_path: Arc::new(std::env::temp_dir().join("ft-api-test.toml")),
             shutdown: Arc::new(Notify::new()),
             events,
+            pages: Default::default(),
         }
     }
 
@@ -775,7 +888,51 @@ mod tests {
             config_path: Arc::new(std::env::temp_dir().join("ft-api-test.toml")),
             shutdown: Arc::new(Notify::new()),
             events,
+            pages: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_dosing_run_must_name_a_known_responsible_once_people_exist() {
+        let state = test_state();
+        state.config.write().await.notify.people.push(crate::config::Person {
+            name: "Drew".into(),
+            ntfy_topic: "fermentool-drew-x7k2".into(),
+            ..Default::default()
+        });
+        let app = router(state);
+        let body = |who: Option<&str>| {
+            let mut b = json!({ "name": "t", "control_var": "rpm", "direction": "cw",
+                                "pump_addr": 1, "curve": linear_curve() });
+            if let Some(w) = who {
+                b["responsible"] = json!(w);
+            }
+            b
+        };
+        for missing in [None, Some("  "), Some("Nobody")] {
+            let res = app.clone().oneshot(post_json("/api/runs", body(missing))).await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{missing:?}");
+        }
+        // Any case is accepted, the configured spelling is stored.
+        let res = app.clone().oneshot(post_json("/api/runs", body(Some("drew")))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = body_json(res).await["run_id"].as_i64().unwrap();
+        let run = body_json(app.oneshot(get(&format!("/api/runs/{id}"))).await.unwrap()).await;
+        assert_eq!(run["responsible"], json!("Drew"));
+    }
+
+    #[tokio::test]
+    async fn without_anyone_configured_a_run_needs_no_responsible() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(post_json(
+                "/api/runs",
+                json!({ "name": "t", "control_var": "rpm", "direction": "cw",
+                        "pump_addr": 1, "curve": linear_curve() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
@@ -1164,6 +1321,7 @@ mod tests {
                     gravimetric_trim: false,
                     kind: RunKind::Calibration,
                     tubing_calibration_id: None,
+                    responsible: None,
                 })
                 .unwrap();
             store

@@ -4,6 +4,7 @@
   import { num, dur, shortTime, stampY, unitFor, digitsFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
   import TrackingPanel from '../components/TrackingPanel.svelte';
+  import { bottleWeights } from '../lib/balance.js';
 
   let runs = $state([]);
   let err = $state(null);
@@ -77,7 +78,9 @@
       const p = await post('/api/preview', { curve: run.curve, samples: 200 });
       const ticks = await fetchAllTicks(id);
       const events = await get(`/api/runs/${id}/events?limit=100`);
-      sel = { run, planned: p.series, ticks, events };
+      // Runs without the balance trim have no report (404): no summary then.
+      const report = await get(`/api/runs/${id}/tracking`).catch(() => null);
+      sel = { run, planned: p.series, ticks, events, report };
     } catch (e) {
       err = e.message;
     }
@@ -105,6 +108,7 @@
       steepness: c.params.steepness ?? 8,
       gravimetric_trim: !!run.gravimetric_trim,
       tubing_calibration_id: run.gravimetric_trim ? (run.tubing_calibration_id ?? null) : null,
+      ...(run.responsible ? { responsible: run.responsible } : {}),
     };
     app.tab = 'new';
   }
@@ -134,13 +138,52 @@
     else if (sel) closeSel();
   }
 
+  // A summary block (run, bottle weights, totals), a blank line, then one row
+  // per journalled second with the balance reading and the delivered total.
   function exportCsv() {
     if (!sel) return;
-    const rows = [['seq', 'wall_time', 'elapsed_s', 'target', 'written_ok', 'readback']];
-    for (const t of sel.ticks) {
-      rows.push([t.seq, t.wall_time, t.elapsed_s, t.target, t.written_ok ? 1 : 0, t.readback ?? '']);
+    const { run, report } = sel;
+    const cell = (v) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+    };
+    const fix = (v, d) => (v == null ? '' : Number(v).toFixed(d));
+    const rows = [
+      ['run_id', run.id],
+      ['name', run.name],
+      ['status', run.status],
+      ['started_at', run.started_at],
+      ['ended_at', run.ended_at ?? ''],
+      ['responsible', run.responsible ?? ''],
+      ['control_var', run.control_var],
+      ['balance_trim', run.gravimetric_trim ? 1 : 0],
+    ];
+    const bottle = bottleWeights(report);
+    if (bottle) {
+      rows.push(['balance_start_g', fix(bottle.start, 1)]);
+      bottle.refills.forEach((r, i) => {
+        rows.push([`refill_${i + 1}_elapsed_s`, fix(r.t_s, 0)]);
+        rows.push([`refill_${i + 1}_before_g`, fix(r.before_g, 1)]);
+        rows.push([`refill_${i + 1}_after_g`, fix(r.after_g, 1)]);
+      });
+      rows.push(['balance_end_g', fix(bottle.end, 1)]);
+      rows.push(['weighed_out_g', fix(bottle.weighedOut, 1)]);
     }
-    const csv = rows.map((r) => r.join(',')).join('\n');
+    const last = report?.points?.at(-1);
+    if (last) {
+      rows.push(['requested_ml', fix(last[1], 2)]);
+      rows.push(['delivered_ml', fix(last[2], 2)]);
+      rows.push(['gap_ml', fix(last[2] - last[1], 2)]);
+    }
+    rows.push([]);
+    rows.push(['seq', 'wall_time', 'elapsed_s', 'target', 'written_ok', 'readback', 'balance_g', 'delivered_g']);
+    for (const t of sel.ticks) {
+      rows.push([
+        t.seq, t.wall_time, t.elapsed_s, t.target, t.written_ok ? 1 : 0, t.readback ?? '',
+        t.weight_g ?? '', t.delivered_g ?? '',
+      ]);
+    }
+    const csv = rows.map((r) => r.map(cell).join(',')).join('\n') + '\n';
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;
@@ -228,6 +271,7 @@
           <h2 id="ft-run-detail">{sel.run.name}</h2>
           <div class="sub mono">
             {stampY(sel.run.started_at)}{sel.run.ended_at ? ` → ${stampY(sel.run.ended_at)}` : ''}
+            {sel.run.responsible ? ` · ${sel.run.responsible}` : ''}
           </div>
         </div>
         <div class="hd-actions">

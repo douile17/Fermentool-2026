@@ -1,6 +1,6 @@
 <script>
   import { app } from './lib/state.svelte.js';
-  import { get, connectWs } from './lib/api.js';
+  import { get, post, connectWs } from './lib/api.js';
   import Overview from './routes/Overview.svelte';
   import NewRun from './routes/NewRun.svelte';
   import History from './routes/History.svelte';
@@ -52,12 +52,20 @@
           'The weight moves the wrong way for where Settings says the balance is (feed bottle or receiving vessel). Fix "Balance weighs" in Settings for the next run; this run keeps its pump setpoint, uncorrected.',
       };
     }
+    if (s.tracking?.alarm === 'feed_stopped') {
+      return {
+        tone: 'bad',
+        label: 'Feed stopped · bottle empty or line blocked',
+        title:
+          'The pump is running but the bottle weight has not moved for 3 minutes: refill the bottle, or check the line (pinched, disconnected, air). The correction is held at its last good value and resumes by itself once the feed flows again; what was missed meanwhile is not caught up.',
+      };
+    }
     if (!s.scale_ok) {
       return {
         tone: 'bad',
-        label: 'Balance · trim alarm',
+        label: 'Balance · correction out of bounds',
         title:
-          'The pump has needed more correction than the limit set in Settings (Balance, correction limit) for 5 minutes: check the tube in the head, leaks, the bottle. The correction is frozen until the next run.',
+          'For 5 minutes the pump has delivered further from its setpoint than the correction limit (Settings, Balance) can make up: check the tube in the head, leaks, the bottle. The correction is held at its value from before; it resumes by itself once the pump is back within bounds, or if you widen the limit.',
       };
     }
     const trimOn = !!s.active?.gravimetric_trim;
@@ -176,6 +184,33 @@
     }
   });
 
+  // Alarms the phone is being reminded of until someone acknowledges them.
+  let pages = $state([]);
+  let ackErr = $state(null);
+  $effect(() => {
+    let live = true;
+    const load = () =>
+      get('/api/notify/pages')
+        .then((p) => live && (pages = p ?? []))
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 5000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  });
+  const pageRuns = $derived([...new Map(pages.map((p) => [p.run_id, p])).values()]);
+  async function acknowledge(runId) {
+    ackErr = null;
+    try {
+      await post('/api/notify/ack', { run_id: runId });
+      pages = pages.filter((p) => p.run_id !== runId);
+    } catch (e) {
+      ackErr = e.message;
+    }
+  }
+
   function setTheme() {
     const root = document.documentElement;
     const dark = root.dataset.theme
@@ -235,6 +270,17 @@
   <main class="main">
     <div class="wrap">
       <ConnBar />
+
+      {#each pageRuns as p (p.run_id)}
+        <div class="paging" role="alert">
+          <span class="paging-text">
+            <b>{pages.filter((q) => q.run_id === p.run_id).map((q) => q.title).join(' · ')}</b>
+            <span class="paging-sub">Reminding {p.responsible}'s phone every few minutes until acknowledged ({p.sent} sent).</span>
+          </span>
+          <button class="btn-ghost" onclick={() => acknowledge(p.run_id)}>Acknowledge</button>
+        </div>
+      {/each}
+      {#if ackErr}<div class="err" style="margin-bottom:16px">{ackErr}</div>{/if}
 
       {#if app.route === 'settings'}
         <Settings />
@@ -374,6 +420,18 @@
     border-radius: 999px; width: 26px; height: 26px; padding: 0; font-size: 13px;
   }
   .theme:hover { color: var(--ink); }
+
+  .paging {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--s-4);
+    margin-bottom: var(--s-4);
+    padding: var(--s-3) var(--s-4);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+    background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+    border-radius: var(--radius-ctl);
+    color: var(--danger);
+  }
+  .paging-text { display: flex; flex-direction: column; gap: 2px; }
+  .paging-sub { font-size: 12px; color: var(--muted); }
 
   .main { padding: var(--s-7) var(--s-8) var(--s-8); }
   .wrap { max-width: 1000px; margin: 0 auto; }

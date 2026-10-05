@@ -25,7 +25,8 @@ use crate::engine::{
     REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
 };
 use crate::store::{
-    CalibrationRow, EventRow, NewCalibration, RunRow, RunStatus, StoreError, TickRow,
+    CalibrationRow, EventLevel, EventRow, NewCalibration, NewEvent, RunRow, RunStatus, StoreError,
+    TickRow,
 };
 use crate::transport::{SwapTransport, TransportKind};
 
@@ -582,15 +583,35 @@ fn maybe_recover_scale<T: Transport>(
     let prev_delay = next_retry.map(|(_, d)| d);
     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.recover_scale()))
         .unwrap_or(false);
+    // During a run the balance coming and going is part of its story (and
+    // notified): journal it. Idle, the log line is enough.
+    let journal = |engine: &Engine<T>, kind: &str, level: EventLevel, detail: &str| {
+        if let Some(a) = engine.status().active {
+            let _ = engine.store().log_event(&NewEvent {
+                run_id: Some(a.run_id),
+                wall_time: Timestamp::now(),
+                level,
+                kind: kind.into(),
+                detail: Some(detail.into()),
+            });
+        }
+    };
     if ok {
         if prev_delay.is_some() {
             tracing::info!("scale link reopened");
+            journal(engine, "scale_recovered", EventLevel::Info, "balance answering again");
         }
         *next_retry = None;
     } else {
         if prev_delay.is_none() {
             tracing::warn!(
                 "scale link down; auto-reconnecting (backoff {SERIAL_RETRY_MIN:?}..{SERIAL_RETRY_MAX:?})"
+            );
+            journal(
+                engine,
+                "scale_lost",
+                EventLevel::Error,
+                "balance not answering (cable, power?); correction frozen, retrying",
             );
         }
         let delay = match prev_delay {
@@ -836,6 +857,7 @@ mod tests {
             gravimetric_trim: false,
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
+            responsible: None,
         }
     }
 
@@ -901,6 +923,7 @@ mod tests {
             gravimetric_trim: false,
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
+            responsible: None,
         };
         handle
             .call(|reply| Command::StartRun(cfg, reply))
@@ -980,6 +1003,7 @@ mod tests {
             gravimetric_trim: false,
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
+            responsible: None,
         };
         let id = handle
             .call(|reply| Command::StartRun(cfg, reply))

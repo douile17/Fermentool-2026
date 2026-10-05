@@ -39,6 +39,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: include_str!("migrations/0005_calibration_archive.sql"),
     },
+    Migration {
+        version: 6,
+        sql: include_str!("migrations/0006_run_responsible.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -183,6 +187,8 @@ pub struct NewRun {
     pub kind: RunKind,
     /// The tubing calibration that seeded this run's trim, if any.
     pub tubing_calibration_id: Option<i64>,
+    /// Who the run belongs to; its notifications go to them only.
+    pub responsible: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -203,6 +209,7 @@ pub struct RunRow {
     pub gravimetric_trim: bool,
     pub kind: RunKind,
     pub tubing_calibration_id: Option<i64>,
+    pub responsible: Option<String>,
 }
 
 /// A tubing calibration to record: three hand-weighed bursts of one tube at
@@ -310,7 +317,7 @@ pub struct Store {
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
      direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
-     gravimetric_trim, kind, tubing_calibration_id";
+     gravimetric_trim, kind, tubing_calibration_id, responsible";
 
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
@@ -388,9 +395,9 @@ impl Store {
             "INSERT INTO runs
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
-                pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id)
+                pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id, responsible)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 r.name,
                 created,
@@ -407,6 +414,7 @@ impl Store {
                 r.gravimetric_trim as i64,
                 r.kind.as_str(),
                 r.tubing_calibration_id,
+                r.responsible.as_deref().map(str::trim).filter(|n| !n.is_empty()),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -685,6 +693,24 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The balance reading at a run's first and last ticks that have one.
+    pub fn weight_bounds(&self, run_id: i64) -> Result<(Option<f64>, Option<f64>)> {
+        let one = |order: &str| -> Result<Option<f64>> {
+            self.conn
+                .query_row(
+                    &format!(
+                        "SELECT weight_g FROM ticks WHERE run_id = ?1 AND weight_g IS NOT NULL
+                         ORDER BY seq {order} LIMIT 1"
+                    ),
+                    [run_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(StoreError::from)
+        };
+        Ok((one("ASC")?, one("DESC")?))
+    }
+
     /// The highest-`seq` tick for a run, if any.
     pub fn last_tick(&self, run_id: i64) -> Result<Option<TickRow>> {
         self.conn
@@ -746,6 +772,23 @@ impl Store {
     }
 
     // ---- app_state ----
+
+    /// Events with an id above `after`, oldest first, at most `limit`: the
+    /// notifier's feed, which only ever moves forward.
+    pub fn events_after(&self, after: i64, limit: i64) -> Result<Vec<EventRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {EVENT_COLS} FROM events WHERE id > ?1 ORDER BY id LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![after, limit], row_to_event)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The highest event id so far (0 when none).
+    pub fn last_event_id(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT coalesce(max(id), 0) FROM events", [], |r| r.get(0))?)
+    }
 
     pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
@@ -810,6 +853,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         gravimetric_trim: row.get::<_, i64>(13)? != 0,
         kind: parse_token(row.get(14)?, RunKind::from_token, "run kind")?,
         tubing_calibration_id: row.get(15)?,
+        responsible: row.get(16)?,
     })
 }
 
@@ -890,6 +934,7 @@ mod tests {
             gravimetric_trim: false,
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
+            responsible: None,
         }
     }
 
@@ -910,7 +955,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
     }
 
     #[test]
@@ -922,7 +967,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
     }
 
     #[test]
