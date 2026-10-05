@@ -177,6 +177,24 @@
     stopping = false;
   }
 
+  // Bottle refill on a trimmed run: announce it, then "Done" once poured.
+  // The balance also sees a refill by itself (a jump, or a steady rise from
+  // a transfer pump); the buttons only make it certain.
+  const refilling = $derived(
+    app.status?.scale_state === 'refill_pending' || app.status?.scale_state === 'refill_settling'
+  );
+  let refillBusy = $state(false);
+  async function refill(done) {
+    refillBusy = true;
+    err = null;
+    try {
+      await post(done ? '/api/scale/refill_done' : '/api/scale/refill_mode');
+    } catch (e) {
+      err = e.message;
+    }
+    refillBusy = false;
+  }
+
   let stoppingPump = $state(false);
   async function stopPump() {
     stoppingPump = true;
@@ -332,6 +350,21 @@
 
       <div class="foot">
         <button class="btn-danger" disabled={stopping} onclick={stop}>Stop run</button>
+        {#if active?.gravimetric_trim}
+          {#if refilling}
+            <button class="btn-ghost" disabled={refillBusy} onclick={() => refill(true)}>Refill done</button>
+            <span class="hold-note">Correction held while the bottle is refilled; it resumes once the weight is still.</span>
+          {:else}
+            <button
+              class="btn-ghost"
+              disabled={refillBusy}
+              title="Hold the correction while you refill the bottle (by hand or with a transfer pump). Press Done when finished, or let the balance see the weight settle."
+              onclick={() => refill(false)}
+            >
+              Refill bottle
+            </button>
+          {/if}
+        {/if}
         {#if inHold}
           <span class="hold-note">Stopping now records the run as completed.</span>
         {/if}

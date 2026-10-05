@@ -54,8 +54,18 @@ pub const PERTURBATION_MIN_G: f64 = 5.0;
 pub const PERTURBATION_FLOOR_G: f64 = 1.0;
 pub const PERTURBATION_FLOW_FACTOR: f64 = 5.0;
 pub const REFILL_THRESHOLD_G: f64 = 50.0;
-pub const REFILL_SETTLE_VARIANCE_G: f64 = 0.5;
 pub const REFILL_SETTLE_SECONDS: f64 = 10.0;
+/// A refill is over once the bottle's level (weight with the feed's own draw
+/// put back) has held still this long.
+pub const REFILL_STEADY_SECONDS: f64 = 20.0;
+/// A rise of `REFILL_THRESHOLD_G` within this window is a refill even when no
+/// single read jumps that much: a transfer pump at 300 ml/min adds ~5 g a read.
+pub const REFILL_RISE_WINDOW_S: f64 = 30.0;
+/// Below this gain over the weight before, a "refill" was a bottle lifted and
+/// put back.
+pub const REFILL_MIN_GAIN_G: f64 = 5.0;
+/// How long the engine keeps its reads for the two tests above.
+pub const RECENT_READS_S: f64 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,7 +80,12 @@ pub enum ScaleState {
 pub struct StateInput {
     pub weight_g: f64,
     pub prev_weight_g: f64,
-    pub recent_variance_g: f64,
+    /// The level held still for `REFILL_STEADY_SECONDS` ([`steady`]).
+    pub steady: bool,
+    /// Level gained over `REFILL_RISE_WINDOW_S` ([`rise_g`]).
+    pub rise_g: f64,
+    /// The bottle weighs more than before the refill began.
+    pub gained: bool,
     pub seconds_in_settling: f64,
     pub manual_refill_mode: bool,
     pub manual_refill_done: bool,
@@ -84,6 +99,53 @@ pub fn perturbation_limit_g(expected_step_g: f64) -> f64 {
         .clamp(PERTURBATION_FLOOR_G, PERTURBATION_MIN_G)
 }
 
+/// A balance read kept for the refill tests: run time, weight, and the mass
+/// the pump had been commanded to move by then.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Read {
+    pub t_s: f64,
+    pub weight_g: f64,
+    pub commanded_g: f64,
+}
+
+/// The bottle's level: its weight with what the feed drew put back (`k` is
+/// the pump's delivery ratio), flat while nothing but the feed acts on it.
+fn level(r: &Read, k: f64) -> f64 {
+    r.weight_g + k * r.commanded_g
+}
+
+/// Whether the level stayed within ±2 balance steps (1 g at least, the
+/// 0.1 g balance's own jitter) for the last `REFILL_STEADY_SECONDS`, plus
+/// 20 % of the draw over that window for an approximate `k`. False until
+/// the reads cover the whole window.
+pub fn steady(reads: &[Read], k: f64, resolution_g: f64) -> bool {
+    let (Some(first), Some(last)) = (reads.first(), reads.last()) else {
+        return false;
+    };
+    let from = last.t_s - REFILL_STEADY_SECONDS;
+    if first.t_s > from {
+        return false;
+    }
+    let window: Vec<&Read> = reads.iter().filter(|r| r.t_s >= from).collect();
+    let (lo, hi) = window
+        .iter()
+        .map(|r| level(r, k))
+        .fold((f64::MAX, f64::MIN), |(lo, hi), l| (lo.min(l), hi.max(l)));
+    let drawn = k * (last.commanded_g - window[0].commanded_g);
+    hi - lo <= (2.0 * resolution_g).max(PERTURBATION_FLOOR_G) + 0.2 * drawn
+}
+
+/// Level gained over the last `REFILL_RISE_WINDOW_S`, with the read it is
+/// measured from (the lowest one).
+pub fn rise_g(reads: &[Read], k: f64) -> Option<(f64, Read)> {
+    let last = reads.last()?;
+    let low = reads
+        .iter()
+        .filter(|r| r.t_s >= last.t_s - REFILL_RISE_WINDOW_S)
+        .min_by(|a, b| level(a, k).total_cmp(&level(b, k)))?;
+    Some((level(last, k) - level(low, k), *low))
+}
+
 /// Learning (the trim update, Task 6) is only allowed while this returns
 /// `Normal`: every condition in the synthese_chemostat doc's "conditions
 /// d'autorisation de l'apprentissage" checklist (pump running, scale stable,
@@ -93,7 +155,7 @@ pub fn next_state(current: ScaleState, input: &StateInput) -> ScaleState {
     let jump = (input.weight_g - input.prev_weight_g).abs();
     match current {
         ScaleState::Normal | ScaleState::Perturbation => {
-            if input.manual_refill_mode || jump > REFILL_THRESHOLD_G {
+            if input.manual_refill_mode || jump > REFILL_THRESHOLD_G || input.rise_g > REFILL_THRESHOLD_G {
                 ScaleState::RefillPending
             } else if jump > perturbation_limit_g(input.expected_step_g) {
                 ScaleState::Perturbation
@@ -102,14 +164,20 @@ pub fn next_state(current: ScaleState, input: &StateInput) -> ScaleState {
             }
         }
         ScaleState::RefillPending => {
-            if input.manual_refill_done || input.recent_variance_g < REFILL_SETTLE_VARIANCE_G {
+            // Announced by hand, a still bottle is one not poured into yet:
+            // wait for "Done" or for more weight than before.
+            let over = input.steady && (input.gained || !input.manual_refill_mode);
+            if input.manual_refill_done || over {
                 ScaleState::RefillSettling
             } else {
                 ScaleState::RefillPending
             }
         }
         ScaleState::RefillSettling => {
-            if input.seconds_in_settling >= REFILL_SETTLE_SECONDS {
+            if jump > perturbation_limit_g(input.expected_step_g) {
+                // Poured again, or the bottle handled once more.
+                ScaleState::RefillPending
+            } else if input.seconds_in_settling >= REFILL_SETTLE_SECONDS {
                 ScaleState::Normal
             } else {
                 ScaleState::RefillSettling
@@ -135,7 +203,9 @@ mod state_tests {
         StateInput {
             weight_g: weight,
             prev_weight_g: prev,
-            recent_variance_g: 0.0,
+            steady: true,
+            rise_g: 0.0,
+            gained: true,
             seconds_in_settling: 0.0,
             manual_refill_mode: false,
             manual_refill_done: false,
@@ -196,16 +266,15 @@ mod state_tests {
     }
 
     #[test]
-    fn refill_pending_moves_to_settling_once_variance_is_low() {
-        let mut i = input(700.0, 700.0);
-        i.recent_variance_g = 0.1;
+    fn refill_pending_moves_to_settling_once_the_level_holds_still() {
+        let i = input(700.0, 700.0);
         assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillSettling);
     }
 
     #[test]
     fn refill_pending_stays_pending_while_the_operator_is_still_handling_the_bottle() {
         let mut i = input(700.0, 690.0);
-        i.recent_variance_g = 5.0;
+        i.steady = false;
         assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillPending);
     }
 
@@ -224,9 +293,60 @@ mod state_tests {
     }
 
     #[test]
+    fn a_steady_rise_is_a_refill_though_no_read_jumps_much() {
+        let mut i = input(104.0, 100.0);
+        i.expected_step_g = 1.0;
+        assert_eq!(next_state(ScaleState::Normal, &i), ScaleState::Normal);
+        i.rise_g = 60.0;
+        assert_eq!(next_state(ScaleState::Normal, &i), ScaleState::RefillPending);
+        assert_eq!(next_state(ScaleState::Perturbation, &i), ScaleState::RefillPending);
+    }
+
+    #[test]
+    fn an_announced_refill_waits_for_the_pour() {
+        let mut i = input(400.0, 400.0);
+        i.manual_refill_mode = true;
+        i.gained = false;
+        assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillPending);
+        i.gained = true;
+        assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillSettling);
+    }
+
+    #[test]
+    fn pouring_again_while_settling_goes_back_to_pending() {
+        assert_eq!(next_state(ScaleState::RefillSettling, &input(720.0, 700.0)), ScaleState::RefillPending);
+    }
+
+    fn reads(levels: &[(f64, f64)]) -> Vec<Read> {
+        levels.iter().map(|&(t_s, weight_g)| Read { t_s, weight_g, commanded_g: 0.0 }).collect()
+    }
+
+    #[test]
+    fn steady_needs_the_whole_window_and_a_still_level() {
+        let still: Vec<(f64, f64)> = (0..25).map(|t| (t as f64, 700.0 + 0.3 * (t % 2) as f64)).collect();
+        assert!(steady(&reads(&still), 1.0, 0.1));
+        assert!(!steady(&reads(&still[10..]), 1.0, 0.1), "15 s is not 20");
+        let filling: Vec<(f64, f64)> = (0..25).map(|t| (t as f64, 400.0 + 5.0 * t as f64)).collect();
+        assert!(!steady(&reads(&filling), 1.0, 0.1));
+        // The feed's own draw is put back: a bottle only drawn from is still.
+        let drawn: Vec<Read> = (0..25)
+            .map(|t| Read { t_s: t as f64, weight_g: 700.0 - 0.9 * 0.15 * t as f64, commanded_g: 0.15 * t as f64 })
+            .collect();
+        assert!(steady(&drawn, 0.9, 0.1));
+    }
+
+    #[test]
+    fn rise_is_measured_from_the_lowest_read_of_the_window() {
+        let r = reads(&[(0.0, 300.0), (10.0, 400.0), (20.0, 410.0), (40.0, 420.0), (50.0, 480.0)]);
+        let (gain, low) = rise_g(&r, 1.0).unwrap();
+        assert_eq!(low.t_s, 20.0, "0 and 10 s are out of the 30 s window");
+        assert!((gain - 70.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn manual_refill_done_forces_settling_from_pending() {
         let mut i = input(700.0, 700.0);
-        i.recent_variance_g = 5.0;
+        i.steady = false;
         i.manual_refill_done = true;
         assert_eq!(next_state(ScaleState::RefillPending, &i), ScaleState::RefillSettling);
     }

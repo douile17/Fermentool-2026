@@ -175,9 +175,15 @@ the pump at their duration (their weighing window). `HoldingStatus` /
 - The perturbation threshold follows the flow (`perturbation_limit_g`, 5x the
   expected step, 1..5 g): a fixed 5 g let a 3.4 g bump at 2 ml/min pass as
   flow.
+- Refills (`trim::next_state`): a jump > 50 g, **or a rise > 50 g within
+  30 s** (a transfer pump adds ~5 g a read, under the perturbation limit), or
+  "Refill bottle". Over once the level (weight + k x commanded) holds still
+  20 s, then 10 s. A slow rise rewinds the count to the lowest Normal read
+  (`rewind_slow_rise`). The ratio history survives a refill, except under an
+  alarm (dry bottle). No gain over the weight before = a lift, not a refill.
 - Events journalled for the chart markers and notifications: `trim_start`,
   `trim_ratio`, `alarm_*`, `alarm_cleared`, `refill` (`refill_detail` /
-  `parse_refill` must stay in step), `trim_limit`, `scale_lost`,
+  `parse_refill` must stay in step), `refill_cancelled`, `trim_limit`, `scale_lost`,
   `scale_recovered`.
 
 ## Notifications (`notify.rs`)

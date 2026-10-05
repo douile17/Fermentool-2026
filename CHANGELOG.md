@@ -29,6 +29,23 @@
 - Reprise automatique dès que le débit redevient normal. Le volume manqué
   pendant l'arrêt reste dans les totaux mais n'est pas rattrapé d'un coup.
 
+### Remplissage de la bouteille pesée
+
+- Un remplissage par pompe de transfert (poids qui monte régulièrement, sans
+  saut de 50 g) est reconnu : plus de 50 g gagnés en 30 s suffisent. Les
+  lectures prises pour du débit avant la détection sont annulées.
+- La fin d'un remplissage attend un poids immobile pendant 20 s (débit
+  d'alimentation déduit), puis 10 s, au lieu de 10 s fixes ; un nouveau
+  versement pendant ce délai prolonge le remplissage.
+- La régulation traverse le remplissage sans repartir de zéro : l'historique
+  du rendement est gardé, c reprend sur la fenêtre longue. Seul un
+  remplissage après une alarme « Feed stopped » efface l'historique (la
+  bouteille sèche).
+- Bouteille soulevée puis reposée sans gain de poids : pas un remplissage, le
+  volume délivré pendant ce temps est mesuré.
+- Boutons « Refill bottle » / « Refill done » sur la page du run. Annoncé à la
+  main, le remplissage attend le versement ; sans versement au bout de 15 min,
+  la demande tombe (`refill_cancelled`).
 - Chaque alarme, reprise et remplissage est écrit dans le journal du run et
   marqué sur le graphique.
 

@@ -272,7 +272,10 @@ avec au moins deux remplissages (« Reste à faire » n° 6).
 ## Livraison par étapes
 
 1. Correctifs du remplissage manuel (utile tout de suite, aucun matériel
-   nouveau).
+   nouveau). **Fait le 2026-10-02**, plus la détection d'une montée lente
+   (pompe de transfert pilotée à la main). Écart : la stabilité ne demande
+   pas le drapeau « stable » de la balance, qui reste faux tant que la pompe
+   d'alimentation tire.
 2. Deuxième pompe sur le câble : réglages, `with_address`, test depuis Settings,
    Stop au démarrage et toutes les 10 s.
 3. Cycle automatique, régulation pendant le remplissage, garde-fous, reprise

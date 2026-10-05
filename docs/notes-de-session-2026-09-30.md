@@ -117,8 +117,9 @@ Le sujet est la seule clé : ne pas le partager.
 
 Par ordre d'importance pour des runs de 100 h sans surveillance :
 
-1. **Commiter** le travail depuis `eb4b72e` : alarmes, remplissages, export
-   de la balance, notifications ntfy et Teams, enregistrement automatique.
+1. ~~**Commiter** le travail depuis `eb4b72e`~~ : fait le 2026-10-05, avec
+   l'étape 1 du remplissage automatique (pompe de transfert détectée,
+   boutons « Refill bottle » / « Refill done »).
 2. **Relance automatique** : le réglage `resume.prompt = false` (case « Ask
    before resuming » dans Settings) n'est branché sur rien. Après un plantage
    ou une coupure, la reprise attend un clic. À brancher.
@@ -140,3 +141,14 @@ Par ordre d'importance pour des runs de 100 h sans surveillance :
    l'interface, sans effet sur l'application).
 10. Optionnel : test de démarrage (pompe ou balance en retard ?), masse
     étalon pour la balance, éditer une calibration déjà enregistrée.
+10. **Accès à distance depuis le téléphone** (reporté le 2026-10-05). Le PC
+    est sur le réseau de l'université : seul le HTTPS sortant (443) passe à
+    coup sûr, comme ntfy. Pas d'AnyDesk, pas de tunnel Cloudflare (il
+    faudrait passer tout le DNS de delvigne-lab.com chez Cloudflare, et il
+    sort sur le port 7844), pas d'appli native (une page web suffit). Piste
+    retenue : un relais PHP + MySQL sur l'hébergement o2switch, en
+    `fermentool.delvigne-lab.com`. Le daemon y pousse son état et y relève
+    les commandes toutes les ~3 s, sur son propre thread. Comptes liés au
+    `responsible`, liste fermée de commandes signées (acquitter, Refill,
+    Stop), interrupteur « Remote access » désactivé par défaut. Spec à
+    écrire avant de coder ; demander l'avis du service informatique.

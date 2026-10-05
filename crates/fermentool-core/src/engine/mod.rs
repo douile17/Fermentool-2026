@@ -7,6 +7,7 @@
 //! (`docs/IMPLEMENTATION_PLAN.md` §4.5).
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use fermentool_curves::CurveSpec;
@@ -517,7 +518,14 @@ pub struct Engine<T: Transport> {
     weight_buffer: Vec<(f64, f64)>,
     last_weight_g: Option<f64>,
     settling_since: Option<Timestamp>,
+    /// The last `trim::RECENT_READS_S` of reads, in every balance state, for
+    /// the refill tests (a steady rise, a still level). `delivered_g` is the
+    /// tracker's count after a `Normal` read, `None` otherwise.
+    recent_reads: VecDeque<(trim::Read, Option<f64>)>,
     manual_refill_mode: bool,
+    /// When "Refill bottle" was pressed: the request lapses after
+    /// `MANUAL_REFILL_TIMEOUT_S` without a pour.
+    manual_refill_since: Option<Timestamp>,
     /// One-shot: consumed (reset to `false`) by the next `scale_tick`.
     manual_refill_done_flag: bool,
     /// Diagnostic only (not fed back into `trim_c`, the cumulative mass
@@ -544,6 +552,10 @@ pub struct Engine<T: Transport> {
 /// one point per second, so over 100 h that vector would grow without bound.
 /// Past the cap it is decimated back down to `trim::MAX_SLOPE_POINTS`.
 const WEIGHT_BUFFER_CAP: usize = trim::MAX_SLOPE_POINTS * 4;
+
+/// A "Refill bottle" request with no pour after this long is dropped, or a
+/// forgotten one would keep c frozen for the rest of the run.
+const MANUAL_REFILL_TIMEOUT_S: f64 = 900.0;
 
 /// Consecutive failed writes after which the control loop reopens the port.
 pub const REOPEN_AFTER_WRITE_FAILS: u32 = 5;
@@ -752,6 +764,8 @@ impl<T: Transport> Engine<T> {
             weight_buffer: Vec::new(),
             last_weight_g: None,
             settling_since: None,
+            recent_reads: VecDeque::new(),
+            manual_refill_since: None,
             manual_refill_mode: false,
             manual_refill_done_flag: false,
             last_rate_g_per_min: None,
@@ -1186,6 +1200,8 @@ impl<T: Transport> Engine<T> {
         self.weight_buffer.clear();
         self.last_weight_g = None;
         self.settling_since = None;
+        self.recent_reads.clear();
+        self.manual_refill_since = None;
         self.scale_read_fails = 0;
         self.scale_ok = true;
         self.manual_refill_mode = false;
@@ -1704,16 +1720,47 @@ impl<T: Transport> Engine<T> {
             .settling_since
             .map(|s| now.duration_since(s).as_secs_f64())
             .unwrap_or(0.0);
+        if self.manual_refill_mode && self.manual_refill_since.is_none() {
+            self.manual_refill_since = Some(now);
+        }
+        if self
+            .manual_refill_since
+            .is_some_and(|s| now.duration_since(s).as_secs_f64() > MANUAL_REFILL_TIMEOUT_S)
+        {
+            self.manual_refill_mode = false;
+            self.manual_refill_since = None;
+            if let Some(run_id) = self.active.as_ref().map(|a| a.id) {
+                let _ = self.store.log_event(&NewEvent {
+                    run_id: Some(run_id),
+                    wall_time: now,
+                    level: EventLevel::Warn,
+                    kind: "refill_cancelled".into(),
+                    detail: Some("refill announced 15 min ago, nothing poured: request dropped".into()),
+                });
+            }
+        }
+        self.recent_reads.push_back((
+            trim::Read { t_s: t, weight_g, commanded_g: self.tracker.commanded_g },
+            None,
+        ));
+        while self.recent_reads.front().is_some_and(|(r, _)| r.t_s < t - trim::RECENT_READS_S) {
+            self.recent_reads.pop_front();
+        }
+        let reads: Vec<trim::Read> = self.recent_reads.iter().map(|(r, _)| *r).collect();
+        let k_level = self.tracker.k.unwrap_or(1.0);
+        let resolution_g = self.scale_resolution_g;
+        let rise = trim::rise_g(&reads, k_level).map_or(0.0, |(g, _)| g);
+        // More than before the refill began: the anchor once refilling, the
+        // last Normal read on the tick it starts.
+        let base_g = self.tracker.anchor.map(|a| a.weight_g).or(self.tracker.last_weight_g);
+        let min_gain_g = trim::REFILL_MIN_GAIN_G.max(2.0 * resolution_g);
+        let gained = base_g.is_some_and(|b| weight_g > b + min_gain_g);
         let input = trim::StateInput {
             weight_g,
             prev_weight_g: prev,
-            // v1 simplification: no rolling variance of the settling window
-            // yet, REFILL_SETTLE_SECONDS alone gates RefillSettling -> Normal.
-            // Functionally safe (a bottle still being handled just takes the
-            // fixed delay instead of also requiring low variance first),
-            // slightly less adaptive. A follow-up computing this from
-            // `weight_buffer`'s tail is a one-function addition.
-            recent_variance_g: 0.0,
+            steady: trim::steady(&reads, k_level, resolution_g),
+            rise_g: rise,
+            gained,
             seconds_in_settling,
             manual_refill_mode: self.manual_refill_mode,
             manual_refill_done: self.manual_refill_done_flag,
@@ -1730,19 +1777,32 @@ impl<T: Transport> Engine<T> {
         let refilling = |s| matches!(s, trim::ScaleState::RefillPending | trim::ScaleState::RefillSettling);
         if refilling(next) && !refilling(self.scale_state) {
             self.refill_before_g = Some(prev * self.scale_cfg.position.sign());
+            self.rewind_slow_rise(k_level);
         }
         // Only a real refill completing resets the cumulative reference. A
         // bump up to 50 g (Perturbation -> Normal) is transient: freeze, don't
         // reset, or a routine touch of the bottle would throw away hours of
         // accumulated balance.
         if next == trim::ScaleState::Normal && self.scale_state == trim::ScaleState::RefillSettling {
-            self.refill_weight_g = Some(weight_g);
-            self.refill_at = Some(now);
-            self.weight_buffer.clear();
             // A manual refill request is one-shot: close it here even if the
             // operator never calls refill_done, or the next tick would go
             // straight back to RefillPending and cycle forever.
             self.manual_refill_mode = false;
+            self.manual_refill_since = None;
+            // The level jumped: these reads would read as a rise.
+            self.recent_reads.clear();
+            // No more weight than before: the bottle was lifted and put back,
+            // what it lost meanwhile is measured, not estimated.
+            if !gained {
+                if let Some(a) = self.tracker.anchor.as_mut() {
+                    a.refill = false;
+                }
+                self.refill_before_g = None;
+            } else {
+                self.refill_weight_g = Some(weight_g);
+                self.refill_at = Some(now);
+                self.weight_buffer.clear();
+            }
             // Journal the bottle weights around the refill (raw readings).
             if let (Some(before), Some(run_id)) =
                 (self.refill_before_g.take(), self.active.as_ref().map(|a| a.id))
@@ -1793,7 +1853,6 @@ impl<T: Transport> Engine<T> {
 
         // Delivered mass: measured between consecutive Normal reads, settled
         // from the anchor after a touch, a refill or a restart.
-        let resolution_g = self.scale_resolution_g;
         let bounds = self.trim_bounds();
         let tr = &mut self.tracker;
         // Persisted on the first read, after a settled anchor and with each c
@@ -1802,8 +1861,13 @@ impl<T: Transport> Engine<T> {
         // downtime is measured whatever the save lag.
         let mut save = tr.anchor.is_some() || tr.last_weight_g.is_none();
         if let Some(a) = tr.anchor.take() {
+            // The ratio history is kept: across the gap the count grows by
+            // k times the commanded mass, a segment of slope k, neutral for
+            // the ratio. c resumes on the settled window, not from scratch.
+            // Unless the feed had stopped: then the history is the dry
+            // bottle, and the pump starts over on what it does now.
             tr.delivered_g += tracking::settle_anchor(&a, weight_g, tr.commanded_g, tr.k, resolution_g);
-            if a.refill {
+            if a.refill && tr.alarm.is_some() {
                 tr.points.clear();
             }
         } else if let Some(w0) = tr.last_weight_g {
@@ -1814,6 +1878,9 @@ impl<T: Transport> Engine<T> {
         }
         tr.last_weight_g = Some(weight_g);
         tr.last_normal_commanded_g = tr.commanded_g;
+        if let Some(last) = self.recent_reads.back_mut() {
+            last.1 = Some(tr.delivered_g);
+        }
         tr.points.push(tracking::TrackPoint {
             t_s: t,
             commanded_g: tr.commanded_g,
@@ -1899,6 +1966,7 @@ impl<T: Transport> Engine<T> {
                     let missed = tr.required_g - tr.delivered_g - tr.forgiven_g;
                     tr.forgiven_g += missed;
                     tr.alarm = None;
+                    tracking::keep_recent(&mut tr.points, resolution_g);
                     tr.k = Some(k);
                     tr.saturated_updates = 0;
                     tr.saturated_since_t = None;
@@ -2042,6 +2110,39 @@ impl<T: Transport> Engine<T> {
     /// automatic weight-jump threshold.
     pub fn trigger_refill_mode(&mut self) {
         self.manual_refill_mode = true;
+    }
+
+    /// A refill seen as a rise (a transfer pump, a slow pour) began before
+    /// it was recognised: reads under the perturbation limit counted the
+    /// gain as negative delivery. Take the count, the ratio history and c
+    /// back to the lowest `Normal` read of the rise window, and anchor there.
+    fn rewind_slow_rise(&mut self, k: f64) {
+        let level = |r: &trim::Read| r.weight_g + k * r.commanded_g;
+        let window_from = self.recent_reads.back().map_or(0.0, |(r, _)| r.t_s) - trim::REFILL_RISE_WINDOW_S;
+        let normal = self
+            .recent_reads
+            .iter()
+            .filter(|(r, d)| d.is_some() && r.t_s >= window_from);
+        let Some(&(low, Some(delivered))) = normal.clone().min_by(|a, b| level(&a.0).total_cmp(&level(&b.0)))
+        else {
+            return;
+        };
+        let Some(&(last, _)) = normal.last() else {
+            return;
+        };
+        if level(&last) - level(&low) <= trim::PERTURBATION_MIN_G {
+            return; // a sudden pour: the last Normal read is the right anchor
+        }
+        let tr = &mut self.tracker;
+        tr.delivered_g = delivered;
+        tr.last_weight_g = Some(low.weight_g);
+        tr.last_normal_commanded_g = low.commanded_g;
+        tr.points.retain(|p| p.t_s <= low.t_s);
+        tr.anchor = None;
+        if let Some(c) = tracking::c_at(&tr.c_hist, low.t_s) {
+            self.trim_c = c;
+        }
+        self.refill_before_g = Some(low.weight_g * self.scale_cfg.position.sign());
     }
 
     /// Operator-declared "bottle is back, settled": lets `RefillPending`
@@ -2906,26 +3007,98 @@ mod tests {
     }
 
     #[test]
-    fn manual_refill_mode_does_not_cycle_forever_if_refill_done_is_never_called() {
-        // An operator who triggers refill mode and never calls refill_done
-        // must still end up in Normal, not cycle Normal -> RefillPending ->
-        // RefillSettling -> Normal forever, wiping the baseline every lap.
+    fn a_refill_announced_but_never_poured_lapses_after_15_min() {
+        // "Refill bottle" pressed, nothing poured, "Done" never pressed: the
+        // balance waits for the pour, then gives up, and never cycles
+        // Normal -> RefillPending -> Normal, wiping the baseline every lap.
+        let spec = CurveSpec::linear(9.0, 9.0, Duration::from_secs(36_000));
         let mut e = engine();
-        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0; 60])));
-        e.start_run(trim_cfg(), t0()).unwrap();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
         e.trigger_refill_mode();
-        // The buggy cycle has a 12-tick period and happens to sit in Normal
-        // at some ticks, so check every tick once it should have settled.
-        for i in 0..60 {
+        let mut w = 1_000.0;
+        for i in 0..1000 {
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
             e.scale_tick(at(i));
-            if i >= 20 {
-                assert_eq!(
-                    e.status().scale_state,
-                    Some(trim::ScaleState::Normal),
-                    "still cycling at tick {i}"
-                );
+            w -= spec.value_at(Duration::from_secs(i as u64)) / 60.0 * e.trim_c();
+            let state = e.status().scale_state;
+            if (1..900).contains(&i) {
+                assert_eq!(state, Some(trim::ScaleState::RefillPending), "tick {i}");
+            } else if i >= 940 {
+                assert_eq!(state, Some(trim::ScaleState::Normal), "still cycling at tick {i}");
             }
         }
+        assert_eq!(event_times(&e, id, "refill_cancelled").len(), 1);
+        assert!(event_times(&e, id, "refill").is_empty(), "nothing was poured");
+    }
+
+    #[test]
+    fn a_refill_by_transfer_pump_is_seen_and_c_rides_through_it() {
+        // 60 ml/min fed by a pump delivering 90 %, c settled; a transfer pump
+        // adds 1.5 L at 5 g/s. Its ~4 g net per read is under the 5 g
+        // perturbation limit at this flow: without the rise test it reads as
+        // flow running backwards.
+        let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let k = 0.9;
+        let mut w = 2_000.0;
+        let mut truth = 0.0;
+        let mut cs = Vec::new();
+        for i in 0..4_000i64 {
+            if (1_800..2_100).contains(&i) {
+                w += 5.0;
+            }
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            cs.push(e.trim_c());
+            let out = k * spec.value_at(Duration::from_secs(i as u64)) / 60.0 * e.trim_c();
+            w -= out;
+            truth += out;
+        }
+        let refills: Vec<(f64, f64)> = e
+            .store()
+            .events(Some(id), 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == "refill")
+            .filter_map(|ev| parse_refill(ev.detail.as_deref()?))
+            .collect();
+        assert_eq!(refills.len(), 1, "{refills:?}");
+        // 1.5 L poured, ~350 g drawn by the feed (1 g/s) while it lasted
+        // and settled.
+        let gain = refills[0].1 - refills[0].0;
+        assert!((gain - 1_150.0).abs() < 40.0, "{refills:?}");
+        let before = cs[1_790];
+        let swing = cs[1_790..].iter().map(|c| (c - before).abs()).fold(0.0, f64::max);
+        assert!(swing < 0.01, "c moved {swing} around the refill (was {before})");
+        let st = e.status();
+        let tr = st.tracking.unwrap();
+        assert!(st.scale_ok && tr.alarm.is_none(), "{tr:?}");
+        assert!((tr.delivered_ml - truth).abs() < 0.01 * truth, "{} vs {truth}", tr.delivered_ml);
+    }
+
+    #[test]
+    fn a_bottle_lifted_and_put_back_is_not_a_refill() {
+        let spec = CurveSpec::linear(9.0, 9.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let mut w = 1_000.0;
+        let mut truth = 0.0;
+        for i in 0..1_200i64 {
+            let lifted = (600..640).contains(&i);
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[if lifted { 0.0 } else { w }])));
+            e.scale_tick(at(i));
+            let out = 0.9 * spec.value_at(Duration::from_secs(i as u64)) / 60.0 * e.trim_c();
+            w -= out;
+            truth += out;
+        }
+        assert!(event_times(&e, id, "refill").is_empty(), "a lift is not a refill");
+        let tr = e.status().tracking.unwrap();
+        // Measured across the lift, not estimated.
+        assert!((tr.delivered_ml - truth).abs() < 0.5, "{} vs {truth}", tr.delivered_ml);
     }
 
     #[test]
@@ -3457,9 +3630,9 @@ mod tests {
         let report = e.tracking_report(id).unwrap().expect("a trimmed run has a report");
         assert_eq!(report.refills.len(), 1, "{:?}", report.refills);
         let r = &report.refills[0];
-        // "After" is read once the balance has settled (~10 s), the pump
-        // drawing meanwhile: a few tenths under the 300 g poured.
-        assert!((r.after_g - r.before_g - 300.0).abs() < 0.5, "{r:?}");
+        // "After" is read once the balance has settled (20 s still, then
+        // 10 s), the pump drawing meanwhile: about 0.5 g under the 300 poured.
+        assert!((r.after_g - r.before_g - 300.0).abs() < 1.0, "{r:?}");
         assert!(r.before_g < 430.0 && r.before_g > 420.0, "{r:?}");
         assert!(report.markers.iter().any(|m| m.kind == "refill"));
         assert_eq!(parse_refill(&refill_detail(413.5, 753.5)), Some((413.5, 753.5)));

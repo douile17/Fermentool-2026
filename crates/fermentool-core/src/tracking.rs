@@ -93,6 +93,14 @@ pub fn recent_ratio(points: &[TrackPoint], resolution_g: f64) -> Option<f64> {
     slope_from(points, window_start(points, resolution_g, MIN_WINDOW_RESOLUTIONS, MIN_WINDOW_S)?)
 }
 
+/// Drop the history before the recent window: once an alarm clears, what
+/// came before it (a dry bottle, a pinched tube) says nothing of the pump.
+pub fn keep_recent(points: &mut Vec<TrackPoint>, resolution_g: f64) {
+    if let Some(i) = window_start(points, resolution_g, MIN_WINDOW_RESOLUTIONS, MIN_WINDOW_S) {
+        points.drain(..i);
+    }
+}
+
 fn window_start(points: &[TrackPoint], resolution_g: f64, mass_steps: f64, secs: f64) -> Option<usize> {
     let last = points.last()?;
     let mass = mass_steps * resolution_g;
