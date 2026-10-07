@@ -53,7 +53,7 @@
       <Icon name="arrow-left" size={18} />Settings
     </button>
     {#key current.id}
-      <current.component group={current.group} />
+      <div class="page-enter"><current.component group={current.group} /></div>
     {/key}
   </div>
 </div>

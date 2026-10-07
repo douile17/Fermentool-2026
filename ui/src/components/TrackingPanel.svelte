@@ -15,7 +15,9 @@
     "to make up for the pump's real output. While c is being measured (the first ~15 min) the setpoint can " +
     'step a few % off the curve, then it settles. What counts is that delivered follows requested.';
 
-  let { runId, durationS, live = false } = $props();
+  // collapsible: a past run's detail shows this as a closed section, with the
+  // headline in its summary; the live Overview keeps it open, no toggle.
+  let { runId, durationS, live = false, collapsible = false } = $props();
   let report = $state(null);
 
   $effect(() => {
@@ -105,14 +107,37 @@
   const inBand = $derived(gapNow != null && Math.abs(gapNow) <= TOL * Math.max(reqMl, 0));
 </script>
 
-{#if report}
+{#snippet title()}
+  Feed delivered vs requested (weighed)
+  <span class="info" title={INFO}>
+    <Icon name="info" size={14} />
+  </span>
+{/snippet}
+
+{#if report && collapsible}
+  <details class="track fold">
+    <summary>
+      <span class="chev"><Icon name="chevron-right" size={16} /></span>
+      <span class="eyebrow">{@render title()}</span>
+      {#if wrongSide}
+        <span class="peek off">balance on the wrong side</span>
+      {:else if ratioPct != null}
+        <span class="peek mono">
+          <b class:off={!inBand}>{num(ratioPct, 1)} %</b> delivered |
+          gap <b class:ok={inBand} class:off={!inBand}>{gapNow >= 0 ? '+' : ''}{num(gapNow, 2)} mL</b>
+        </span>
+      {/if}
+    </summary>
+    {@render body()}
+  </details>
+{:else if report}
   <div class="track">
-    <div class="eyebrow">
-      Feed delivered vs requested (weighed)
-      <span class="info" title={INFO}>
-        <Icon name="info" size={14} />
-      </span>
-    </div>
+    <div class="eyebrow">{@render title()}</div>
+    {@render body()}
+  </div>
+{/if}
+
+{#snippet body()}
     {#if wrongSide}
       <p class="warn">
         The balance weight moved the wrong way for where Settings says it is (feed bottle or
@@ -188,8 +213,7 @@
         </span>
       {/if}
     </div>
-  </div>
-{/if}
+{/snippet}
 
 <style>
   .track {
@@ -198,6 +222,21 @@
     border-top: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
   }
   .track .eyebrow { margin-bottom: var(--s-3); color: var(--ink); display: flex; align-items: center; gap: 6px; }
+  .fold summary {
+    display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+    cursor: pointer; list-style: none; border-radius: var(--radius-ctl);
+  }
+  .fold summary::-webkit-details-marker { display: none; }
+  .chev { display: inline-flex; color: var(--muted); transition: transform 0.15s ease; }
+  .fold[open] .chev { transform: rotate(90deg); }
+  .fold summary .eyebrow { margin-bottom: 0; }
+  .fold[open] summary { margin-bottom: var(--s-3); }
+  .fold summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent); outline-offset: 2px; }
+  .peek { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .peek b { color: var(--ink); font-weight: 600; }
+  .peek .ok { color: var(--green-600); }
+  .peek .off, .peek.off { color: var(--danger); }
+  @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
   .info { display: inline-flex; color: var(--muted); cursor: help; }
   .info:hover { color: var(--ink); }
   .headline { font-size: 14px; margin: 0 0 var(--s-3); }

@@ -299,7 +299,7 @@
       {#if ackErr}<div class="err" style="margin-bottom:16px">{ackErr}</div>{/if}
 
       {#if app.route === 'settings'}
-        <Settings />
+        <div class="page-enter"><Settings /></div>
       {:else}
         <div
           class="tabs"
@@ -321,15 +321,19 @@
           {/each}
         </div>
 
-        {#if app.tab === 'new'}
-          <NewRun />
-        {:else if app.tab === 'history'}
-          <History />
-        {:else if app.tab === 'calibration'}
-          <TubingCalibration />
-        {:else}
-          <Overview />
-        {/if}
+        {#key app.tab}
+          <div class="page-enter">
+            {#if app.tab === 'new'}
+              <NewRun />
+            {:else if app.tab === 'history'}
+              <History />
+            {:else if app.tab === 'calibration'}
+              <TubingCalibration />
+            {:else}
+              <Overview />
+            {/if}
+          </div>
+        {/key}
       {/if}
     </div>
   </main>

@@ -205,3 +205,15 @@ pre {
   padding: var(--s-2) var(--s-3);
   font-size: 13px;
 }
+
+/* Page change (tabs, Settings, its sections): the new view fades in and
+   settles a few px up. Enter only: the old view leaves at once, so two
+   pages never stack and the layout never jumps. Fill "backwards", never
+   "both": a transform animation still applied after its end makes this
+   wrapper the containing block of every position: fixed dialog inside. */
+.page-enter { animation: page-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .page-enter { animation: none; } }

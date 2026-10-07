@@ -4,6 +4,7 @@
   import { num, dur, shortTime, stampY, unitFor, digitsFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
   import TrackingPanel from '../components/TrackingPanel.svelte';
+  import Icon from '../components/Icon.svelte';
   import { bottleWeights } from '../lib/balance.js';
   import { downloadSettings } from '../lib/runfile.js';
 
@@ -195,13 +196,19 @@
     return out;
   });
 
+  const warnCount = $derived(
+    sel ? sel.events.filter((e) => e.level === 'warn' || e.level === 'error').length : 0,
+  );
+
   function closeSel() {
     sel = null;
     confirmDelete = false;
   }
   function onKey(e) {
     if (e.key !== 'Escape') return;
-    if (confirmBulk && !bulkBusy) confirmBulk = false;
+    if (confirmDelete) {
+      if (!deleting) confirmDelete = false;
+    } else if (confirmBulk && !bulkBusy) confirmBulk = false;
     else if (confirmClear && !clearing) confirmClear = false;
     else if (sel) closeSel();
   }
@@ -370,10 +377,13 @@
 {#if sel}
   <button class="backdrop" aria-label="Close" onclick={closeSel}></button>
   <div class="layer">
-    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="ft-run-detail">
-      <div class="card-head">
+    <div class="modal card detail" role="dialog" aria-modal="true" aria-labelledby="ft-run-detail">
+      <!-- Sticky head: the run's identity and its main actions stay in reach
+           however far the journal below is scrolled. -->
+      <div class="card-head detail-head">
         <div>
-          <div class="eyebrow">Run #{sel.run.id} | {unitFor(sel.run.control_var)}</div>
+          <span class="pill {sel.run.status}">{sel.run.status}</span>
+          <div class="eyebrow id-line">Run #{sel.run.id} | {unitFor(sel.run.control_var)}</div>
           <h2 id="ft-run-detail">{sel.run.name}</h2>
           <div class="sub mono">
             {stampY(sel.run.started_at)}{sel.run.ended_at ? ` → ${stampY(sel.run.ended_at)}` : ''}
@@ -381,8 +391,12 @@
           </div>
         </div>
         <div class="hd-actions">
-          <span class="pill {sel.run.status}">{sel.run.status}</span>
-          <button class="btn-ghost" onclick={exportCsv}>Export CSV</button>
+          <button class="btn-ghost" onclick={exportCsv} title="Download the run's journal (one row per second)">
+            Export CSV
+          </button>
+          <button class="btn-primary" onclick={runAgain} title="Open New run with this run's settings">
+            Run again
+          </button>
         </div>
       </div>
 
@@ -400,40 +414,66 @@
         {unitFor(sel.run.control_var)}
       </div>
 
-      <TrackingPanel runId={sel.run.id} durationS={sel.run.duration_s} />
+      <!-- Detail sections start folded: the chart answers "how did it go",
+           the regulation and the journal are there for when it went wrong. -->
+      <TrackingPanel runId={sel.run.id} durationS={sel.run.duration_s} collapsible />
 
-      <div class="acts">
-        {#each sel.events as e (e.id)}
-          <div class="act">
-            <time class="mono">{shortTime(e.wall_time)}</time>
-            <span class="pill {e.level}">{e.kind}</span>
-            <span class="body">{e.detail ?? ''}</span>
+      {#if sel.events.length}
+        <details class="fold">
+          <summary>
+            <Icon name="chevron-right" size={16} />
+            <span class="eyebrow">Events</span>
+            <span class="peek mono">
+              {sel.events.length}{sel.events.length >= 100 ? '+' : ''}
+              {#if warnCount}| <b class="off">{warnCount} warning{warnCount === 1 ? '' : 's'}</b>{/if}
+            </span>
+          </summary>
+          <div class="acts">
+            {#each sel.events as e (e.id)}
+              <div class="act">
+                <time class="mono">{shortTime(e.wall_time)}</time>
+                <span class="pill {e.level}">{e.kind}</span>
+                <span class="body">{e.detail ?? ''}</span>
+              </div>
+            {/each}
           </div>
-        {/each}
-      </div>
+        </details>
+      {/if}
 
       <div class="modal-foot">
-        {#if confirmDelete}
-          {#if deleteErr}<div class="err del-err">{deleteErr}</div>{/if}
-          <span class="del-q">Delete this run and its journal? This can't be undone.</span>
+        <button class="btn-danger del" disabled={sel.run.status === 'running'} onclick={() => { deleteErr = null; confirmDelete = true; }}>
+          Delete run
+        </button>
+        <button class="btn-ghost" onclick={() => downloadSettings(settingsOf(sel.run))}
+          title="Save this run's settings to a file, to import later in New run">
+          Export settings
+        </button>
+        <button class="btn-ghost" onclick={closeSel}>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirmed in its own small dialog over the detail, like the bulk
+       delete: the detail's footer never reflows under the cursor. -->
+  {#if confirmDelete}
+    <button class="backdrop over" aria-label="Cancel" onclick={() => !deleting && (confirmDelete = false)}></button>
+    <div class="layer over">
+      <div class="modal card confirm" role="alertdialog" aria-modal="true" aria-labelledby="ft-del-one">
+        <div class="eyebrow">Delete run</div>
+        <h2 id="ft-del-one">Delete “{sel.run.name}”?</h2>
+        <p class="lede">
+          Run #{sel.run.id}, its journal and its events are permanently removed. This can't be undone.
+        </p>
+        {#if deleteErr}<div class="err">{deleteErr}</div>{/if}
+        <div class="modal-foot">
           <button class="btn-danger" disabled={deleting} onclick={deleteRun}>
             {deleting ? 'Deleting…' : 'Delete'}
           </button>
           <button class="btn-ghost" disabled={deleting} onclick={() => (confirmDelete = false)}>Cancel</button>
-        {:else}
-          <button class="btn-danger del" disabled={sel.run.status === 'running'} onclick={() => { deleteErr = null; confirmDelete = true; }}>
-            Delete run
-          </button>
-          <button class="btn-ghost" onclick={() => downloadSettings(settingsOf(sel.run))}
-            title="Save this run's settings to a file, to import later in New run">
-            Export settings
-          </button>
-          <button class="btn-primary" onclick={runAgain}>Run again</button>
-          <button class="btn-ghost" onclick={closeSel}>Close</button>
-        {/if}
+        </div>
       </div>
     </div>
-  </div>
+  {/if}
 {/if}
 
 <style>
@@ -465,7 +505,34 @@
   .tr span { font-size: 13px; }
   .muted { color: var(--muted); padding: var(--s-3) var(--s-2); }
 
-  .hd-actions { display: flex; align-items: center; gap: var(--s-3); }
+  .hd-actions { display: flex; align-items: center; gap: var(--s-3); flex: none; }
+  .id-line { margin-top: var(--s-3); }
+  /* No top padding on the detail: the sticky head is the top edge itself. */
+  .modal.detail { padding-top: 0; }
+  .detail-head { align-items: center;
+    position: sticky; top: 0; z-index: 2;
+    margin: 0 calc(var(--s-7) * -1) var(--s-5);
+    padding: var(--s-7) var(--s-7) var(--s-4); /* top = the card's bottom padding */
+    background: var(--surface);
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .fold {
+    margin-top: var(--s-5); padding-top: var(--s-5);
+    border-top: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
+  }
+  .fold summary {
+    display: flex; align-items: center; gap: var(--s-2);
+    cursor: pointer; list-style: none; border-radius: var(--radius-ctl);
+  }
+  .fold summary::-webkit-details-marker { display: none; }
+  .fold summary :global(.icon) { color: var(--muted); transition: transform 0.15s ease; }
+  .fold[open] summary :global(.icon) { transform: rotate(90deg); }
+  .fold summary .eyebrow { color: var(--ink); }
+  .fold summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent); outline-offset: 2px; }
+  .peek { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .peek .off { color: var(--danger); font-weight: 600; }
+  @media (prefers-reduced-motion: reduce) { .fold summary :global(.icon) { transition: none; } }
   .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
   .search {
@@ -518,11 +585,11 @@
     flex-wrap: wrap; margin-top: var(--s-5);
   }
   .modal-foot .del { margin-right: auto; }
-  .del-q { margin-right: auto; align-self: center; font-size: 13px; }
-  .del-err { flex-basis: 100%; }
+  .backdrop.over { z-index: 62; }
+  .layer.over { z-index: 63; }
   @media (prefers-reduced-motion: reduce) { .modal { animation: none; } }
 
-  .acts { margin-top: var(--s-4); display: flex; flex-direction: column; }
+  .acts { margin-top: var(--s-3); display: flex; flex-direction: column; }
   .act {
     display: grid; grid-template-columns: 60px 96px 1fr; gap: var(--s-3);
     align-items: baseline; padding: var(--s-2) 0; font-size: 12px;
@@ -533,6 +600,9 @@
   .act .body { color: var(--muted); }
 
   @media (max-width: 720px) {
+    /* No top padding on the detail: the sticky head is the top edge itself. */
+  .modal.detail { padding-top: 0; }
+  .detail-head { align-items: center; flex-wrap: wrap; }
     .tr { grid-template-columns: 1.4fr 0.9fr 0.9fr; }
     .tr span:nth-child(4), .tr span:nth-child(5) { display: none; }
   }
