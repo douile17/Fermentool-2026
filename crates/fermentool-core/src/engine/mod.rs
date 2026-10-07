@@ -349,6 +349,9 @@ pub struct EngineStatus {
     /// A Stop did not reach the pump (link down, bus error): it may still be
     /// running. The daemon sends the Stop again until it gets through.
     pub stop_pending: bool,
+    /// What the start found wrong: a damaged `config.toml` (defaults used),
+    /// values put back in range, a journal that fails its check.
+    pub warnings: Vec<String>,
 }
 
 /// A completed run whose final setpoint the pump is still holding.
@@ -580,6 +583,8 @@ pub struct Engine<T: Transport> {
     /// sent again by the control loop until it gets through. Persisted, a
     /// pump left running must not be forgotten across a restart.
     stop_pending: Option<Option<i64>>,
+    /// See [`EngineStatus::warnings`].
+    warnings: Vec<String>,
 }
 
 /// Cap on `weight_buffer`'s length: a gravimetric run with no refill appends
@@ -675,7 +680,8 @@ struct Tracker {
     forgiven_g: f64,
     /// `(t_s, c)` at each update over the last hour: an alarm puts c back to
     /// its value from before the problem started, not where it ended up.
-    #[serde(skip)]
+    /// Persisted (~360 pairs), so an alarm soon after a crash resume still
+    /// finds it.
     c_hist: std::collections::VecDeque<(f64, f64)>,
     /// When the current run of saturated updates began.
     saturated_since_t: Option<f64>,
@@ -823,7 +829,14 @@ impl<T: Transport> Engine<T> {
             drive_ml_per_rpm: None,
             drive_paused: false,
             stop_pending,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Something the start found wrong, shown until the next start.
+    pub fn add_warning(&mut self, warning: String) {
+        tracing::error!("{warning}");
+        self.warnings.push(warning);
     }
 
     fn set_stop_pending(&mut self, pending: Option<Option<i64>>) {
@@ -1227,6 +1240,7 @@ impl<T: Transport> Engine<T> {
                 }
             }),
             stop_pending: self.stop_pending.is_some(),
+            warnings: self.warnings.clone(),
         }
     }
 
@@ -1387,6 +1401,7 @@ impl<T: Transport> Engine<T> {
             kind: cfg.kind,
             tubing_calibration_id: cfg.tubing_calibration_id,
             responsible: cfg.responsible.clone(),
+            density_g_per_ml: cfg.gravimetric_trim.then_some(self.scale_density_g_per_ml),
         }) {
             Ok(id) => id,
             Err(e) => {
@@ -1818,6 +1833,17 @@ fn open_scale(cfg: &ScaleConfig) -> Option<Box<dyn Transport + Send>> {
     scale::open_polled(cfg).map(|s| Box::new(s) as Box<dyn Transport + Send>)
 }
 
+/// The events the tracking chart marks.
+const MARKER_KINDS: &[&str] = &[
+    "trim_start",
+    "trim_ratio",
+    "alarm_feed_stopped",
+    "alarm_saturated",
+    "alarm_wrong_side",
+    "alarm_cleared",
+    "refill",
+];
+
 /// [`Engine::tracking_report`] from any connection to the journal: the API
 /// builds it on its own, off the control thread. `rho` is the feed density
 /// (g/mL) the volumes are counted in.
@@ -1825,6 +1851,9 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
     let Some(run) = store.run(run_id)? else {
         return Ok(None);
     };
+    // The density the run counted with, when it was recorded: a change in
+    // Settings since must not rewrite the volumes of past runs.
+    let rho = run.density_g_per_ml.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(rho);
     let ticks = store.delivery_samples(run_id, 1999)?; // + the latest tick: <= 2000
     if ticks.len() < 2 {
         return Ok(None);
@@ -1855,24 +1884,9 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
             .collect();
         tracking::fit_exponential_mu(&pts, mu)
     });
-    let events = store.events(Some(run_id), 10_000)?;
+    let events = store.events_of_kinds(run_id, MARKER_KINDS)?;
     let at = |e: &EventRow| e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0);
-    let markers = events
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.kind.as_str(),
-                "trim_start"
-                    | "trim_ratio"
-                    | "alarm_feed_stopped"
-                    | "alarm_saturated"
-                    | "alarm_wrong_side"
-                    | "alarm_cleared"
-                    | "refill"
-            )
-        })
-        .map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() })
-        .collect();
+    let markers = events.iter().map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() }).collect();
     let mut refills: Vec<RefillRecord> = events
         .iter()
         .filter(|e| e.kind == "refill")
@@ -3869,6 +3883,7 @@ mod tests {
                     kind: RunKind::Calibration,
                     tubing_calibration_id: None,
                     responsible: None,
+                    density_g_per_ml: None,
                 })
                 .unwrap();
             store
@@ -4664,6 +4679,30 @@ mod tests {
             before.delivered_ml + 60.0
         );
         assert!((after.required_ml - (before.required_ml + 60.0)).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_past_run_is_reported_with_its_own_density() {
+        // Counted at 2 g/mL; Settings says 1 g/mL by the time it is read.
+        let spec = CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale(
+            Some(Box::new(ScriptedScale::new(&[]))),
+            ScaleConfig { density_g_per_ml: 2.0, ..scale_cfg("sim-scale") },
+        );
+        let id = e.start_run(RunConfig { curve: spec, ..trim_cfg() }, t0()).unwrap();
+        let mut w = 10_000.0;
+        for i in 0..300 {
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            e.tick(at(i)).unwrap();
+            w -= 2.0 * e.trim_c();
+        }
+        let report = tracking_report(e.store(), id, 1.0).unwrap().unwrap();
+        let last = report.points.last().unwrap();
+        // 60 ml/min for ~5 min: ~300 mL, not twice that.
+        assert!((last[2] - last[1]).abs() < 0.03 * last[1], "{last:?}");
+        assert!((last[1] - 300.0).abs() < 10.0, "{last:?}");
     }
 
     #[test]

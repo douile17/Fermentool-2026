@@ -28,6 +28,7 @@ async function req(method, path, payload) {
   if (!res.ok) {
     const msg = (data && data.error) || `${res.status} ${res.statusText}`;
     const err = new Error(msg);
+    err.status = res.status;
     if (data && typeof data === 'object') {
       // Structured engine refusals carry a stable `code` and a longer `hint`.
       if (data.code) err.code = data.code;

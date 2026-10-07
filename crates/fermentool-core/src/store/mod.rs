@@ -43,6 +43,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: include_str!("migrations/0006_run_responsible.sql"),
     },
+    Migration {
+        version: 7,
+        sql: include_str!("migrations/0007_run_density.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -189,6 +193,8 @@ pub struct NewRun {
     pub tubing_calibration_id: Option<i64>,
     /// Who the run belongs to; its notifications go to them only.
     pub responsible: Option<String>,
+    /// The feed density a trimmed run counts its volumes with.
+    pub density_g_per_ml: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -210,6 +216,7 @@ pub struct RunRow {
     pub kind: RunKind,
     pub tubing_calibration_id: Option<i64>,
     pub responsible: Option<String>,
+    pub density_g_per_ml: Option<f64>,
 }
 
 /// A tubing calibration to record: three hand-weighed bursts of one tube at
@@ -317,7 +324,7 @@ pub struct Store {
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
      direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
-     gravimetric_trim, kind, tubing_calibration_id, responsible";
+     gravimetric_trim, kind, tubing_calibration_id, responsible, density_g_per_ml";
 
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
@@ -380,6 +387,18 @@ impl Store {
         Ok(())
     }
 
+    /// `PRAGMA quick_check`: the cheaper form of
+    /// [`integrity_check`](Self::integrity_check), run at every start so a
+    /// damaged journal is said before a run depends on it.
+    pub fn quick_check(&self) -> Result<()> {
+        let report: String = self.conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if report == "ok" {
+            Ok(())
+        } else {
+            Err(StoreError::Corrupt(report))
+        }
+    }
+
     /// `PRAGMA integrity_check`, `Ok(())` iff the database reports `ok`.
     pub fn integrity_check(&self) -> Result<()> {
         let report: String = self
@@ -405,9 +424,10 @@ impl Store {
             "INSERT INTO runs
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
-                pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id, responsible)
+                pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id, responsible,
+                density_g_per_ml)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 r.name,
                 created,
@@ -425,6 +445,7 @@ impl Store {
                 r.kind.as_str(),
                 r.tubing_calibration_id,
                 r.responsible.as_deref().map(str::trim).filter(|n| !n.is_empty()),
+                r.density_g_per_ml,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -823,6 +844,20 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Every event of a run whose kind is one of `kinds`, oldest first, with
+    /// no limit: a run whose journal holds thousands of other events (a
+    /// noisy bus) must not lose these from its report.
+    pub fn events_of_kinds(&self, run_id: i64, kinds: &[&str]) -> Result<Vec<EventRow>> {
+        let marks = vec!["?"; kinds.len()].join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {EVENT_COLS} FROM events WHERE run_id = ?1 AND kind IN ({marks}) ORDER BY id"
+        ))?;
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&run_id];
+        args.extend(kinds.iter().map(|k| k as &dyn rusqlite::ToSql));
+        let rows = stmt.query_map(args.as_slice(), row_to_event)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     // ---- app_state ----
 
     /// Events with an id above `after`, oldest first, at most `limit`: the
@@ -906,6 +941,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         kind: parse_token(row.get(14)?, RunKind::from_token, "run kind")?,
         tubing_calibration_id: row.get(15)?,
         responsible: row.get(16)?,
+        density_g_per_ml: row.get(17)?,
     })
 }
 
@@ -987,6 +1023,7 @@ mod tests {
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
             responsible: None,
+            density_g_per_ml: None,
         }
     }
 
@@ -1007,7 +1044,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
     }
 
     #[test]
@@ -1019,7 +1056,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
     }
 
     #[test]
@@ -1148,6 +1185,38 @@ mod tests {
     fn integrity_check_passes_on_fresh_db() {
         let s = Store::open_in_memory().unwrap();
         s.integrity_check().unwrap();
+        s.quick_check().unwrap();
+    }
+
+    #[test]
+    fn a_run_keeps_the_density_it_was_counted_with() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_run(&NewRun { density_g_per_ml: Some(1.18), ..sample_run() }).unwrap();
+        assert_eq!(s.run(id).unwrap().unwrap().density_g_per_ml, Some(1.18));
+    }
+
+    #[test]
+    fn events_of_kinds_has_no_limit_and_keeps_order() {
+        let s = Store::open_in_memory().unwrap();
+        let run_id = s.insert_run(&sample_run()).unwrap();
+        let log = |kind: &str| {
+            s.log_event(&NewEvent {
+                run_id: Some(run_id),
+                wall_time: ts("2026-09-01T09:30:00Z"),
+                level: EventLevel::Info,
+                kind: kind.into(),
+                detail: None,
+            })
+            .unwrap();
+        };
+        log("trim_start");
+        for _ in 0..50 {
+            log("write_fail");
+        }
+        log("refill");
+        let got: Vec<String> =
+            s.events_of_kinds(run_id, &["trim_start", "refill"]).unwrap().into_iter().map(|e| e.kind).collect();
+        assert_eq!(got, ["trim_start", "refill"]);
     }
 
     // ---- tubing calibrations ----

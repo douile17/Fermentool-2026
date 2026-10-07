@@ -9,10 +9,19 @@ export function loadConfig() {
   return get('/api/config');
 }
 
-/** Fetch the live config, let `apply` edit it, PUT it back. */
+/** Fetch the live config, let `apply` edit it, PUT it back. The config
+ *  carries the revision it was read at (`_rev`): if something else saved in
+ *  between (another page, Connect), the daemon refuses with 409 and the edit
+ *  is applied once more onto the fresh config. */
 export async function patchConfig(apply) {
-  const cfg = await get('/api/config');
-  apply(cfg);
-  const res = await put('/api/config', cfg);
-  return { cfg, res };
+  for (let attempt = 0; ; attempt++) {
+    const cfg = await get('/api/config');
+    apply(cfg);
+    try {
+      const res = await put('/api/config', cfg);
+      return { cfg, res };
+    } catch (e) {
+      if (e.status !== 409 || attempt > 0) throw e;
+    }
+  }
 }

@@ -10,6 +10,7 @@
 //! with the UI (milestone 8).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -49,6 +50,10 @@ pub struct AppState {
     pub pages: crate::notify::Pages,
     /// The API's own connection to the journal.
     pub db: Arc<ApiDb>,
+    /// Bumped by every config write: `GET /api/config` hands it out as
+    /// `_rev`, and a `PUT` carrying an older one is refused, so a page that
+    /// read the settings before a Connect cannot write the old port back.
+    pub config_rev: Arc<AtomicU64>,
 }
 
 /// The API's connection to the journal, separate from the control thread's.
@@ -191,30 +196,28 @@ async fn status(State(s): State<AppState>) -> ApiResult<Response> {
     Ok(Json(st).into_response())
 }
 
-async fn get_config(State(s): State<AppState>) -> Response {
-    let cfg = s.config.read().await.clone();
-    Json(cfg).into_response()
+async fn get_config(State(s): State<AppState>) -> ApiResult<Response> {
+    let cfg = s.config.read().await;
+    let mut v = serde_json::to_value(&*cfg).map_err(|e| ApiError::Conflict(e.to_string()))?;
+    v["_rev"] = json!(s.config_rev.load(Ordering::SeqCst));
+    Ok(Json(v).into_response())
 }
 
-async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiResult<Response> {
-    if !(new.scale.density_g_per_ml.is_finite() && new.scale.density_g_per_ml > 0.0) {
-        return Err(ApiError::Bad("liquid density must be a positive number (g/mL)".into()));
-    }
-    new.notify.validate().map_err(ApiError::Bad)?;
-    let lim = new.scale.trim_limit_pct;
-    if !(lim.is_finite()
-        && (crate::config::TRIM_LIMIT_PCT_MIN..=crate::config::TRIM_LIMIT_PCT_MAX).contains(&lim))
-    {
-        return Err(ApiError::Bad(format!(
-            "correction limit must be between {} and {} %",
-            crate::config::TRIM_LIMIT_PCT_MIN,
-            crate::config::TRIM_LIMIT_PCT_MAX
-        )));
+async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value>) -> ApiResult<Response> {
+    let rev = raw.get("_rev").and_then(|r| r.as_u64());
+    let new: Config = serde_json::from_value(raw).map_err(|e| ApiError::Bad(e.to_string()))?;
+    new.validate().map_err(ApiError::Bad)?;
+    // One write at a time, checked against what the caller read.
+    let mut current = s.config.write().await;
+    if rev.is_some_and(|r| r != s.config_rev.load(Ordering::SeqCst)) {
+        return Err(ApiError::Conflict(
+            "the settings were changed meanwhile (another page, or Connect): reload them and save again".into(),
+        ));
     }
     // A changed `[scale]` is applied live (Settings, Balance section), before
     // saving: a refusal (trimmed run active) must not leave the file ahead of
     // the engine.
-    let old_scale = s.config.read().await.scale.clone();
+    let old_scale = current.scale.clone();
     let scale_changed = old_scale.path.trim() != new.scale.path.trim()
         || old_scale.baud != new.scale.baud
         || old_scale.density_g_per_ml != new.scale.density_g_per_ml
@@ -233,7 +236,9 @@ async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiRe
     };
     new.save(&s.config_path)
         .map_err(|e| ApiError::Bad(e.to_string()))?;
-    *s.config.write().await = new.clone();
+    *current = new.clone();
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    drop(current);
     // `serial.allow_simulator` gates Start/Resume in the live engine, so a save
     // that flips it must reach the control thread, otherwise the Settings
     // checkbox looks broken until the next reconnect.
@@ -403,6 +408,8 @@ async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -
     } else {
         cfg.responsible = None;
     }
+    // The journal records the address the pump is really driven at.
+    cfg.pump_addr = s.config.read().await.pump.address;
     let id = s
         .control
         .call(|reply| Command::StartRun(cfg, reply))
@@ -501,18 +508,18 @@ async fn get_events(
     Ok(Json(events).into_response())
 }
 
-async fn stop_run(State(s): State<AppState>, Path(_id): Path<i64>) -> ApiResult<Response> {
+async fn stop_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
     s.control
-        .call(Command::StopRun)
+        .call(|reply| Command::StopRun(Some(id), reply))
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "stopped": true })).into_response())
 }
 
-async fn abort_run(State(s): State<AppState>, Path(_id): Path<i64>) -> ApiResult<Response> {
+async fn abort_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
     s.control
-        .call(Command::AbortRun)
+        .call(|reply| Command::AbortRun(Some(id), reply))
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
@@ -794,7 +801,11 @@ async fn static_handler(uri: Uri) -> Response {
 }
 
 async fn serial_ports() -> ApiResult<Response> {
-    let ports = available_ports().map_err(|e| ApiError::Conflict(e.to_string()))?;
+    // Enumerating can take a few hundred ms on Windows: off the async workers.
+    let ports = tokio::task::spawn_blocking(available_ports)
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
     let out: Vec<_> = ports
         .into_iter()
         .map(|p| {
@@ -829,7 +840,9 @@ async fn serial_reconnect(
     State(s): State<AppState>,
     Json(req): Json<ReconnectReq>,
 ) -> ApiResult<Response> {
-    let mut cfg = s.config.read().await.clone();
+    // Held to the end: a Settings save cannot interleave with this one.
+    let mut current = s.config.write().await;
+    let mut cfg = current.clone();
     if let Some(p) = req.path {
         cfg.serial.path = p;
     }
@@ -860,7 +873,8 @@ async fn serial_reconnect(
 
     cfg.save(&s.config_path)
         .map_err(|e| ApiError::Bad(e.to_string()))?;
-    *s.config.write().await = cfg;
+    *current = cfg;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
 
     Ok(Json(json!({ "connected": msg })).into_response())
 }
@@ -922,6 +936,7 @@ mod tests {
             events,
             pages: Default::default(),
             db: Arc::new(ApiDb::new(Store::open(db).unwrap())),
+            config_rev: Default::default(),
         }
     }
 
@@ -1150,6 +1165,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_settings_save_from_a_stale_page_is_refused() {
+        let mut st = test_state();
+        st.config_path = Arc::new(std::env::temp_dir().join(format!("ft-rev-{}.toml", std::process::id())));
+        let app = router(st);
+        let cfg = body_json(app.clone().oneshot(get("/api/config")).await.unwrap()).await;
+        assert_eq!(cfg["_rev"], 0);
+        let put = |body: serde_json::Value| {
+            Request::builder()
+                .method("PUT")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        assert_eq!(app.clone().oneshot(put(cfg.clone())).await.unwrap().status(), StatusCode::OK);
+        // The same, older read once more: someone saved in between.
+        assert_eq!(app.clone().oneshot(put(cfg.clone())).await.unwrap().status(), StatusCode::CONFLICT);
+        // An address out of range is refused, whatever the revision.
+        let mut bad = body_json(app.clone().oneshot(get("/api/config")).await.unwrap()).await;
+        bad["pump"]["address"] = json!(0);
+        assert_eq!(app.oneshot(put(bad)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_stop_for_another_run_is_refused() {
+        let app = router(test_state());
+        let start = post_json(
+            "/api/runs",
+            json!({ "name": "t", "control_var": "rpm", "direction": "cw", "pump_addr": 1, "curve": linear_curve() }),
+        );
+        let id = body_json(app.clone().oneshot(start).await.unwrap()).await["run_id"].as_i64().unwrap();
+        let res = app.clone().oneshot(post_json(&format!("/api/runs/{}/stop", id + 41), json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let st = body_json(app.oneshot(get("/api/status")).await.unwrap()).await;
+        assert_eq!(st["active"]["run_id"], id, "the active run goes on");
+    }
+
+    #[tokio::test]
     async fn missing_run_is_404() {
         let app = router(test_state());
         let res = app.oneshot(get("/api/runs/999")).await.unwrap();
@@ -1372,6 +1425,7 @@ mod tests {
                     kind: RunKind::Calibration,
                     tubing_calibration_id: None,
                     responsible: None,
+                    density_g_per_ml: None,
                 })
                 .unwrap();
             store

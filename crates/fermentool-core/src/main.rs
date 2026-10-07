@@ -194,11 +194,12 @@ async fn shutdown_signal(via_api: Arc<Notify>) {
 async fn main() -> anyhow::Result<()> {
     // First pass with defaults so we can find config.toml; then re-resolve using
     // any storage.dir it sets.
+    // A damaged or out-of-range config.toml never keeps the daemon down: it
+    // starts on the defaults and says so (see `Config::load_for_boot`).
     let bootstrap = resolve_paths(None);
-    let config = Config::load_or_create(&bootstrap.config)
-        .with_context(|| format!("load {}", bootstrap.config.display()))?;
+    let (config, _) = Config::load_for_boot(&bootstrap.config);
     let paths = resolve_paths(Some(&config.storage.dir));
-    let config = Config::load_or_create(&paths.config)?;
+    let (config, config_problems) = Config::load_for_boot(&paths.config);
 
     let log_dir = if config.log.dir.is_empty() {
         paths.log_dir.clone()
@@ -236,6 +237,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut engine = build_engine(&config, &paths.db)?;
+    for problem in config_problems {
+        engine.add_warning(problem);
+    }
+    // A damaged journal is said now, not at the first write that fails.
+    if let Err(e) = engine.store().quick_check() {
+        engine.add_warning(format!(
+            "the journal ({}) failed its check: {e}. Copy the Fermentool data folder aside before the next run",
+            paths.db.display()
+        ));
+    }
     let scale = build_scale(&config.scale);
     engine.attach_scale(
         scale.map(|w| Box::new(w) as Box<dyn Transport + Send>),
@@ -259,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
         events,
         pages: notify::Pages::default(),
         db,
+        config_rev: Default::default(),
     };
     // Notifications follow the journal on their own thread, reading the
     // people/channels from the live config (Settings edits apply at once).

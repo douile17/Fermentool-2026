@@ -652,6 +652,7 @@ mod tests {
                 kind: RunKind::Dosing,
                 tubing_calibration_id: None,
                 responsible: Some("Drew".into()),
+                density_g_per_ml: None,
             })
             .unwrap();
         s.finish_run(id, status, jiff::Timestamp::now()).ok();

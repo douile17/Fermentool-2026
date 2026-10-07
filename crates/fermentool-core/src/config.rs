@@ -193,6 +193,9 @@ pub struct ScaleConfig {
     pub trim_limit_pct: f64,
 }
 
+/// The bauds the LabQ pump offers.
+pub const SERIAL_BAUDS: [u32; 4] = [1200, 2400, 4800, 9600];
+
 /// Bounds accepted for `trim_limit_pct`.
 pub const TRIM_LIMIT_PCT_MIN: f64 = 5.0;
 pub const TRIM_LIMIT_PCT_MAX: f64 = 100.0;
@@ -322,23 +325,125 @@ impl Config {
             Ok(text) => Self::from_toml(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let cfg = Config::default();
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(path, cfg.to_toml()?)?;
+                cfg.save(path)?;
                 Ok(cfg)
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Write the current config back to `path`.
+    /// [`load_or_create`](Self::load_or_create) for the daemon's boot, which
+    /// must come up whatever the file holds: a daemon that refuses to start
+    /// on a damaged `config.toml` cannot resume the run it was driving, and
+    /// has no window to say why. A file that does not parse is copied aside
+    /// (`config.toml.bad`) and the defaults are used; values out of range are
+    /// put back to their defaults ([`sanitize`](Self::sanitize)). Returns the
+    /// config and what was wrong with the file, if anything.
+    pub fn load_for_boot(path: &Path) -> (Self, Vec<String>) {
+        let mut problems = Vec::new();
+        let mut cfg = match Self::load_or_create(path) {
+            Ok(c) => c,
+            Err(e) => {
+                let aside = path.with_extension("toml.bad");
+                let _ = std::fs::copy(path, &aside);
+                problems.push(format!(
+                    "{} could not be read ({e}); running on the defaults, the file is kept as {}",
+                    path.display(),
+                    aside.display()
+                ));
+                Config::default()
+            }
+        };
+        problems.extend(cfg.sanitize());
+        (cfg, problems)
+    }
+
+    /// Write the current config back to `path`, atomically: written to a
+    /// temporary file, flushed to disk, then renamed over the old one. A power
+    /// cut during a save leaves the old file or the new one, never half of
+    /// one.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        use std::io::Write;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, self.to_toml()?)?;
+        let tmp = path.with_extension("toml.tmp");
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(self.to_toml()?.as_bytes())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// What a save from the API checks beyond the notifications: every value
+    /// the daemon uses as a number in range.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("the API port must be 1..65535".into());
+        }
+        if !SERIAL_BAUDS.contains(&self.serial.baud) {
+            return Err(format!("the pump baud must be one of {SERIAL_BAUDS:?}"));
+        }
+        if !(1..=247).contains(&self.pump.address) {
+            return Err("the MODBUS address must be 1..=247".into());
+        }
+        if self.scale.baud == 0 {
+            return Err("the balance baud must be a positive number".into());
+        }
+        if !(self.scale.density_g_per_ml.is_finite() && self.scale.density_g_per_ml > 0.0) {
+            return Err("liquid density must be a positive number (g/mL)".into());
+        }
+        let lim = self.scale.trim_limit_pct;
+        if !(lim.is_finite() && (TRIM_LIMIT_PCT_MIN..=TRIM_LIMIT_PCT_MAX).contains(&lim)) {
+            return Err(format!(
+                "correction limit must be between {TRIM_LIMIT_PCT_MIN} and {TRIM_LIMIT_PCT_MAX} %"
+            ));
+        }
+        if tracing_subscriber::EnvFilter::try_new(&self.log.level).is_err() {
+            return Err(format!("\"{}\" is not a log level", self.log.level));
+        }
+        self.notify.validate()
+    }
+
+    /// Put every out-of-range value back to its default, saying which. For a
+    /// file edited by hand: [`validate`](Self::validate) refuses the same
+    /// values when they come through the API.
+    pub fn sanitize(&mut self) -> Vec<String> {
+        let d = Config::default();
+        let mut fixed = Vec::new();
+        let mut note = |what: &str| fixed.push(format!("config.toml: {what} out of range, default used"));
+        if self.port == 0 {
+            self.port = d.port;
+            note("port");
+        }
+        if !SERIAL_BAUDS.contains(&self.serial.baud) {
+            self.serial.baud = d.serial.baud;
+            note("serial.baud");
+        }
+        if !(1..=247).contains(&self.pump.address) {
+            self.pump.address = d.pump.address;
+            note("pump.address");
+        }
+        if self.scale.baud == 0 {
+            self.scale.baud = d.scale.baud;
+            note("scale.baud");
+        }
+        if !(self.scale.density_g_per_ml.is_finite() && self.scale.density_g_per_ml > 0.0) {
+            self.scale.density_g_per_ml = d.scale.density_g_per_ml;
+            note("scale.density_g_per_ml");
+        }
+        let lim = self.scale.trim_limit_pct;
+        if !(lim.is_finite() && (TRIM_LIMIT_PCT_MIN..=TRIM_LIMIT_PCT_MAX).contains(&lim)) {
+            self.scale.trim_limit_pct = d.scale.trim_limit_pct;
+            note("scale.trim_limit_pct");
+        }
+        if tracing_subscriber::EnvFilter::try_new(&self.log.level).is_err() {
+            self.log.level = d.log.level.clone();
+            note("log.level");
+        }
+        fixed
     }
 
     pub fn grace(&self) -> std::time::Duration {
@@ -406,6 +511,50 @@ mod tests {
         assert_eq!(again.port, 8730);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_whole() {
+        let dir = std::env::temp_dir().join(format!("fermentool-cfg-save-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.save(&path).unwrap();
+        cfg.port = 9100;
+        cfg.save(&path).unwrap();
+        assert_eq!(Config::load_or_create(&path).unwrap().port, 9100);
+        assert!(!path.with_extension("toml.tmp").exists(), "no temporary file left");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_file_still_boots_on_the_defaults() {
+        let dir = std::env::temp_dir().join(format!("fermentool-cfg-bad-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "port = 87\n[serial]\npath = \"CO").unwrap(); // cut mid-write
+        let (cfg, problems) = Config::load_for_boot(&path);
+        assert_eq!(cfg.port, 8730);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(path.with_extension("toml.bad").exists(), "the damaged file is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn values_out_of_range_go_back_to_their_defaults() {
+        let mut cfg = Config::from_toml(
+            "port = 0\n[pump]\naddress = 0\n[serial]\nbaud = 1234\n\
+             [scale]\ndensity_g_per_ml = 0.0\ntrim_limit_pct = 500.0\n[log]\nlevel = \"loud=,=\"\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_err());
+        assert_eq!(cfg.sanitize().len(), 6);
+        assert_eq!(cfg.pump.address, 1);
+        assert_eq!(cfg.scale.density_g_per_ml, 1.0);
+        assert_eq!(cfg.scale.trim_limit_pct, 25.0);
+        assert!(cfg.validate().is_ok());
+        assert!(Config::default().validate().is_ok());
     }
 
     #[test]

@@ -373,7 +373,15 @@ pub fn fit_exponential_mu(points: &[(f64, f64)], mu_guess: f64) -> Option<f64> {
         points.iter().zip(&g).map(|((_, v), x)| (v - f0 * x).powi(2)).sum::<f64>()
     };
     let phi = (5f64.sqrt() - 1.0) / 2.0;
-    let (mut a, mut b) = ((mu_guess / 4.0).ln(), (mu_guess * 4.0).ln());
+    // e^(µt) overflows past µt ~ 709: search no higher than that over the
+    // run, or every sum is NaN and the search wanders.
+    let t_max = points.iter().map(|(t, _)| *t).fold(0.0, f64::max);
+    let hi = if t_max > 0.0 { (mu_guess * 4.0).min(700.0 / t_max) } else { mu_guess * 4.0 };
+    let lo = mu_guess / 4.0;
+    if hi <= lo {
+        return None;
+    }
+    let (mut a, mut b) = (lo.ln(), hi.ln());
     for _ in 0..100 {
         let c = b - phi * (b - a);
         let d = a + phi * (b - a);
@@ -384,7 +392,7 @@ pub fn fit_exponential_mu(points: &[(f64, f64)], mu_guess: f64) -> Option<f64> {
         }
     }
     let mu = ((a + b) / 2.0).exp();
-    mu.is_finite().then_some(mu)
+    (mu.is_finite() && sse(mu).is_finite()).then_some(mu)
 }
 
 /// The µ an exponential curve asks for, whatever its parameter mode.
@@ -622,6 +630,16 @@ mod tests {
             .collect();
         let mu = fit_exponential_mu(&pts, 0.1).unwrap();
         assert!((mu - 0.15).abs() < 1e-4, "got {mu}");
+    }
+
+    #[test]
+    fn a_long_fast_run_does_not_overflow_the_fit() {
+        // µ 2/h over 100 h: e^(4µ·t) is far past f64. The fit must not
+        // wander on NaN sums: it answers within its bounds, or not at all.
+        let pts: Vec<(f64, f64)> = (0..=100).map(|i| (i as f64, (0.002 * i as f64).exp())).collect();
+        if let Some(mu) = fit_exponential_mu(&pts, 2.0) {
+            assert!(mu.is_finite() && mu <= 7.0, "got {mu}");
+        }
     }
 
     #[test]

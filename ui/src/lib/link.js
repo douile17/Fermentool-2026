@@ -56,6 +56,14 @@ export function linkState(status, connected) {
       hint: 'Writes get through but the pump reports a different value. Check the pump.',
       connectable: false,
     };
+  if (s.warnings?.length)
+    return {
+      tone: 'warn',
+      label: s.warnings[0],
+      short: 'Startup check',
+      hint: s.warnings.length > 1 ? s.warnings.slice(1).join(' | ') : undefined,
+      connectable: false,
+    };
   if (s.journal_ok === false)
     return {
       tone: 'warn',

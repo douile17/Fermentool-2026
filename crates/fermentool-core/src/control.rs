@@ -78,8 +78,10 @@ enum Step {
 pub enum Command {
     Status(oneshot::Sender<DaemonStatus>),
     StartRun(RunConfig, oneshot::Sender<Result<i64, ErrDetail>>),
-    StopRun(oneshot::Sender<Result<(), String>>),
-    AbortRun(oneshot::Sender<Result<(), String>>),
+    /// Stop the active run; `Some(id)`: only if it is that run.
+    StopRun(Option<i64>, oneshot::Sender<Result<(), String>>),
+    /// Abort the active run; `Some(id)`: only if it is that run.
+    AbortRun(Option<i64>, oneshot::Sender<Result<(), String>>),
     Recovery(oneshot::Sender<Result<Option<RecoveryInfo>, String>>),
     Resume(oneshot::Sender<Result<i64, ErrDetail>>),
     DiscardRecovery(RunStatus, oneshot::Sender<Result<(), String>>),
@@ -160,6 +162,8 @@ pub struct DaemonStatus {
     /// A Stop did not reach the pump: it may still be running. Sent again
     /// until it gets through; the UI raises it.
     pub stop_pending: bool,
+    /// What the start found wrong (config.toml, journal check).
+    pub warnings: Vec<String>,
 }
 
 /// Sending / receiving on the control channel failed, the thread is gone.
@@ -231,6 +235,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         rate_g_per_min: st.rate_g_per_min,
         tracking: st.tracking,
         stop_pending: st.stop_pending,
+        warnings: st.warnings,
     }
 }
 
@@ -776,6 +781,14 @@ fn maybe_recover_scale<T: Transport>(
     let _ = events.send(current_status(engine, grace));
 }
 
+/// Why a Stop or Abort naming run `id` must not act: another run is the
+/// active one (a page left open on an older run must not end the current
+/// one). `None` to go ahead, an idle engine answering for itself.
+fn not_the_active_run<T: Transport>(engine: &Engine<T>, id: Option<i64>) -> Option<String> {
+    let (want, active) = (id?, engine.active_status()?.run_id);
+    (want != active).then(|| format!("run #{want} is not the active run (#{active} is)"))
+}
+
 /// Returns `true` when the run state may have changed and a status broadcast is warranted.
 fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, grace: Duration) -> bool {
     let now = Timestamp::now();
@@ -789,12 +802,20 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let _ = reply.send(engine.start_run(cfg, now).map_err(|e| e.detail()));
             true
         }
-        Command::StopRun(reply) => {
-            let _ = reply.send(engine.stop_run(now).map_err(|e| e.to_string()));
+        Command::StopRun(id, reply) => {
+            let res = match not_the_active_run(engine, id) {
+                Some(e) => Err(e),
+                None => engine.stop_run(now).map_err(|e| e.to_string()),
+            };
+            let _ = reply.send(res);
             true
         }
-        Command::AbortRun(reply) => {
-            let _ = reply.send(engine.abort_run(now).map_err(|e| e.to_string()));
+        Command::AbortRun(id, reply) => {
+            let res = match not_the_active_run(engine, id) {
+                Some(e) => Err(e),
+                None => engine.abort_run(now).map_err(|e| e.to_string()),
+            };
+            let _ = reply.send(res);
             true
         }
         Command::Recovery(reply) => {
@@ -1196,7 +1217,7 @@ mod tests {
         assert!(a.last_seq.unwrap() >= 1, "journal keeps ticking in the hold");
         assert!(st.holding.is_none());
 
-        handle.call(Command::StopRun).await.unwrap().unwrap();
+        handle.call(|r| Command::StopRun(Some(id), r)).await.unwrap().unwrap();
         let st = handle.call(Command::Status).await.unwrap();
         assert!(st.active.is_none());
         let run = handle.call(|r| Command::GetRun(id, r)).await.unwrap().unwrap().unwrap();

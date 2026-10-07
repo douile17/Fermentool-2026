@@ -27,15 +27,18 @@ pub fn theil_sen_slope(points: &[(f64, f64)]) -> Option<f64> {
             let (x1, y1) = points[i];
             let (x2, y2) = points[j];
             let dx = x2 - x1;
-            if dx.abs() > 1e-12 {
-                slopes.push((y2 - y1) / dx);
+            let slope = (y2 - y1) / dx;
+            // A non-finite point (a NaN density, a garbled read) is left out
+            // rather than panicking the sort on every update.
+            if dx.abs() > 1e-12 && slope.is_finite() {
+                slopes.push(slope);
             }
         }
     }
     if slopes.is_empty() {
         return None;
     }
-    slopes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    slopes.sort_by(f64::total_cmp);
     let mid = slopes.len() / 2;
     Some(if slopes.len() % 2 == 0 {
         (slopes[mid - 1] + slopes[mid]) / 2.0
@@ -373,6 +376,13 @@ mod tests {
         pts[10].1 += 1000.0;
         let slope = theil_sen_slope(&pts).unwrap();
         assert!((slope - 2.0).abs() < 0.5, "got {slope}");
+    }
+
+    #[test]
+    fn theil_sen_skips_a_nan_point_instead_of_panicking() {
+        let mut pts: Vec<(f64, f64)> = (0..10).map(|i| (i as f64, 3.0 * i as f64)).collect();
+        pts[4].1 = f64::NAN;
+        assert!((theil_sen_slope(&pts).unwrap() - 3.0).abs() < 1e-9);
     }
 
     #[test]
