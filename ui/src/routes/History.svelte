@@ -5,6 +5,7 @@
   import Chart from '../components/Chart.svelte';
   import TrackingPanel from '../components/TrackingPanel.svelte';
   import { bottleWeights } from '../lib/balance.js';
+  import { downloadSettings } from '../lib/runfile.js';
 
   let runs = $state([]);
   let err = $state(null);
@@ -33,13 +34,52 @@
     clearing = false;
   }
 
+  // Calibration bursts are runs in the database (Tubing calibration records
+  // which ones it used) but not feeding cycles: never listed here.
   const shown = $derived.by(() => {
     const needle = q.trim().toLowerCase();
-    return needle ? runs.filter((r) => (r.name ?? '').toLowerCase().includes(needle)) : runs;
+    const kept = runs.filter((r) => r.kind !== 'calibration');
+    return needle ? kept.filter((r) => (r.name ?? '').toLowerCase().includes(needle)) : kept;
   });
 
+  // Several runs ticked in the list, deleted together. A running run can't
+  // be ticked; ids that leave the list (search, reload) leave the selection.
+  let picked = $state([]);
+  const pickable = $derived(shown.filter((r) => r.status !== 'running'));
+  const pickedShown = $derived(picked.filter((id) => shown.some((r) => r.id === id)));
+  const allPicked = $derived(pickable.length > 0 && pickable.every((r) => picked.includes(r.id)));
+  function togglePick(id) {
+    picked = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id];
+  }
+  function toggleAll() {
+    const ids = pickable.map((r) => r.id);
+    picked = allPicked ? picked.filter((x) => !ids.includes(x)) : [...new Set([...picked, ...ids])];
+  }
+
+  let confirmBulk = $state(false);
+  let bulkBusy = $state(false);
+  let bulkErr = $state(null);
+  async function deletePicked() {
+    bulkBusy = true;
+    bulkErr = null;
+    const failed = [];
+    for (const id of pickedShown) {
+      try {
+        await del(`/api/runs/${id}`);
+        runs = runs.filter((r) => r.id !== id);
+        picked = picked.filter((x) => x !== id);
+      } catch (e) {
+        const name = runs.find((r) => r.id === id)?.name ?? `#${id}`;
+        failed.push(`${name}: ${e.message}`);
+      }
+    }
+    bulkBusy = false;
+    if (failed.length) bulkErr = failed.join('\n');
+    else confirmBulk = false;
+  }
+
   $effect(() => {
-    get('/api/runs?limit=100')
+    get('/api/runs?limit=1000')
       .then((r) => (runs = r))
       .catch((e) => (err = e.message));
   });
@@ -86,13 +126,12 @@
     }
   }
 
-  // Seed NewRun from a past run's options and jump there.
-  function runAgain() {
-    if (!sel) return;
-    const { run } = sel;
+  // A past run's options as New run form fields: for "Run again" and for
+  // the settings file.
+  function settingsOf(run) {
     const c = run.curve;
     const s = Math.max(0, Math.round(run.duration_s));
-    app.prefill = {
+    return {
       name: run.name,
       control_var: run.control_var,
       direction: run.direction,
@@ -107,10 +146,37 @@
       mu_per_hour: c.params.mu_per_hour ?? 0.15,
       steepness: c.params.steepness ?? 8,
       gravimetric_trim: !!run.gravimetric_trim,
-      tubing_calibration_id: run.gravimetric_trim ? (run.tubing_calibration_id ?? null) : null,
+      // New run drops it if it no longer fits (an ml/min calibration needs the trim).
+      tubing_calibration_id: run.tubing_calibration_id ?? null,
       ...(run.responsible ? { responsible: run.responsible } : {}),
     };
+  }
+
+  // Seed NewRun from a past run's options and jump there.
+  function runAgain() {
+    if (!sel) return;
+    app.prefill = settingsOf(sel.run);
     app.tab = 'new';
+  }
+
+  // One run, its journal and events, removed for good (confirmed first).
+  let confirmDelete = $state(false);
+  let deleting = $state(false);
+  let deleteErr = $state(null);
+  async function deleteRun() {
+    if (!sel) return;
+    const id = sel.run.id;
+    deleting = true;
+    deleteErr = null;
+    try {
+      await del(`/api/runs/${id}`);
+      runs = runs.filter((r) => r.id !== id);
+      confirmDelete = false;
+      closeSel();
+    } catch (e) {
+      deleteErr = e.message;
+    }
+    deleting = false;
   }
 
   // A 100 h run journals ~360k ticks; drawing them all is a 360k-segment SVG
@@ -131,10 +197,12 @@
 
   function closeSel() {
     sel = null;
+    confirmDelete = false;
   }
   function onKey(e) {
     if (e.key !== 'Escape') return;
-    if (confirmClear && !clearing) confirmClear = false;
+    if (confirmBulk && !bulkBusy) confirmBulk = false;
+    else if (confirmClear && !clearing) confirmClear = false;
     else if (sel) closeSel();
   }
 
@@ -206,8 +274,13 @@
         bind:value={q}
         aria-label="Search runs by name"
       />
+      {#if pickedShown.length}
+        <button class="btn-danger" onclick={() => { bulkErr = null; confirmBulk = true; }}>
+          Delete selected ({pickedShown.length})
+        </button>
+      {/if}
       <button
-        class="btn-ghost reset"
+        class="btn-danger"
         onclick={() => { clearErr = null; confirmClear = true; }}
         disabled={!runs.length || clearBlocked}
         title={clearBlocked ? 'Stop the run / pump first' : 'Delete every run'}
@@ -219,27 +292,60 @@
   {#if err}<div class="err">{err}</div>{/if}
 
   <div class="tbl">
-    <div class="tr th">
-      <span>Name</span><span>Status</span><span>Curve</span><span>Duration</span><span>Started</span>
+    <div class="row">
+      <label class="pick" title={allPicked ? 'Unselect all' : 'Select all'}>
+        <input type="checkbox" checked={allPicked} disabled={!pickable.length} onchange={toggleAll} aria-label="Select all runs" />
+      </label>
+      <div class="tr th">
+        <span>Name</span><span>Status</span><span>Curve</span><span>Duration</span><span>Started</span>
+      </div>
     </div>
     {#each shown as r (r.id)}
-      <button
-        class="tr"
-        class:sel={sel?.run.id === r.id}
-        onclick={() => pick(r)}
-        title={r.status === 'running' ? 'View live in Overview' : 'Open details'}
-      >
-        <span class="nm">{r.name}</span>
-        <span><span class="pill {r.status}">{r.status}</span></span>
-        <span class="mono">{r.curve.params.kind}</span>
-        <span class="mono">{dur(r.duration_s)}</span>
-        <span class="mono">{stampY(r.started_at)}</span>
-      </button>
+      <div class="row">
+        <label class="pick">
+          <input type="checkbox" checked={picked.includes(r.id)} disabled={r.status === 'running'}
+            onchange={() => togglePick(r.id)} aria-label="Select {r.name}" />
+        </label>
+        <button
+          class="tr"
+          class:sel={sel?.run.id === r.id}
+          onclick={() => pick(r)}
+          title={r.status === 'running' ? 'View live in Overview' : 'Open details'}
+        >
+          <span class="nm">{r.name}</span>
+          <span><span class="pill {r.status}">{r.status}</span></span>
+          <span class="mono">{r.curve.params.kind}</span>
+          <span class="mono">{dur(r.duration_s)}</span>
+          <span class="mono">{stampY(r.started_at)}</span>
+        </button>
+      </div>
     {:else}
       <p class="muted">{q.trim() ? `No run matches “${q.trim()}”.` : 'No runs yet.'}</p>
     {/each}
   </div>
 </section>
+
+{#if confirmBulk}
+  <button class="backdrop" aria-label="Cancel" onclick={() => !bulkBusy && (confirmBulk = false)}></button>
+  <div class="layer">
+    <div class="modal card confirm" role="alertdialog" aria-modal="true" aria-labelledby="ft-bulk">
+      <div class="eyebrow">Delete runs</div>
+      <h2 id="ft-bulk">Delete {pickedShown.length} run{pickedShown.length === 1 ? '' : 's'}?</h2>
+      <p class="lede">
+        The selected runs, their journal and their events are permanently removed. This can't be undone.
+      </p>
+      {#if bulkErr}<div class="err bulk-err">{bulkErr}</div>{/if}
+      <div class="modal-foot">
+        <button class="btn-danger" disabled={bulkBusy || !pickedShown.length} onclick={deletePicked}>
+          {bulkBusy ? 'Deleting…' : 'Delete'}
+        </button>
+        <button class="btn-ghost" disabled={bulkBusy} onclick={() => (confirmBulk = false)}>
+          {bulkErr ? 'Close' : 'Cancel'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if confirmClear}
   <button class="backdrop" aria-label="Cancel" onclick={() => (confirmClear = false)}></button>
@@ -267,11 +373,11 @@
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="ft-run-detail">
       <div class="card-head">
         <div>
-          <div class="eyebrow">Run #{sel.run.id} · {unitFor(sel.run.control_var)}</div>
+          <div class="eyebrow">Run #{sel.run.id} | {unitFor(sel.run.control_var)}</div>
           <h2 id="ft-run-detail">{sel.run.name}</h2>
           <div class="sub mono">
             {stampY(sel.run.started_at)}{sel.run.ended_at ? ` → ${stampY(sel.run.ended_at)}` : ''}
-            {sel.run.responsible ? ` · ${sel.run.responsible}` : ''}
+            {sel.run.responsible ? ` | ${sel.run.responsible}` : ''}
           </div>
         </div>
         <div class="hd-actions">
@@ -289,7 +395,7 @@
         digits={digitsFor(sel.run.control_var)}
       />
       <div class="pv-cap mono">
-        {dur(sel.run.duration_s)} · {sel.run.curve.params.kind} ·
+        {dur(sel.run.duration_s)} | {sel.run.curve.params.kind} |
         {num(sel.run.curve.start, digitsFor(sel.run.control_var))} → {num(sel.run.curve.end, digitsFor(sel.run.control_var))}
         {unitFor(sel.run.control_var)}
       </div>
@@ -307,8 +413,24 @@
       </div>
 
       <div class="modal-foot">
-        <button class="btn-primary" onclick={runAgain}>Run again</button>
-        <button class="btn-ghost" onclick={closeSel}>Close</button>
+        {#if confirmDelete}
+          {#if deleteErr}<div class="err del-err">{deleteErr}</div>{/if}
+          <span class="del-q">Delete this run and its journal? This can't be undone.</span>
+          <button class="btn-danger" disabled={deleting} onclick={deleteRun}>
+            {deleting ? 'Deleting…' : 'Delete'}
+          </button>
+          <button class="btn-ghost" disabled={deleting} onclick={() => (confirmDelete = false)}>Cancel</button>
+        {:else}
+          <button class="btn-danger del" disabled={sel.run.status === 'running'} onclick={() => { deleteErr = null; confirmDelete = true; }}>
+            Delete run
+          </button>
+          <button class="btn-ghost" onclick={() => downloadSettings(settingsOf(sel.run))}
+            title="Save this run's settings to a file, to import later in New run">
+            Export settings
+          </button>
+          <button class="btn-primary" onclick={runAgain}>Run again</button>
+          <button class="btn-ghost" onclick={closeSel}>Close</button>
+        {/if}
       </div>
     </div>
   </div>
@@ -316,6 +438,12 @@
 
 <style>
   .tbl { display: flex; flex-direction: column; }
+  .row { display: flex; align-items: center; gap: var(--s-1); }
+  .row .tr { flex: 1; min-width: 0; }
+  .pick { display: flex; align-items: center; justify-content: center; width: 28px; flex: none; cursor: pointer; }
+  .pick input { margin: 0; cursor: pointer; }
+  .pick input:disabled { cursor: default; }
+  .bulk-err { white-space: pre-line; margin-top: var(--s-3); }
   .tr {
     display: grid;
     grid-template-columns: 1.5fr 0.8fr 0.9fr 0.8fr 1.2fr;
@@ -345,7 +473,6 @@
     width: min(260px, 42vw);
     padding: var(--s-2) var(--s-3);
     font: inherit;
-    font-size: 13px;
     color: var(--ink);
     background: var(--surface);
     border: 1px solid var(--line);
@@ -354,13 +481,6 @@
   .search:focus-visible { outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent); outline-offset: 1px; }
 
   .hd-tools { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
-  .reset {
-    align-self: center;
-    font-size: 13px;
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
-  }
-  .reset:not(:disabled):hover { background: var(--danger-bg); }
 
   .confirm { max-width: 420px; text-align: left; }
   .confirm h2 { font-size: 17px; margin: 6px 0 var(--s-3); }
@@ -397,6 +517,9 @@
     display: flex; gap: var(--s-3); justify-content: flex-end;
     flex-wrap: wrap; margin-top: var(--s-5);
   }
+  .modal-foot .del { margin-right: auto; }
+  .del-q { margin-right: auto; align-self: center; font-size: 13px; }
+  .del-err { flex-basis: 100%; }
   @media (prefers-reduced-motion: reduce) { .modal { animation: none; } }
 
   .acts { margin-top: var(--s-4); display: flex; flex-direction: column; }

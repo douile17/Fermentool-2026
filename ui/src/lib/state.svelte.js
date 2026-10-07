@@ -8,6 +8,8 @@ export const app = $state({
   route: 'pump',
   /** sub-view within the pump panel: 'overview' | 'new' | 'history' | 'calibration' */
   tab: 'overview',
+  /** Settings section picked in its side menu, see routes/settings/sections.js */
+  settingsSection: 'pump',
   /** Form seed for NewRun, set by "Run again" in History. Consumed once. */
   prefill: null,
 });

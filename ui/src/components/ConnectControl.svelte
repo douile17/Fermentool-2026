@@ -115,7 +115,7 @@
     >
       <option value="sim">sim (simulator)</option>
       {#each ports as p}
-        <option value={p.name}>{p.name}{p.product ? ` · ${p.product}` : ` (${p.kind})`}</option>
+        <option value={p.name}>{p.name}{p.product ? ` | ${p.product}` : ` (${p.kind})`}</option>
       {/each}
       <option value="__custom">custom path…</option>
     </select>

@@ -476,6 +476,35 @@ impl Store {
         Ok(())
     }
 
+    /// Delete one finished run and its journal (ticks + events), atomically.
+    /// `Ok(false)` when there is no such run. Refused for a run still marked
+    /// running (live, or waiting for a crash recovery) and for a burst a
+    /// tubing calibration points at (kept, as by [`clear_history`](Self::clear_history)).
+    pub fn delete_run(&self, id: i64) -> Result<bool> {
+        let Some(run) = self.run(id)? else {
+            return Ok(false);
+        };
+        if run.status == RunStatus::Running {
+            return Err(StoreError::Invalid("this run is still running".into()));
+        }
+        let used: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tubing_calibrations              WHERE ?1 IN (run_1_id, run_2_id, run_3_id))",
+            [id],
+            |r| r.get(0),
+        )?;
+        if used {
+            return Err(StoreError::Invalid(
+                "this run is a burst of a tubing calibration, it is kept with it".into(),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM ticks WHERE run_id = ?1", [id])?;
+        tx.execute("DELETE FROM events WHERE run_id = ?1", [id])?;
+        tx.execute("DELETE FROM runs WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Move a run to a terminal state.
     pub fn finish_run(&self, id: i64, status: RunStatus, ended_at: Timestamp) -> Result<()> {
         self.conn.execute(
@@ -1160,6 +1189,26 @@ mod tests {
         for id in runs {
             assert!(s.run(id).unwrap().is_some(), "burst {id} was deleted");
         }
+    }
+
+    #[test]
+    fn delete_run_removes_one_run_and_keeps_calibration_bursts() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        s.insert_calibration(&new_calibration(runs, [50.0; 3])).unwrap();
+        let a = s.insert_run(&sample_run()).unwrap();
+        s.finish_run(a, RunStatus::Stopped, ts("2026-09-02T09:00:00Z")).unwrap();
+        let b = s.insert_run(&sample_run()).unwrap();
+        s.finish_run(b, RunStatus::Stopped, ts("2026-09-02T10:00:00Z")).unwrap();
+
+        assert!(s.delete_run(a).unwrap());
+        assert!(s.run(a).unwrap().is_none());
+        assert!(s.run(b).unwrap().is_some(), "only the one run goes");
+        assert!(!s.delete_run(a).unwrap(), "already gone");
+        assert!(s.delete_run(runs[0]).is_err(), "a calibration burst is kept");
+
+        let live = s.insert_run(&sample_run()).unwrap();
+        assert!(s.delete_run(live).is_err(), "a running run is refused");
     }
 
     #[test]

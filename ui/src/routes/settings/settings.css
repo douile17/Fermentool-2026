@@ -1,0 +1,71 @@
+/* Shared by every Settings section, scoped to the settings pane so these
+   generic names never leak into the rest of the UI. */
+.settings-pane .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--s-4);
+}
+/* Yes/no options read as a line with a switch at its end. */
+.settings-pane .field.check {
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-4);
+  cursor: pointer;
+}
+.settings-pane .field.check span { color: var(--ink); font-size: 13px; }
+/* In a grid of labelled inputs, a switch line sits level with the inputs,
+   not with their labels. */
+.settings-pane .grid > .field.check { align-self: end; min-height: 40px; }
+.settings-pane .field.check input[type='checkbox'] {
+  appearance: none;
+  flex: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--line);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--muted) 30%, transparent);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.settings-pane .field.check input[type='checkbox']::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+.settings-pane .field.check input[type='checkbox']:checked { background: var(--teal-700); box-shadow: none; }
+.settings-pane .field.check input[type='checkbox']:checked::before { transform: translateX(16px); }
+.settings-pane .field.check input[type='checkbox']:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-pane .field.check input[type='checkbox'],
+  .settings-pane .field.check input[type='checkbox']::before { transition: none; }
+}
+.settings-pane .field-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.settings-pane .muted { color: var(--muted); }
+.settings-pane .ok {
+  color: var(--green-600);
+  background: color-mix(in srgb, var(--green-500) 12%, var(--surface));
+  border-radius: var(--radius-ctl);
+  padding: var(--s-2) var(--s-3);
+  font-size: 13px;
+}
+.settings-pane .howto { font-size: 13px; }
+.settings-pane .howto summary { cursor: pointer; color: var(--teal-700); }
+.settings-pane .howto ol { margin: var(--s-2) 0; padding-left: var(--s-5); line-height: 1.6; }

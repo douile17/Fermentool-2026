@@ -41,6 +41,12 @@ else to install:
   balance indicator and the trim checkbox only exist once `[scale] path` is
   set (Settings, Balance card, or `config.toml`). 0.2.0 was a 220 MB rebuild
   shipped for a problem that was only this empty setting.
+- **Always ship with an empty history.** The history (runs, journal,
+  calibrations) lives in `%APPDATA%\Fermentool\fermentool.sqlite`, created at
+  first launch, never in the exe or the installer. Never add a `.sqlite` (or
+  `config.toml`) to the bundle `resources`, nor seed one from this PC's data
+  dir: a fresh install must start with no runs. An update on a PC keeps that
+  PC's own history.
 - **Bump the version on every export** (`Cargo.toml` workspace version and
   `src-tauri/tauri.conf.json`): two builds with the same number cannot be told
   apart on the target PC.
@@ -84,7 +90,12 @@ else to install:
   with `, `, which is itself the anglicism to avoid, then again with real
   punctuation. Don't reintroduce either.)
 - **Pump is driven by rpm or ml/min only.** Never write the pump's head /
-  tubing registers. rpm→ml/min calibration is planned, not implemented.
+  tubing registers. An ml/min run given an **rpm** tubing calibration is
+  *driven in rpm* (`Engine::drive_ml_per_rpm`): curve, journal, volume and
+  trim stay in ml/min, only the value written and read back is rpm
+  (`write_setpoint` / `read_actual` / `drive_grid`), so the pump's own
+  head/tubing table never matters. Refused if the curve needs more than
+  350 rpm.
 - Simulator runs are refused unless `serial.allow_simulator = true`
   (`config.toml`). A real port configured but not open also refuses to
   start/resume, see `EngineError::SerialDown` / `SimulatorNotAllowed`.

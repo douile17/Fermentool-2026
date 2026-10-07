@@ -1,13 +1,15 @@
 <script>
-  // Tubing calibration: three timed bursts at one setpoint, each weighed by
-  // hand, recorded as one calibration per tubing lot and diameters. The balance is
-  // never read here on purpose: the bench where a tube is calibrated need not
-  // be wired to this Fermentool. Each burst is an ordinary run
+  // Tubing calibration: three timed bursts at one setpoint, each weighed,
+  // recorded as one calibration per tubing lot and diameters. A balance
+  // connected to this Fermentool, under the feed bottle, is read before and
+  // after each burst (by itself in automatic mode); without one, or on
+  // another bench, the weight is typed in.
+  // Each burst is an ordinary run
   // (kind = calibration); its real duration comes from the run's own clock,
   // the target duration below only sets when the pump stops by itself.
   import { app } from '../lib/state.svelte.js';
   import { get, post, del } from '../lib/api.js';
-  import { num, clock, stamp, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
+  import { num, dur, stamp, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { canStartRun } from '../lib/link.js';
   import ErrorText from '../components/ErrorText.svelte';
 
@@ -30,7 +32,10 @@
     target_min: 5,
     operator: '',
     note: '',
-    // [{ run_id, weight_g }], at most three
+    // run the three bursts and their weighing without a click (balance needed)
+    auto: false,
+    // [{ run_id, weight_g, start_g }], at most three; start_g is the balance
+    // reading just before the burst (null without a balance)
     bursts: [],
   });
 
@@ -99,6 +104,15 @@
   const burstRunning = $derived(!!current && active?.run_id === current.run_id);
   const otherRunActive = $derived(!!active && !burstRunning);
   const needsWeight = $derived(!!current && !burstRunning && current.weight_g == null);
+
+  // The connected balance, read once a second while no run is pumping. Its
+  // weight change over a burst is the collected mass, whichever side it is
+  // on (under the collecting beaker, or under the feed bottle).
+  const scaleW = $derived(app.status?.scale_weight_g ?? null);
+  const scaleStable = $derived(app.status?.scale_stable === true);
+  const collectedG = $derived(
+    current?.start_g != null && scaleW != null ? Math.abs(scaleW - current.start_g) : null,
+  );
   const complete = $derived(
     d.bursts.length === 3 && d.bursts.every((b) => b.weight_g != null && b.weight_g > 0),
   );
@@ -140,6 +154,7 @@
     const n = d.bursts.length + 1;
     const setpoint = Number(d.setpoint);
     const lim = d.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS;
+    const startG = scaleW; // before the pump moves
     try {
       const r = await post('/api/runs', {
         name: `calibration ${d.tubing_lot_id.trim()} ${n}/3`,
@@ -158,7 +173,8 @@
         gravimetric_trim: false,
         kind: 'calibration',
       });
-      d.bursts.push({ run_id: r.run_id, weight_g: null });
+      d.bursts.push({ run_id: r.run_id, weight_g: null, start_g: startG });
+      startedHere = r.run_id;
       await persist();
     } catch (e) {
       err = { message: e.message, hint: e.hint ?? null };
@@ -193,6 +209,93 @@
       working = false;
     }
   }
+
+  async function saveBalanceReading() {
+    if (!(collectedG > 0)) return;
+    current.weight_g = Number(collectedG.toFixed(2));
+    weightInput = '';
+    await persist();
+  }
+
+  // Full auto. With the balance under the feed bottle nothing needs a hand
+  // between bursts: each one starts once the balance has been still for
+  // STEADY_S, stops by itself at its duration, and is weighed once the
+  // balance is still again. Driven from this page: closing it pauses the
+  // sequence where it stands, the draft (and `auto`) resumes it.
+  const STEADY_S = 5;
+  // Right after a stop the status may still carry the reading from before
+  // the burst (the balance is not read while a run pumps).
+  const AFTER_STOP_S = 3;
+  // Less than this gone from the bottle after a whole burst: the balance is
+  // not under it, or the line is not drawing.
+  const MIN_COLLECTED_G = 1;
+  let stableSince = $state(null);
+  let stoppedAt = $state(null);
+  let wasRunning = false;
+  // A burst this page just started reads as stopped until the status shows
+  // it running (the start reply can beat the status push): not weighable yet.
+  let startedHere = null;
+  const seenRunning = new Set();
+  let tick = $state(Date.now());
+  $effect(() => {
+    if (!d.auto) return;
+    const t = setInterval(() => (tick = Date.now()), 500);
+    return () => clearInterval(t);
+  });
+  $effect(() => {
+    if (scaleStable && scaleW != null) {
+      if (stableSince == null) stableSince = Date.now();
+    } else {
+      stableSince = null;
+    }
+  });
+  $effect(() => {
+    const r = burstRunning;
+    if (r && current) seenRunning.add(current.run_id);
+    if (wasRunning && !r) stoppedAt = Date.now();
+    wasRunning = r;
+  });
+  const steadyS = $derived(
+    stableSince == null ? 0 : (tick - Math.max(stableSince, (stoppedAt ?? 0) + AFTER_STOP_S * 1000)) / 1000,
+  );
+  const canAuto = $derived(scaleW != null && !complete && !otherRunActive && (current == null || current.start_g != null || current.weight_g != null));
+  const autoStep = $derived(
+    burstRunning
+      ? `burst ${d.bursts.length}/3 pumping`
+      : needsWeight
+        ? 'waiting for the balance to settle, then weighing'
+        : `burst ${d.bursts.length + 1}/3 starts once the balance is still`,
+  );
+
+  async function setAuto(on) {
+    d.auto = on;
+    err = null;
+    await persist();
+  }
+
+  $effect(() => {
+    if (!d.auto || working || burstRunning) return;
+    if (complete) {
+      setAuto(false);
+      return;
+    }
+    if (steadyS < STEADY_S) return;
+    if (needsWeight && current.run_id === startedHere && !seenRunning.has(current.run_id)) return;
+    if (needsWeight) {
+      if (collectedG != null && collectedG >= MIN_COLLECTED_G) {
+        saveBalanceReading();
+      } else {
+        err = {
+          message: `The balance moved by ${num(collectedG ?? 0, 2)} g over the burst: automatic mode stopped.`,
+          hint: 'Is the feed bottle on the balance, and the line drawing from it? Weigh this burst by hand, or redo it.',
+        };
+        d.auto = false;
+        persist();
+      }
+    } else if (canStartBurst) {
+      startBurst();
+    }
+  });
 
   let weightInput = $state('');
   async function saveWeight() {
@@ -247,6 +350,59 @@
     saved = null;
     err = null;
   }
+
+  // 5.007 min reads "5 min 0.4 s": the real time the burst pumped.
+  const minSec = (min) => {
+    const tenths = Math.round(min * 600); // whole tenths of a second
+    return `${Math.floor(tenths / 600)} min ${num((tenths % 600) / 10, 1)} s`;
+  };
+
+  // The balance every second across each burst (journalled by the daemon):
+  // the flow as a slope over the steady middle (start and stop transients
+  // left out), and how much it changed from the first half to the second.
+  // Diagnostic only; the recorded weight stays the before/after difference.
+  const SKIP_START_S = 15;
+  const SKIP_END_S = 3;
+  let profiles = $state({}); // run_id -> { gPerMin, driftPct } | null
+  function slope(pts) {
+    const n = pts.length;
+    if (n < 5) return null;
+    const mx = pts.reduce((a, p) => a + p[0], 0) / n;
+    const my = pts.reduce((a, p) => a + p[1], 0) / n;
+    let sxy = 0;
+    let sxx = 0;
+    for (const [x, y] of pts) {
+      sxy += (x - mx) * (y - my);
+      sxx += (x - mx) ** 2;
+    }
+    return sxx > 0 ? sxy / sxx : null;
+  }
+  $effect(() => {
+    for (const b of d.bursts) {
+      if (b.weight_g == null || b.run_id in profiles) continue;
+      profiles[b.run_id] = null;
+      get(`/api/runs/${b.run_id}/ticks?from=0&to=100000`)
+        .then((ticks) => {
+          const end = Math.max(...ticks.map((t) => t.elapsed_s));
+          const pts = ticks
+            .filter((t) => t.weight_g != null && t.elapsed_s >= SKIP_START_S && t.elapsed_s <= end - SKIP_END_S)
+            .map((t) => [t.elapsed_s, t.weight_g]);
+          // A burst from before the balance was read mid-burst journals one
+          // stale weight throughout: nothing to show.
+          if (new Set(pts.map((p) => p[1])).size < 3) return;
+          const all = slope(pts);
+          if (all == null) return;
+          const mid = pts.length >> 1;
+          const a = slope(pts.slice(0, mid));
+          const z = slope(pts.slice(mid));
+          profiles[b.run_id] = {
+            gPerMin: Math.abs(all) * 60,
+            driftPct: a && z ? (100 * (Math.abs(z) - Math.abs(a))) / Math.abs(a) : null,
+          };
+        })
+        .catch(() => {});
+    }
+  });
 
   // Real burst durations, for the preview only.
   $effect(() => {
@@ -347,10 +503,12 @@
 <section class="card">
   <div class="card-head">
     <div>
+      <div class="eyebrow">Tubing</div>
       <h2>Tubing calibration</h2>
       <p class="sub">
-        Three bursts at one setpoint, each weighed by hand. Required before a gravimetric trim in
-        rpm, recommended in ml/min. Calibrate a tube before it is autoclaved and installed.
+        Three bursts at one setpoint, each weighed: automatically with the feed bottle on the
+        connected balance, or by hand. Required before a gravimetric trim in rpm, recommended in
+        ml/min. Calibrate a tube before it is autoclaved and installed.
       </p>
     </div>
   </div>
@@ -428,14 +586,21 @@
       <ol class="bursts">
         {#each [0, 1, 2] as i}
           {@const b = d.bursts[i]}
-          <li class:done={b?.weight_g != null}>
+          <li class:done={b?.weight_g != null} title={b ? `Run #${b.run_id}` : undefined}>
             <span class="n mono">{i + 1}/3</span>
             {#if !b}
               <span class="muted">not started</span>
             {:else if active?.run_id === b.run_id}
-              <span>pumping, run #{b.run_id}{remainingS != null ? `, ${clock(remainingS)} left` : ''}</span>
+              <span>pumping{remainingS != null ? `, ${dur(remainingS)} left` : ''}</span>
+              {#if collectedG != null}
+                <span class="drawn mono" title="Balance change since the burst started, live">{num(collectedG, 2)} g drawn</span>
+              {/if}
             {:else if b.weight_g == null}
-              <span>stopped, run #{b.run_id}: weigh the collected feed</span>
+              <span>
+                stopped: {b.start_g != null
+                  ? 'take the balance reading'
+                  : 'weigh the collected feed'}
+              </span>
             {:else if editing === i}
               <input class="edit-w" type="number" step="0.01" min="0" bind:value={editInput}
                 onkeydown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') editing = null; }} />
@@ -443,7 +608,13 @@
               <button class="btn-ghost small" disabled={!(Number(editInput) > 0)} onclick={saveEdit}>Save</button>
               <button class="btn-ghost small" onclick={() => (editing = null)}>Cancel</button>
             {:else}
-              <span class="mono">{num(b.weight_g, 2)} g{durations[b.run_id] ? ` in ${num(durations[b.run_id], 2)} min` : ''}</span>
+              <span class="mono">{num(b.weight_g, 2)} g{durations[b.run_id] ? ` in ${minSec(durations[b.run_id])}` : ''}</span>
+              {#if profiles[b.run_id]}
+                {@const pr = profiles[b.run_id]}
+                <span class="profile mono" title="Balance read every second during the burst: flow from the slope (first {SKIP_START_S} s and last {SKIP_END_S} s left out), and its change from the first half of the burst to the second.">
+                  slope {num(pr.gPerMin, 3)} g/min{pr.driftPct != null ? ` | ${pr.driftPct >= 0 ? '+' : ''}${num(pr.driftPct, 1)} % within` : ''}
+                </span>
+              {/if}
               <button class="btn-ghost small" disabled={working} onclick={() => startEdit(i)}>Edit</button>
             {/if}
           </li>
@@ -461,25 +632,54 @@
         </p>
       {/if}
 
+      {#if d.auto}
+        <div class="actions">
+          <span class="live mono">Automatic: {autoStep}</span>
+          <button class="btn-ghost" onclick={() => setAuto(false)}>Stop automatic</button>
+        </div>
+      {:else if canAuto && !burstRunning}
+        <div class="actions">
+          <button class="btn-primary" disabled={!formOk || working} onclick={() => setAuto(true)}>
+            Run {d.bursts.length ? 'the remaining bursts' : 'all 3 bursts'} automatically
+          </button>
+          <span class="help inline">Balance under the feed bottle: each burst starts, stops and is weighed by itself.</span>
+        </div>
+      {/if}
+
       <div class="actions">
         {#if burstRunning}
           <button class="btn-primary" disabled={working} onclick={stopBurst}>Stop and weigh</button>
-        {:else if needsWeight}
+        {:else if needsWeight && !d.auto}
+          {#if collectedG != null}
+            <button class="btn-primary" disabled={!scaleStable || !(collectedG > 0)} onclick={saveBalanceReading}>
+              Take balance reading: {num(collectedG, 2)} g
+            </button>
+            <span class="live mono" class:settling={!scaleStable}>
+              {scaleStable ? 'stable' : 'settling…'} | {num(scaleW, 2)} g now, {num(current.start_g, 2)} g before
+            </span>
+          {/if}
           <label class="field weigh"><span>Collected weight (g)</span>
             <input type="number" step="0.01" min="0" bind:value={weightInput} onkeydown={(e) => e.key === 'Enter' && saveWeight()} />
           </label>
-          <button class="btn-primary" disabled={!(Number(weightInput) > 0)} onclick={saveWeight}>Save weight</button>
-        {:else if d.bursts.length < 3}
+          <button class={collectedG != null ? 'btn-ghost' : 'btn-primary'} disabled={!(Number(weightInput) > 0)} onclick={saveWeight}>
+            Save typed weight
+          </button>
+        {:else if d.bursts.length < 3 && !d.auto}
           <button class="btn-primary" disabled={!canStartBurst} onclick={startBurst}>
             {working ? 'Starting…' : `Start burst ${d.bursts.length + 1}/3`}
           </button>
+          {#if scaleW != null}
+            <span class="live mono" class:settling={!scaleStable}>
+              balance {num(scaleW, 2)} g{scaleStable ? '' : ' (settling)'}: taken as the starting weight
+            </span>
+          {/if}
         {/if}
         {#if current && !burstRunning}
           <button class="btn-ghost" onclick={redoLast}>Redo burst {d.bursts.length}</button>
         {/if}
         {#if confirmDiscard}
           <span class="confirm">
-            Discard this session?{burstRunning ? ' The pump stops now.' : ''} The bursts stay in the run history.
+            Discard this session?{burstRunning ? ' The pump stops now.' : ''} The bursts stay recorded.
           </span>
           <button class="btn-danger" disabled={working} onclick={discard}>{burstRunning ? 'Stop and discard' : 'Discard'}</button>
           <button class="btn-ghost" onclick={() => (confirmDiscard = false)}>Keep</button>
@@ -493,7 +693,7 @@
       <div class="group">
         <div class="eyebrow">{saved ? 'Recorded calibration' : 'Preview (recorded values come from the daemon)'}</div>
         <div class="result mono">
-          <div>flows {shown.measured_ml_min.map((m) => num(m, 3)).join(' · ')} ml/min</div>
+          <div>flows {shown.measured_ml_min.map((m) => num(m, 3)).join(' | ')} ml/min</div>
           <div>mean <b>{num(shown.mean_measured_ml_min, 3)} ml/min</b></div>
           <div class:bad={cvBad(shown.cv_pct)}>CV {num(shown.cv_pct, 2)} %</div>
           {#if (saved?.control_var ?? d.control_var) === 'ml_min'}
@@ -601,6 +801,11 @@
   .btn-ghost.small { padding: 2px var(--s-2); font-size: 12px; }
   .actions { display: flex; gap: var(--s-3); align-items: flex-end; flex-wrap: wrap; margin-top: var(--s-3); }
   .weigh { width: 180px; }
+  .drawn { font-weight: 600; color: var(--teal-700); }
+  .live { font-size: 12px; color: var(--green-600); align-self: center; }
+  .live.settling { color: var(--muted); }
+  .help.inline { margin: 0; align-self: center; }
+  .profile { font-size: 12px; color: var(--muted); }
   .confirm { font-size: 13px; align-self: center; }
   .warn { font-size: 13px; color: var(--danger); margin: var(--s-3) 0 0; }
   .help { font-size: 12px; color: var(--muted); margin: var(--s-3) 0 0; max-width: 70ch; line-height: 1.4; }
@@ -621,7 +826,11 @@
   .hist .row-action { text-align: right; white-space: nowrap; }
   .hist .row-action .btn-ghost { padding: 2px var(--s-2); font-size: 12px; }
   .tag { font-size: 11px; margin-right: var(--s-2); color: var(--muted); }
-  .head-actions { display: flex; align-items: center; gap: var(--s-3); }
+  /* inside an eyebrow line: back to normal text for the controls */
+  .head-actions {
+    display: flex; align-items: center; gap: var(--s-3);
+    text-transform: none; letter-spacing: normal; font-size: 14px; font-weight: 400; color: var(--ink);
+  }
   .toggle { font-size: 12px; font-weight: 400; color: var(--muted); display: flex; align-items: center; gap: var(--s-1); }
   @media (max-width: 720px) {
     .hist { display: block; overflow-x: auto; }

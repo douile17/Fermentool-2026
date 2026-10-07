@@ -52,7 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/preview", post(preview))
         .route("/api/runs", get(list_runs).post(create_run))
         .route("/api/history", delete(clear_history))
-        .route("/api/runs/{id}", get(get_run))
+        .route("/api/runs/{id}", get(get_run).delete(delete_run))
         .route("/api/runs/{id}/ticks", get(get_ticks))
         .route("/api/runs/{id}/events", get(get_events))
         .route("/api/runs/{id}/tracking", get(get_tracking))
@@ -385,6 +385,19 @@ async fn clear_history(State(s): State<AppState>) -> ApiResult<Response> {
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "cleared": true })).into_response())
+}
+
+async fn delete_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let found = s
+        .control
+        .call(|reply| Command::DeleteRun(id, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    if !found {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(json!({ "deleted": id })).into_response())
 }
 
 /// Delivered vs requested feed for a run: chart points, R², fitted µ. 404 when

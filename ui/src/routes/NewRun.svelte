@@ -5,6 +5,7 @@
   import { canStartRun } from '../lib/link.js';
   import Chart from '../components/Chart.svelte';
   import ErrorText from '../components/ErrorText.svelte';
+  import { downloadSettings, readSettings } from '../lib/runfile.js';
 
   let f = $state({
     name: '',
@@ -48,6 +49,30 @@
     app.prefill = null;
   }
 
+  // Settings file: export the form as it stands, or fill it from a file
+  // exported here or from History. A responsible not set up on this PC is
+  // dropped, as for a remembered one.
+  let importMsg = $state(null);
+  let importErr = $state(null);
+  let fileInput;
+  async function importSettings(e) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = '';
+    if (!file) return;
+    importMsg = null;
+    importErr = null;
+    try {
+      const got = readSettings(await file.text());
+      if (got.responsible != null && !people.some((n) => n.toLowerCase() === got.responsible.trim().toLowerCase())) {
+        got.responsible = '';
+      }
+      Object.assign(f, got);
+      importMsg = `Settings loaded from ${file.name}`;
+    } catch (err) {
+      importErr = `${file.name}: ${err.message}`;
+    }
+  }
+
   let pumpAddr = $state(1);
   let scaleConfigured = $state(false);
   let people = $state([]);
@@ -67,6 +92,13 @@
   // The trim only applies with a balance configured; a "Run again" of a
   // trimmed run on a PC without one keeps the wish but shows why it is off.
   const trimOn = $derived(scaleConfigured && f.gravimetric_trim);
+  const scaleLive = $derived(app.status?.scale_connected === true);
+  const scaleW = $derived(app.status?.scale_weight_g ?? null);
+
+  function openBalanceSettings() {
+    app.settingsSection = 'balance';
+    app.route = 'settings';
+  }
 
   const unit = $derived(unitFor(f.control_var));
   const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS);
@@ -174,15 +206,31 @@
   let calibrations = $state([]);
   let calsLoaded = $state(false);
   $effect(() => {
-    if (!f.gravimetric_trim) return;
     get('/api/calibrations')
       .then((rows) => (calibrations = rows ?? []))
       .catch(() => (calibrations = []))
       .finally(() => (calsLoaded = true));
   });
+  // An rpm run takes rpm calibrations. An ml/min run takes ml/min ones (they
+  // only seed the trim, so only with the trim on) and rpm ones: those drive
+  // the pump in rpm, with or without a balance.
   const calMatches = $derived(
-    calibrations.filter((c) => c.control_var === f.control_var && !c.archived_at),
+    calibrations.filter(
+      (c) =>
+        !c.archived_at &&
+        (f.control_var === 'rpm'
+          ? c.control_var === 'rpm'
+          : c.control_var === 'rpm' || (trimOn && c.control_var === 'ml_min')),
+    ),
   );
+  const chosenCal = $derived(calMatches.find((c) => c.id === f.tubing_calibration_id) ?? null);
+  // ml/min asked, rpm written: the pump's own head/tubing table is not used.
+  const drivePerRpm = $derived(
+    f.control_var === 'ml_min' && chosenCal?.control_var === 'rpm'
+      ? chosenCal.mean_measured_ml_min / chosenCal.setpoint
+      : null,
+  );
+  const showCal = $derived(trimOn || (f.control_var === 'ml_min' && calMatches.length > 0));
   // Drop a selection that no longer matches the run's unit. Only once the list
   // has loaded: before that, a calibration seeded by "Run again" would look
   // unknown and be wiped.
@@ -194,8 +242,8 @@
     trimOn && f.control_var === 'rpm' && f.tubing_calibration_id == null,
   );
   const calLabel = (c) =>
-    `${c.tubing_lot_id}${c.internal_ref ? ` (${c.internal_ref})` : ''} · Ø ${num(c.inner_diameter_mm, 1)}/${num(c.outer_diameter_mm, 1)} mm · ${stamp(c.created_at)} · CV ${num(c.cv_pct, 1)} %` +
-    (c.control_var === 'ml_min' ? ` · c₀ ${num(c.c0, 3)}` : ` · ${num(c.mean_measured_ml_min / c.setpoint, 3)} ml/min per rpm`);
+    `${c.tubing_lot_id}${c.internal_ref ? ` (${c.internal_ref})` : ''} | Ø ${num(c.inner_diameter_mm, 1)}/${num(c.outer_diameter_mm, 1)} mm | ${stamp(c.created_at)} | CV ${num(c.cv_pct, 1)} %` +
+    (c.control_var === 'ml_min' ? ` | c₀ ${num(c.c0, 3)}` : ` | ${num(c.mean_measured_ml_min / c.setpoint, 3)} ml/min per rpm`);
 
   let starting = $state(false);
   let startErr = $state(null);
@@ -211,7 +259,7 @@
         pump_addr: pumpAddr,
         curve: curveSpec(),
         gravimetric_trim: trimOn,
-        tubing_calibration_id: trimOn ? f.tubing_calibration_id : null,
+        tubing_calibration_id: trimOn || drivePerRpm != null ? f.tubing_calibration_id : null,
         responsible: f.responsible || null,
       });
       try {
@@ -233,8 +281,15 @@
 
 <section class="card">
   <div class="card-head">
-    <div><h2>New run</h2></div>
+    <div><div class="eyebrow">Run setup</div><h2>New run</h2></div>
+    <div class="file-tools">
+      <input type="file" accept=".json,application/json" hidden bind:this={fileInput} onchange={importSettings} />
+      <button class="btn-ghost" onclick={() => fileInput.click()} title="Fill the form from a settings file">Import settings</button>
+      <button class="btn-ghost" onclick={() => downloadSettings(f)} title="Save the form to a file, to import later">Export settings</button>
+    </div>
   </div>
+  {#if importErr}<div class="err" style="margin-bottom:16px">{importErr}</div>{/if}
+  {#if importMsg}<p class="imported mono">{importMsg}</p>{/if}
 
   {#if busy}
     <div class="err" style="margin-bottom:16px">A run is already active. Stop it from Overview first.</div>
@@ -302,28 +357,69 @@
           </div>
         </div>
 
-        {#if scaleConfigured}
-          <label class="field check">
-            <input type="checkbox" bind:checked={f.gravimetric_trim} />
-            <span>Enable gravimetric trim (uses the configured scale to correct the feed rate over time)</span>
-          </label>
-        {:else if f.gravimetric_trim}
-          <p class="cal-note">
-            This run used the gravimetric trim. Set up the balance in Settings to use it again.
-          </p>
-        {/if}
+        <div class="field"><span>Regulation</span>
+          <div class="seg" role="radiogroup" aria-label="Regulation">
+            <button role="radio" aria-checked={!trimOn} class:on={!trimOn}
+              onclick={() => (f.gravimetric_trim = false)}>pump only</button>
+            <button role="radio" aria-checked={trimOn} class:on={trimOn} disabled={!scaleConfigured}
+              title={scaleConfigured ? '' : 'No balance set up'}
+              onclick={() => (f.gravimetric_trim = true)}>balance trim</button>
+          </div>
+        </div>
       </div>
-      {#if trimOn}
+      <p class="cal-note reg-note" class:bad={trimOn && !scaleLive}>
+        {#if !scaleConfigured}
+          {f.gravimetric_trim ? 'This run used the balance trim, but no' : 'No'} balance is set up, the pump runs open loop.
+          <button class="linkish" type="button" onclick={openBalanceSettings}>Set up a balance</button>
+        {:else if trimOn && !scaleLive}
+          The balance is not responding: the trim cannot correct anything until it is back.
+        {:else if trimOn}
+          The balance{scaleW != null ? ` (${num(scaleW, 1)} g now)` : ''} corrects the flow so the delivered volume follows the curve.
+        {:else}
+          Open loop: the pump runs its own flow, the balance only records.
+        {/if}
+      </p>
+      {#if showCal}
         <div class="cal">
           {#if calMatches.length}
             <label class="field"><span>Tubing calibration</span>
               <select bind:value={f.tubing_calibration_id}>
-                <option value={null}>{f.control_var === 'rpm' ? 'Choose a calibration' : 'None, start the trim at 1.0'}</option>
-                {#each calMatches as c (c.id)}
-                  <option value={c.id}>{calLabel(c)}</option>
-                {/each}
+                <option value={null}>
+                  {f.control_var === 'rpm'
+                    ? 'Choose a calibration'
+                    : trimOn
+                      ? "None: the pump's own ml/min, trim from 1.0"
+                      : "None: the pump's own ml/min"}
+                </option>
+                {#if f.control_var === 'ml_min'}
+                  {#if calMatches.some((c) => c.control_var === 'rpm')}
+                    <optgroup label="Drive in rpm from the tube's calibration">
+                      {#each calMatches.filter((c) => c.control_var === 'rpm') as c (c.id)}
+                        <option value={c.id}>{calLabel(c)}</option>
+                      {/each}
+                    </optgroup>
+                  {/if}
+                  {#if calMatches.some((c) => c.control_var === 'ml_min')}
+                    <optgroup label="Pump's own ml/min, trim seeded with c₀">
+                      {#each calMatches.filter((c) => c.control_var === 'ml_min') as c (c.id)}
+                        <option value={c.id}>{calLabel(c)}</option>
+                      {/each}
+                    </optgroup>
+                  {/if}
+                {:else}
+                  {#each calMatches as c (c.id)}
+                    <option value={c.id}>{calLabel(c)}</option>
+                  {/each}
+                {/if}
               </select>
             </label>
+          {/if}
+          {#if drivePerRpm != null}
+            <p class="cal-note">
+              Driven in rpm: {num(drivePerRpm, 3)} ml/min per rpm, so up to
+              {num(drivePerRpm * RPM_LIMITS.max, 1)} ml/min at {RPM_LIMITS.max} rpm. The curve stays in
+              ml/min; the pump's own head/tubing table is not used.
+            </p>
           {/if}
           {#if needsCalibration}
             <p class="cal-note bad">
@@ -331,7 +427,7 @@
               the trim cannot start in rpm without one.
               <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
             </p>
-          {:else if f.control_var === 'ml_min' && f.tubing_calibration_id == null}
+          {:else if trimOn && f.control_var === 'ml_min' && f.tubing_calibration_id == null}
             <p class="cal-note">
               Starting without a calibration: the trim starts at 1.0 and corrects from there.
               <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
@@ -400,22 +496,22 @@
         Leave m<sub>s</sub> blank for the growth-only form.
       </p>
       <div class="grid">
-        <label class="field"><span>X₀ · biomass at feed start (g/L)</span>
+        <label class="field"><span>X₀ | biomass at feed start (g/L)</span>
           <input type="number" step="0.1" bind:value={f.fb_x0} placeholder="e.g. 2" />
         </label>
-        <label class="field"><span>V₀ · culture volume (L)</span>
+        <label class="field"><span>V₀ | culture volume (L)</span>
           <input type="number" step="0.1" bind:value={f.fb_v0} placeholder="e.g. 1.0" />
         </label>
-        <label class="field"><span>Y<sub>x/s</sub> · yield (g/g)</span>
+        <label class="field"><span>Y<sub>x/s</sub> | yield (g/g)</span>
           <input type="number" step="0.01" bind:value={f.fb_yxs} placeholder="E. coli/glucose ≈ 0.45" />
         </label>
-        <label class="field"><span>S<sub>f</sub> · substrate in feed bottle (g/L)</span>
+        <label class="field"><span>S<sub>f</sub> | substrate in feed bottle (g/L)</span>
           <input type="number" step="1" bind:value={f.fb_sf} placeholder="e.g. 500" />
         </label>
-        <label class="field"><span>m<sub>s</sub> · maintenance (g/g·h, optional)</span>
+        <label class="field"><span>m<sub>s</sub> | maintenance (g/g·h, optional)</span>
           <input type="number" step="0.001" bind:value={f.fb_ms} placeholder="E. coli ≈ 0.025" />
         </label>
-        <label class="field"><span>V<sub>max</sub> · reactor limit (L, optional)</span>
+        <label class="field"><span>V<sub>max</sub> | reactor limit (L, optional)</span>
           <input type="number" step="0.1" bind:value={f.fb_vmax} placeholder="for the t_max hint" />
         </label>
       </div>
@@ -423,7 +519,7 @@
       {#if fb}
         <div class="fb-out mono">
           F₀ = <b>{fb.f0_mlmin.toFixed(3)} ml/min</b>
-          <span class="dim">({fb.f0_Lh.toFixed(4)} L/h · µ = {f.mu_per_hour} h⁻¹{fb.ms ? ` · m_s = ${fb.ms}` : ''})</span>
+          <span class="dim">({fb.f0_Lh.toFixed(4)} L/h | µ = {f.mu_per_hour} h⁻¹{fb.ms ? ` | m_s = ${fb.ms}` : ''})</span>
           {#if fb.tmax}<br />reaches V<sub>max</sub> in ≈ <b>{fb.tmax.toFixed(1)} h</b>{/if}
         </div>
         <button class="btn-ghost" type="button" onclick={useF0}>
@@ -442,7 +538,7 @@
     {:else if preview.length}
       <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} digits={digitsFor(f.control_var)} />
       <div class="pv-cap mono">
-        start {num(preview[0][1], digitsFor(f.control_var))} {unit} · end {num(preview[preview.length - 1][1], digitsFor(f.control_var))} {unit} · {dur(durationS)}
+        start {num(preview[0][1], digitsFor(f.control_var))} {unit} | end {num(preview[preview.length - 1][1], digitsFor(f.control_var))} {unit} | {dur(durationS)}
       </div>
     {:else}
       <p class="muted">Adjust the fields to see the curve.</p>
@@ -519,7 +615,8 @@
   .pane-profile .grid { display: flex; flex-wrap: wrap; gap: var(--s-4); }
   .pane-profile .field { flex: 0 1 140px; }
   .pane-profile .field .seg { align-self: flex-start; }
-  .pump-fields { display: flex; gap: var(--s-4); }
+  .pump-fields { display: flex; flex-wrap: wrap; gap: var(--s-4); }
+  .reg-note { margin-top: var(--s-2); max-width: 420px; }
   .pump-fields .seg button { padding: var(--s-2) var(--s-3); }
   .dur-field { grid-column: span 2; }
   .dur { display: flex; gap: var(--s-3); }
@@ -584,4 +681,6 @@
     border-radius: var(--radius-ctl);
   }
   .fb-out .dim { color: var(--muted); }
+  .file-tools { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+  .imported { margin: 0 0 var(--s-3); font-size: 12px; color: var(--muted); }
 </style>

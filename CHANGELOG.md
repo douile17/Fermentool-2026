@@ -49,6 +49,18 @@
 - Chaque alarme, reprise et remplissage est écrit dans le journal du run et
   marqué sur le graphique.
 
+### Calibration du tuyau
+
+- Calibration automatique avec la bouteille d'alimentation sur la balance :
+  les 3 essais démarrent, s'arrêtent et sont pesés seuls (balance stable 5 s
+  avant et après chaque essai) ; arrêt avec un message si la bouteille n'a
+  presque pas perdu de poids. En manuel, « Take balance reading » propose le
+  poids lu.
+- Un run en ml/min peut être piloté en rpm à partir d'une calibration en rpm
+  (New run, « Drive in rpm from the tube's calibration »), avec ou sans
+  balance : la courbe reste en ml/min, la table tête/tuyau de la pompe ne
+  sert plus. Refusé si la courbe demande plus de 350 rpm.
+
 ### Fin de courbe
 
 - Un run de dosage ne s'arrête plus à la fin de sa courbe : il garde la valeur

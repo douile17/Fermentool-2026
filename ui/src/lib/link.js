@@ -15,19 +15,19 @@
 export function linkState(status, connected) {
   const s = status;
   if (!connected || !s)
-    return { tone: 'idle', label: 'Connecting to daemon…', short: 'daemon…', connectable: false };
+    return { tone: 'idle', label: 'Connecting to daemon…', short: 'Daemon…', connectable: false };
   if (s.simulator && s.allow_simulator)
     return {
       tone: 'sim',
       label: 'Simulator, test runs enabled',
-      short: 'simulator',
+      short: 'Simulator',
       connectable: true,
     };
   if (s.simulator)
     return {
       tone: 'bad',
       label: 'No pump connected',
-      short: 'no pump',
+      short: 'No pump',
       hint: 'Pick a serial port and click Connect (or enable simulator runs in Settings).',
       connectable: true,
     };
@@ -35,7 +35,7 @@ export function linkState(status, connected) {
     return {
       tone: 'bad',
       label: 'Pump not connected',
-      short: 'pump offline',
+      short: 'Pump offline',
       hint: 'Check power, wiring, the MODBUS address and the baud rate, then Connect.',
       connectable: true,
     };
@@ -43,7 +43,7 @@ export function linkState(status, connected) {
     return {
       tone: 'warn',
       label: 'Pump not tracking the setpoint',
-      short: 'pump: mismatch',
+      short: 'Pump: mismatch',
       hint: 'Writes get through but the pump reports a different value. Check the pump.',
       connectable: false,
     };
@@ -51,7 +51,7 @@ export function linkState(status, connected) {
     return {
       tone: 'warn',
       label: 'Journal stalled, run history is not being saved',
-      short: 'journal stalled',
+      short: 'Journal stalled',
       hint: 'The pump is still running correctly, but tick logging is failing. Check free disk space.',
       connectable: false,
     };
@@ -59,13 +59,13 @@ export function linkState(status, connected) {
     return {
       tone: 'warn',
       label: `Link degrading, ${s.write_fails} writes failed`,
-      short: 'link degrading',
+      short: 'Link degrading',
       connectable: true,
     };
   return {
     tone: 'ok',
-    label: `Pump connected · ${s.transport}`,
-    short: `pump · ${s.transport}`,
+    label: `Pump connected | ${s.transport}`,
+    short: `Pump: ${s.transport}`,
     connectable: true,
   };
 }

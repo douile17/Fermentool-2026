@@ -90,7 +90,7 @@
   // In time order: the chart numbers its badges the same way.
   const markers = $derived(
     (report?.markers ?? [])
-      .map((m) => ({ t: m.t_s, label: `${MARKER_LABELS[m.kind] ?? m.kind} · ${dur(m.t_s)}` }))
+      .map((m) => ({ t: m.t_s, label: `${MARKER_LABELS[m.kind] ?? m.kind} | ${dur(m.t_s)}` }))
       .sort((a, b) => a.t - b.t),
   );
 
@@ -110,8 +110,8 @@
     {:else if ratioPct != null}
       <!-- The one place the run's volume is stated: weighed vs requested. -->
       <p class="headline">
-        <b>{num(delMl, 1)} mL</b> delivered of <b>{num(reqMl, 1)} mL</b> requested ·
-        <b class:off={!inBand}>{num(ratioPct, 1)} %</b> · gap
+        <b>{num(delMl, 1)} mL</b> delivered of <b>{num(reqMl, 1)} mL</b> requested |
+        <b class:off={!inBand}>{num(ratioPct, 1)} %</b> | gap
         <b class="mono" class:ok={inBand} class:off={!inBand}>{gapNow >= 0 ? '+' : ''}{num(gapNow, 2)} mL</b>,
         {inBand ? 'within' : 'outside'} ±{TOL * 100} %
       </p>
@@ -119,10 +119,10 @@
         <p class="bottle mono">
           Balance: <b>{num(bottle.start, 1)} g</b> at start
           {#each bottle.refills as r}
-            · refill at {dur(r.t_s)}: <b>{num(r.before_g, 1)} → {num(r.after_g, 1)} g</b>
+            | refill at {dur(r.t_s)}: <b>{num(r.before_g, 1)} → {num(r.after_g, 1)} g</b>
           {/each}
-          · <b>{num(bottle.end, 1)} g</b> {live ? 'now' : 'at end'}
-          · weighed {bottle.weighedOut >= 0 ? 'out' : 'in'} <b>{num(Math.abs(bottle.weighedOut), 1)} g</b>
+          | <b>{num(bottle.end, 1)} g</b> {live ? 'now' : 'at end'}
+          | weighed {bottle.weighedOut >= 0 ? 'out' : 'in'} <b>{num(Math.abs(bottle.weighedOut), 1)} g</b>
         </p>
       {/if}
       {#if missedMl > 0.05}
@@ -158,7 +158,7 @@
       </svg>
       <div class="gap-axis mono">
         <span>+{num(gMax, 2)} mL ahead</span>
-        <span>shaded: ±{TOL * 100} % of requested · line: on target</span>
+        <span>shaded: ±{TOL * 100} % of requested | line: on target</span>
         <span>−{num(gMax, 2)} mL behind</span>
       </div>
     {/if}

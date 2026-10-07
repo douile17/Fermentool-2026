@@ -6,7 +6,10 @@
   import TrackingPanel from '../components/TrackingPanel.svelte';
   import FigureBand from '../components/FigureBand.svelte';
 
-  const active = $derived(app.status?.active ?? null);
+  // Overview follows feeding cycles only: a calibration burst is watched
+  // from Tubing calibration, here it only reads as "not a cycle".
+  const calibrating = $derived(app.status?.active?.kind === 'calibration');
+  const active = $derived(calibrating ? null : (app.status?.active ?? null));
   const holding = $derived(app.status?.holding ?? null);
   const complete = $derived(!active && holding != null);
 
@@ -212,7 +215,7 @@
   <section class="card done">
     <div class="card-head">
       <div>
-        <div class="eyebrow">Feed profile · {run ? run.curve.params.kind : ''}</div>
+        <div class="eyebrow">Feed profile | {run ? run.curve.params.kind : ''}</div>
         <h2>{run?.name ?? 'Run complete'}</h2>
       </div>
       <span class="pill complete">✓&nbsp;complete</span>
@@ -233,7 +236,7 @@
     <div class="progress">
       <div class="bar done"><span style="width:100%"></span></div>
       <div class="cap mono">
-        <span><b>completed</b>{run ? ` · ran ${dur(run.duration_s)}` : ''}</span>
+        <span><b>completed</b>{run ? ` | ran ${dur(run.duration_s)}` : ''}</span>
         <span>pump holding at <b>{num(holding.value, digits)} {unit}</b></span>
       </div>
     </div>
@@ -269,6 +272,13 @@
       <button class="btn-ghost" onclick={() => (app.tab = 'new')}>New run</button>
     </div>
   </section>
+{:else if calibrating}
+  <div class="card empty">
+    <div class="eyebrow">No active run</div>
+    <h2>A tubing calibration is pumping.</h2>
+    <p>Follow it from Tubing calibration.</p>
+    <button class="btn-primary" onclick={() => (app.tab = 'calibration')}>Tubing calibration</button>
+  </div>
 {:else if !active}
   <div class="card empty">
     <div class="eyebrow">No active run</div>
@@ -284,7 +294,7 @@
         {#if inHold}
           <span class="live-cell mono">curve done</span>
           <span class="live-cell mono">holding {dur(holdS)}</span>
-          <span class="live-cell mono">{active.gravimetric_trim ? 'regulated · recorded' : 'recorded'}</span>
+          <span class="live-cell mono">{active.gravimetric_trim ? 'regulated | recorded' : 'recorded'}</span>
         {:else}
           <span class="live-cell mono">{dur(Math.max(0, run.duration_s - elapsed))} left</span>
           <span class="live-cell mono">{pct.toFixed(0)}%</span>
@@ -295,7 +305,7 @@
 
     <div class="card-head">
       <div>
-        <div class="eyebrow">Feed profile · {run ? run.curve.params.kind : ''}</div>
+        <div class="eyebrow">Feed profile | {run ? run.curve.params.kind : ''}</div>
         <h2>{run?.name ?? 'Loading…'}</h2>
       </div>
       <span class="pill running">{inHold ? 'holding end value' : 'running'}</span>
@@ -318,7 +328,7 @@
         <div class="bar"><span style="width:{pct}%"></span></div>
         <div class="cap mono">
           <span>
-            {dur(elapsed)} elapsed · {inHold ? `curve done, holding for ${dur(holdS)}` : `${pct.toFixed(0)}%`}
+            {dur(elapsed)} elapsed | {inHold ? `curve done, holding for ${dur(holdS)}` : `${pct.toFixed(0)}%`}
           </span>
         </div>
       </div>

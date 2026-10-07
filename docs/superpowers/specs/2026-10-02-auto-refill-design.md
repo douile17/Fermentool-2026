@@ -83,18 +83,32 @@ Aucun de ces cas n'a été vérifié en vrai : le journal ne contient aucun év�
 | `speed_rpm` | `350` | Vitesse de la pompe de remplissage |
 | `direction` | `cw` | Sens qui va du réservoir vers la bouteille pesée |
 | `bottle_tare_g` | à peser | Poids de la bouteille pesée vide, pour passer du poids au volume |
-| `bottle_capacity_ml` | `10000` | Contenance de la bouteille pesée |
-| `low_ml` | `1000` | Sous ce volume, un remplissage démarre |
-| `high_ml` | `7000` | Le remplissage s'arrête à ce volume |
-| `expected_ml_min` | `300` | Débit attendu ; mis à jour par la mesure de chaque remplissage |
+| `bottle_capacity_ml` | `1000` | Contenance de la bouteille pesée, **choisie à la création du run** dans New run : **500 mL, 1 L, 2 L, 5 L** (décision du 2026-10-05, 1 L par défaut ; le dernier choix est repris) |
+| `low_pct` | `25` | Sous ce pourcentage de la contenance, un remplissage démarre (125 / 250 / 500 / 1250 mL) |
+| `high_ml` | vide | Le remplissage s'arrête à ce volume ; **vide : le poids de la bouteille au début du run** (décision du 2026-10-05) |
+| `expected_ml_min` | `285` | Débit attendu (mesuré : 2 L en 7 min) ; mis à jour par la mesure de chaque remplissage |
 
 Le volume vient du poids : `(poids − tare) / densité` (densité de `[scale]`).
 
-**Contrôle à l'enregistrement :** `high_ml` laisse au moins 10 min de
-remplissage libres sous `bottle_capacity_ml` (à 300 ml/min : 3 L). C'est la marge
-contre la reprise automatique de la LabQ après une coupure de courant, le temps
-que le PC et Fermentool redémarrent (voir §5). Les valeurs par défaut la
-respectent.
+**Petites bouteilles et marge.** À 285 ml/min, 10 min de marge font 2,85 L :
+plus que toute la bouteille jusqu'à 2 L. La marge logicielle ne protège donc
+qu'avec une bouteille de 5 L ou une vitesse de remplissage réduite ; pour 500 mL
+à 2 L il faut une protection qui ne dépend pas du PC, de préférence un
+**trop-plein qui retourne au réservoir** (aucun débordement possible), sinon un
+flotteur qui coupe la pompe de remplissage.
+
+**Niveau haut par défaut : le poids de départ.** On remplit la bouteille pesée
+jusqu'au poids qu'elle avait au lancement du run, et le réservoir garde le reste,
+transféré au remplissage suivant quand le volume repasse sous `low_ml`.
+
+**Contrôle au lancement du run** (et à l'enregistrement si `high_ml` est fixé) :
+le niveau haut laisse au moins 10 min de remplissage libres sous
+`bottle_capacity_ml` (à 285 ml/min : 2,85 L). C'est la marge contre une pompe de
+remplissage qui continue (PC planté) ou repart seule après une coupure de
+courant, le temps que le PC et Fermentool redémarrent (voir §5). Une bouteille
+remplie à ras au départ ne la laisse pas : le remplissage automatique est alors
+refusé pour ce run, avec le volume à retirer, sauf si une protection matérielle
+est déclarée (flotteur, ou volume total ≤ contenance).
 
 ### 2. Le cycle de remplissage
 

@@ -25,8 +25,8 @@ use crate::engine::{
     REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
 };
 use crate::store::{
-    CalibrationRow, EventLevel, EventRow, NewCalibration, NewEvent, RunRow, RunStatus, StoreError,
-    TickRow,
+    CalibrationRow, EventLevel, EventRow, NewCalibration, NewEvent, RunKind, RunRow, RunStatus,
+    StoreError, TickRow,
 };
 use crate::transport::{SwapTransport, TransportKind};
 
@@ -81,6 +81,8 @@ pub enum Command {
     /// Delete every run + journal. Refused while a run is active or a crash
     /// recovery is pending.
     ClearHistory(oneshot::Sender<Result<(), String>>),
+    /// Delete one finished run; `Ok(false)` when it does not exist.
+    DeleteRun(i64, oneshot::Sender<Result<bool, String>>),
     GetTicks {
         run_id: i64,
         from: i64,
@@ -288,6 +290,10 @@ fn control_loop<T: Transport + SwapTransport>(
     //     so a steep ramp steps through every grid value instead of jumping.
     let mut next_journal: Option<Instant> = None;
     let mut next_write: Option<Instant> = None;
+    // The burst whose exact end already fired a tick: if that tick did not
+    // see it over (wall and monotonic clocks a hair apart), the next whole-
+    // second tick finishes it, instead of re-ticking in a tight loop.
+    let mut burst_end_fired: Option<i64> = None;
     // (run's wall `started_at`, monotonic anchor, run's elapsed time when that
     // anchor was taken, run id), lets a tick detect a system-clock step and use
     // monotonic time instead. The elapsed-at-anchor term is ~0 for a fresh run
@@ -365,8 +371,16 @@ fn control_loop<T: Transport + SwapTransport>(
             let journal_due = *next_journal.get_or_insert_with(|| Instant::now() + TICK_INTERVAL);
             let write_due =
                 *next_write.get_or_insert_with(|| Instant::now() + WRITE_SETPOINT_INTERVAL);
+            // A calibration burst ends on its exact length, not on the next
+            // whole-second tick: the flow is computed from that length.
+            let end_due = burst_end(engine.status().active.as_ref(), run_epoch)
+                .filter(|_| burst_end_fired != run_epoch.map(|e| e.3));
+            let tick_due = end_due.map_or(journal_due, |end| end.min(journal_due));
 
-            if Instant::now() >= journal_due {
+            if Instant::now() >= tick_due {
+                if end_due.is_some_and(|e| e <= journal_due) {
+                    burst_end_fired = run_epoch.map(|e| e.3);
+                }
                 let now = run_now(run_epoch);
                 let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match engine.tick(now) {
@@ -415,17 +429,24 @@ fn control_loop<T: Transport + SwapTransport>(
                 continue;
             }
 
-            let wants_scale = engine
-                .status()
-                .active
-                .is_some_and(|a| a.gravimetric_trim);
-            if wants_scale {
+            // A trimmed run reads the balance for its regulation; a
+            // calibration burst only for its journal (weight every second, so
+            // the flow can be checked across the burst).
+            let active = engine.status().active;
+            let trims = active.as_ref().is_some_and(|a| a.gravimetric_trim);
+            let calibrating = engine.scale_wanted()
+                && active.as_ref().is_some_and(|a| a.kind == RunKind::Calibration);
+            if trims || calibrating {
                 let scale_probe_due =
                     *next_scale_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
                 if Instant::now() >= scale_probe_due {
                     let now = run_now(run_epoch);
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        engine.scale_tick(now)
+                        if trims {
+                            engine.scale_tick(now)
+                        } else {
+                            engine.probe_scale()
+                        }
                     }));
                     next_scale_probe = Some(advance_past(scale_probe_due, LINK_PROBE_INTERVAL));
                     continue;
@@ -436,7 +457,11 @@ fn control_loop<T: Transport + SwapTransport>(
         }
 
         let wait = match (next_journal, next_write) {
-            (Some(j), Some(w)) => j.min(w).saturating_duration_since(Instant::now()),
+            (Some(j), Some(w)) => {
+                let end = burst_end(engine.status().active.as_ref(), run_epoch)
+                    .filter(|_| burst_end_fired != run_epoch.map(|e| e.3));
+                end.map_or(j, |e| e.min(j)).min(w).saturating_duration_since(Instant::now())
+            }
             // Idle: wake for the link probe if one is scheduled, else just poll.
             _ => [next_probe, next_scale_probe]
                 .into_iter()
@@ -469,6 +494,20 @@ fn control_loop<T: Transport + SwapTransport>(
         }
     }
     tracing::info!("control loop stopped");
+}
+
+/// When the active calibration burst reaches its length, on the monotonic
+/// clock of `run_epoch`. A couple of ms late on purpose, so the tick there
+/// sees the burst over and finishes it. `None` for any other run.
+fn burst_end(
+    active: Option<&ActiveStatus>,
+    epoch: Option<(Timestamp, Instant, SignedDuration, i64)>,
+) -> Option<Instant> {
+    let a = active.filter(|a| a.kind == RunKind::Calibration)?;
+    let (_, anchor, elapsed_at_anchor, _) = epoch.filter(|e| e.3 == a.run_id)?;
+    let left = SignedDuration::from_secs(a.duration_s) - elapsed_at_anchor;
+    let left = Duration::try_from(left).unwrap_or(Duration::ZERO);
+    Some(anchor + left + Duration::from_millis(2))
 }
 
 /// Advance `deadline` by whole `step`s until it is in the future, keeps the
@@ -697,6 +736,25 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let _ = reply.send(res);
             false
         }
+        Command::DeleteRun(id, reply) => {
+            let pending = engine
+                .pending_recovery(now, grace)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.run_id == id);
+            let status = engine.status();
+            let res = if status.active.as_ref().is_some_and(|a| a.run_id == id) {
+                Err("this run is active, stop it before deleting it".to_string())
+            } else if status.holding.as_ref().is_some_and(|h| h.run_id == id) {
+                Err("the pump is holding this run, stop the pump before deleting it".to_string())
+            } else if pending {
+                Err("a crash recovery is pending for this run, resolve it first".to_string())
+            } else {
+                engine.store().delete_run(id).map_err(|e| e.to_string())
+            };
+            let _ = reply.send(res);
+            false
+        }
         Command::GetTicks {
             run_id,
             from,
@@ -859,6 +917,33 @@ mod tests {
             tubing_calibration_id: None,
             responsible: None,
         }
+    }
+
+    /// A calibration burst lasts what was asked, to the millisecond, not
+    /// until the next whole-second tick: its length is what the flow is
+    /// computed from.
+    #[tokio::test]
+    async fn a_calibration_burst_ends_on_its_exact_length() {
+        let engine = Engine::new(
+            Pump::new(SimPump::new(1), 1),
+            Store::open_in_memory().unwrap(),
+            "test",
+        );
+        let (events, _keep_rx) = broadcast::channel(64);
+        let handle = spawn(engine, Duration::from_secs(300), events);
+        let cfg = RunConfig {
+            curve: CurveSpec::linear(50.0, 50.0, Duration::from_secs(2)),
+            kind: RunKind::Calibration,
+            ..cadence_run()
+        };
+        // Start mid-second, so the burst's end falls between two ticks.
+        tokio::time::sleep(Duration::from_millis(370)).await;
+        let id = handle.call(|reply| Command::StartRun(cfg, reply)).await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(2600)).await;
+        let run = handle.call(|reply| Command::GetRun(id, reply)).await.unwrap().unwrap().unwrap();
+        let ended = run.ended_at.expect("the burst finished by itself");
+        let ms = ended.duration_since(run.started_at).as_millis();
+        assert!((2000..2040).contains(&ms), "burst lasted {ms} ms");
     }
 
     /// A burst of API commands between ticks must not shift the tick cadence.

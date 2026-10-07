@@ -8,7 +8,14 @@
   // `animation-duration`: a live setpoint changes `frac` continuously, and
   // retiming a running CSS animation makes the rotor visibly jump. Accumulating
   // the angle means a speed change only bends the rate from here on.
-  let { direction = 'cw', frac = 0, size = 84, spin = true } = $props();
+  //
+  // `solid`: the small menu glyph, one flat colour (currentColor) with no
+  // outline, the ring cut out of the body so whatever is behind shows
+  // through, like the Settings gear.
+  let { direction = 'cw', frac = 0, size = 84, spin = true, solid = false } = $props();
+
+  // Each solid glyph needs its own mask id (two can be on screen at once).
+  const maskId = `ph-hole-${Math.random().toString(36).slice(2, 9)}`;
 
   let angle = $state(0);
 
@@ -45,9 +52,19 @@
 
 <div class="pump" style="width:{size}px; height:{size}px" aria-hidden="true">
   <svg viewBox="0 0 100 100">
-    <!-- housing -->
-    <rect class="wall" x="12" y="14" width="76" height="72" rx="13" />
-    <circle class="ring" cx="50" cy="50" r="29" />
+    {#if solid}
+      <defs>
+        <mask id={maskId}>
+          <rect x="0" y="0" width="100" height="100" fill="white" />
+          <circle cx="50" cy="50" r="31" fill="black" />
+        </mask>
+      </defs>
+      <rect class="solid-body" x="12" y="14" width="76" height="72" rx="13" mask="url(#{maskId})" />
+    {:else}
+      <!-- housing -->
+      <rect class="wall" x="12" y="14" width="76" height="72" rx="13" />
+      <circle class="ring" cx="50" cy="50" r="29" />
+    {/if}
 
     <g class="rotor" style="transform: rotate({angle}deg)">
       <!-- symmetric bbox so fill-box rotation stays centred on the ring -->
@@ -69,7 +86,7 @@
      to match its label; defaults keep the standalone (FigureBand) look. */
   .wall {
     fill: var(--ph-body, color-mix(in srgb, var(--teal-400) 16%, var(--surface)));
-    stroke: var(--ph-line, var(--muted));
+    stroke: var(--ph-wall, var(--ph-line, var(--muted)));
     stroke-width: 2.4;
   }
   .ring {
@@ -85,4 +102,5 @@
 
   .hub,
   .roller { fill: var(--ph-detail, var(--ink)); }
+  .solid-body { fill: var(--ph-body, currentColor); }
 </style>

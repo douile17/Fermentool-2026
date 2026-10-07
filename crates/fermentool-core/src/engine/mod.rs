@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::{limits, PduError, Pump, PumpError, PumpTransport, Transport};
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ScaleConfig, SerialConfig};
@@ -546,6 +546,12 @@ pub struct Engine<T: Transport> {
     /// default, and always for `ControlVar::MlMin`, where the curve is
     /// already volumetric) is treated as `1.0`, a no-op factor.
     rpm_to_ml_min: Option<f64>,
+    /// An ml/min run driven in rpm: ml/min per rpm from the run's rpm-mode
+    /// tubing calibration. The curve, the journal, the volume and the trim
+    /// stay in ml/min; only the value written to the pump (and read back)
+    /// is rpm, so the pump's own head/tubing table is never involved.
+    /// `None`: the pump converts ml/min itself, or the run is in rpm.
+    drive_ml_per_rpm: Option<f64>,
 }
 
 /// Cap on `weight_buffer`'s length: a gravimetric run with no refill appends
@@ -774,6 +780,7 @@ impl<T: Transport> Engine<T> {
             scale_resolution_g: 0.1,
             scale_density_g_per_ml: 1.0,
             rpm_to_ml_min: None,
+            drive_ml_per_rpm: None,
         }
     }
 
@@ -1162,7 +1169,8 @@ impl<T: Transport> Engine<T> {
                         "tubing calibration {cal_id} is archived, restore it first"
                     )));
                 }
-                if cal.control_var != cfg.control_var {
+                let drives_in_rpm = cfg.control_var == ControlVar::MlMin && cal.control_var == ControlVar::Rpm;
+                if cal.control_var != cfg.control_var && !drives_in_rpm {
                     return Err(EngineError::Config(format!(
                         "tubing calibration {cal_id} was made in {}, this run is in {}",
                         cal.control_var.as_str(),
@@ -1209,8 +1217,14 @@ impl<T: Transport> Engine<T> {
         self.last_rate_g_per_min = None;
         self.tracker = Tracker { last_t_s: Some(0.0), ..Tracker::default() };
         self.rpm_to_ml_min = None;
+        self.drive_ml_per_rpm = None;
         if let Some(cal) = &calibration {
             match cfg.control_var {
+                // ml/min asked, rpm written: at the calibrated speed the
+                // conversion is exact, so c starts at 1.0.
+                ControlVar::MlMin if cal.control_var == ControlVar::Rpm => {
+                    self.drive_ml_per_rpm = Some(calibration_ml_per_rpm(cal))
+                }
                 // Dimensionless: seeds the trim, within its usual bounds.
                 ControlVar::MlMin => self.trim_c = self.trim_bounds().clamp(cal.c0),
                 // rpm per (ml/min), not a trim factor: at the calibrated
@@ -1234,22 +1248,43 @@ impl<T: Transport> Engine<T> {
         spec.clamp_min = spec.clamp_min.max(lo);
         spec.clamp_max = spec.clamp_max.min(hi);
         spec.validate().map_err(EngineError::Config)?;
+        if let Some(r) = self.drive_ml_per_rpm {
+            // The tube's ceiling at full speed, without the trim's headroom.
+            let peak = (0..=200)
+                .map(|i| spec.value_at(spec.duration.mul_f64(i as f64 / 200.0)))
+                .fold(0.0, f64::max);
+            if peak / r > limits::RPM_MAX {
+                return Err(EngineError::Config(format!(
+                    "the curve asks up to {peak:.2} ml/min; this tube delivers at most {:.2} ml/min at {} rpm",
+                    limits::RPM_MAX * r,
+                    limits::RPM_MAX
+                )));
+            }
+        }
 
         let duration_s = spec.duration.as_secs() as i64;
         let c = if cfg.gravimetric_trim { self.trim_c } else { 1.0 };
-        let first = quantize(spec.value_at(Duration::ZERO) * c, setpoint_grid(cfg.control_var));
+        let first = quantize(
+            spec.value_at(Duration::ZERO) * c,
+            drive_grid(cfg.control_var, self.drive_ml_per_rpm),
+        );
 
         // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
         // head-type / tubing-size registers are deliberately left untouched, see
         // the note in migrations/0001_init.sql.
+        let start_seq = std::time::Instant::now();
         self.pump.set_direction(cfg.direction == Direction::Cw)?;
-        write_setpoint(&mut self.pump, cfg.control_var, first)
-            .map_err(|e| setpoint_error(e, cfg.control_var, first))?;
+        write_setpoint(&mut self.pump, cfg.control_var, first, self.drive_ml_per_rpm)
+            .map_err(|e| setpoint_error(e, cfg.control_var, first, self.drive_ml_per_rpm))?;
         self.pump.start()?;
+        // A calibration burst's length is a measurement: its clock starts
+        // when the pump acknowledged Start, not when the command arrived
+        // (the start sequence is three frames, ~0.3 s).
+        let started_at = if cfg.kind == RunKind::Calibration { now + whole_ms(start_seq) } else { now };
 
         let id = self.store.insert_run(&NewRun {
             name: cfg.name.clone(),
-            started_at: now,
+            started_at,
             control_var: cfg.control_var,
             direction: cfg.direction,
             tick_interval_s: TICK_INTERVAL.as_secs() as i64,
@@ -1275,7 +1310,7 @@ impl<T: Transport> Engine<T> {
             id,
             name: cfg.name.clone(),
             curve_done: false,
-            started_at: now,
+            started_at,
             spec,
             control_var: cfg.control_var,
             duration_s,
@@ -1305,7 +1340,7 @@ impl<T: Transport> Engine<T> {
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
         let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
-        let target = quantize(raw, setpoint_grid(control_var));
+        let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm));
         let seq = active.next_seq;
         active.next_seq += 1;
         if let Some(vol) = active.volume_added_ml {
@@ -1324,7 +1359,18 @@ impl<T: Transport> Engine<T> {
         active.last_target = Some(target);
         active.last_write_q = Some(target);
 
-        let write = write_setpoint(&mut self.pump, control_var, target);
+        // A burst's end is a measurement too: the pump stops first thing,
+        // before any other frame, and the run ends when it acknowledged Stop.
+        let ending_burst = run_kind == RunKind::Calibration && elapsed_s >= duration_s as f64;
+        let mut ended_at = now;
+        let write = if ending_burst {
+            let t = std::time::Instant::now();
+            let stopped = self.pump.stop();
+            ended_at = now + whole_ms(t);
+            stopped
+        } else {
+            write_setpoint(&mut self.pump, control_var, target, self.drive_ml_per_rpm)
+        };
         let written_ok = write.is_ok();
         self.write_fails = if written_ok {
             0
@@ -1348,11 +1394,17 @@ impl<T: Transport> Engine<T> {
         // cadence, so by readback time it should match `target`; a sustained
         // gap means a stall / fault the writes alone don't reveal.
         let readback: Option<f64> = if written_ok && seq > 0 && seq % READBACK_EVERY_TICKS == 0 {
-            match read_actual(&mut self.pump, control_var) {
+            match read_actual(&mut self.pump, control_var, self.drive_ml_per_rpm) {
                 Ok(actual) => {
                     let actual = actual as f64;
-                    let tol = (5.0 * setpoint_grid(control_var)).max(0.04 * target.abs());
-                    if (actual - target).abs() > tol {
+                    // Driven in rpm, the motor tops out at RPM_MAX: compare with
+                    // what was written, not with a target beyond the tube.
+                    let written = match (control_var, self.drive_ml_per_rpm) {
+                        (ControlVar::MlMin, Some(r)) => drive_rpm(target, r) * r,
+                        _ => target,
+                    };
+                    let tol = (5.0 * drive_grid(control_var, self.drive_ml_per_rpm)).max(0.04 * written.abs());
+                    if (actual - written).abs() > tol {
                         self.readback_fails = self.readback_fails.saturating_add(1);
                         if self.readback_fails >= READBACK_MISMATCH_LIMIT && self.pump_confirmed {
                             self.pump_confirmed = false;
@@ -1447,7 +1499,7 @@ impl<T: Transport> Engine<T> {
                 });
             }
         } else if elapsed_s >= duration_s as f64 {
-            if let Err(e) = self.store.finish_run(id, RunStatus::Completed, now) {
+            if let Err(e) = self.store.finish_run(id, RunStatus::Completed, ended_at) {
                 // Couldn't record completion (disk full / unwritable). Don't
                 // wedge the engine or drop the completion: keep the burst
                 // active and retry on the next tick. The journal-stall streak
@@ -1473,9 +1525,12 @@ impl<T: Transport> Engine<T> {
             }
             self.journal_fails = 0;
             // A burst is weighed against its own started_at..ended_at, so the
-            // pump stops here instead of holding: any flow after ended_at
-            // would land in the bottle with no time to match it.
-            let _ = self.pump.stop();
+            // pump stopped above instead of holding: any flow after ended_at
+            // would land in the bottle with no time to match it. A Stop that
+            // failed there is tried once more.
+            if !written_ok {
+                let _ = self.pump.stop();
+            }
             let _ = self.store.log_event(&NewEvent {
                 run_id: Some(id),
                 wall_time: now,
@@ -1514,12 +1569,12 @@ impl<T: Transport> Engine<T> {
         }
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
         let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
-        let target = quantize(raw, setpoint_grid(control_var));
+        let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm));
         if active.last_write_q == Some(target) {
             return Ok(false);
         }
 
-        match write_setpoint(&mut self.pump, control_var, target) {
+        match write_setpoint(&mut self.pump, control_var, target, self.drive_ml_per_rpm) {
             Ok(()) => {
                 active.last_write_q = Some(target);
                 active.last_target = Some(target);
@@ -1669,13 +1724,15 @@ impl<T: Transport> Engine<T> {
         }))
     }
 
-    /// Idle balance read, about once a second from the control loop: keeps
-    /// the live weight on screen and notices an unplugged balance between
-    /// runs. Does nothing while a run is active: a trimmed run reads the
-    /// balance through `scale_tick`, a plain one leaves it alone so its
-    /// setpoint writes are never held up.
+    /// Balance read, about once a second from the control loop: keeps the
+    /// live weight on screen and notices an unplugged balance between runs.
+    /// During a calibration burst it also puts the weight in each journal
+    /// row, to see the flow across the burst. Does nothing during any other
+    /// run: a trimmed one reads the balance through `scale_tick`, a plain one
+    /// leaves it alone so its setpoint writes are never held up.
     pub fn probe_scale(&mut self) {
-        if self.active.is_none() {
+        let calibrating = self.active.as_ref().is_some_and(|a| a.kind == RunKind::Calibration);
+        if self.active.is_none() || calibrating {
             let _ = self.read_scale();
         }
     }
@@ -1773,10 +1830,13 @@ impl<T: Transport> Engine<T> {
             self.settling_since = Some(now);
         }
         // A refill begins: keep the last reading before the bottle was
-        // touched (the previous read, in the balance's own sign).
+        // touched, in the balance's own sign. Out of a perturbation that is
+        // its anchor (a pour that starts with a small step is first taken
+        // for a touch), otherwise the previous read.
         let refilling = |s| matches!(s, trim::ScaleState::RefillPending | trim::ScaleState::RefillSettling);
         if refilling(next) && !refilling(self.scale_state) {
-            self.refill_before_g = Some(prev * self.scale_cfg.position.sign());
+            let before = self.tracker.anchor.map_or(prev, |a| a.weight_g);
+            self.refill_before_g = Some(before * self.scale_cfg.position.sign());
             self.rewind_slow_rise(k_level);
         }
         // Only a real refill completing resets the cumulative reference. A
@@ -1828,6 +1888,7 @@ impl<T: Transport> Engine<T> {
                 weight_g: self.tracker.last_weight_g.unwrap_or(weight_g),
                 commanded_g: self.tracker.last_normal_commanded_g,
                 refill: false,
+                resumed: false,
             });
             anchor.refill |= refill;
             // A touch or a refill moves the weight for reasons of its own:
@@ -2312,6 +2373,7 @@ impl<T: Transport> Engine<T> {
         self.scale = Some(t);
     }
 
+
     #[cfg(test)]
     pub(crate) fn trim_c(&self) -> f64 {
         self.trim_c
@@ -2447,9 +2509,15 @@ impl<T: Transport> Engine<T> {
         // calibration. A calibration deleted since is no reason to refuse a
         // crash resume: the pump keeps its curve, the trim alarms and freezes.
         self.rpm_to_ml_min = None;
-        if run.control_var == ControlVar::Rpm {
-            if let Some(cal_id) = run.tubing_calibration_id {
-                self.rpm_to_ml_min = self.store.calibration(cal_id)?.map(|c| calibration_ml_per_rpm(&c));
+        self.drive_ml_per_rpm = None;
+        if let Some(cal) = match run.tubing_calibration_id {
+            Some(cal_id) => self.store.calibration(cal_id)?,
+            None => None,
+        } {
+            match (run.control_var, cal.control_var) {
+                (ControlVar::Rpm, _) => self.rpm_to_ml_min = Some(calibration_ml_per_rpm(&cal)),
+                (ControlVar::MlMin, ControlVar::Rpm) => self.drive_ml_per_rpm = Some(calibration_ml_per_rpm(&cal)),
+                (ControlVar::MlMin, ControlVar::MlMin) => {}
             }
         }
         // An alarm saved before the crash still stands: the trim stays frozen
@@ -2466,6 +2534,7 @@ impl<T: Transport> Engine<T> {
                     weight_g: w,
                     commanded_g: self.tracker.last_normal_commanded_g,
                     refill: false,
+                    resumed: true,
                 });
             }
         }
@@ -2474,19 +2543,22 @@ impl<T: Transport> Engine<T> {
         let c = if run.gravimetric_trim { self.trim_c } else { 1.0 };
         let target = quantize(
             run.curve.value_at(Duration::from_secs_f64(elapsed_s)) * c,
-            setpoint_grid(run.control_var),
+            drive_grid(run.control_var, self.drive_ml_per_rpm),
         );
 
         self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
 
         self.pump.set_direction(run.direction == Direction::Cw)?;
-        write_setpoint(&mut self.pump, run.control_var, target)
-            .map_err(|e| setpoint_error(e, run.control_var, target))?;
+        write_setpoint(&mut self.pump, run.control_var, target, self.drive_ml_per_rpm)
+            .map_err(|e| setpoint_error(e, run.control_var, target, self.drive_ml_per_rpm))?;
         self.pump.start()?;
 
         let next_seq = self.store.last_tick(run.id)?.map_or(0, |t| t.seq + 1);
         let volume_added_ml = if run.control_var == ControlVar::MlMin {
-            let start = quantize(run.curve.value_at(Duration::ZERO), setpoint_grid(run.control_var));
+            let start = quantize(
+                run.curve.value_at(Duration::ZERO),
+                drive_grid(run.control_var, self.drive_ml_per_rpm),
+            );
             let horizon = volume_horizon_s(run.kind, run.duration_s);
             Some(self.reconstruct_volume_ml(run.id, start, horizon, elapsed_s, target)?)
         } else {
@@ -2609,15 +2681,25 @@ impl<T: Transport> Engine<T> {
     }
 }
 
+/// Write `value` (in the run's unit) to the pump. `drive`: ml/min per rpm
+/// when an ml/min run is driven in rpm (see `Engine::drive_ml_per_rpm`).
 fn write_setpoint<T: Transport>(
     pump: &mut Pump<T>,
     control_var: ControlVar,
     value: f64,
+    drive: Option<f64>,
 ) -> std::result::Result<(), PumpError> {
-    match control_var {
-        ControlVar::Rpm => pump.set_speed_rpm(value as f32),
-        ControlVar::MlMin => pump.set_flow_ml_min(value as f32),
+    match (control_var, drive) {
+        (ControlVar::MlMin, Some(r)) => pump.set_speed_rpm(drive_rpm(value, r) as f32),
+        (ControlVar::MlMin, None) => pump.set_flow_ml_min(value as f32),
+        (ControlVar::Rpm, _) => pump.set_speed_rpm(value as f32),
     }
+}
+
+/// The rpm that delivers `ml_min` at `ml_per_rpm`, on the motor's 0.1 rpm
+/// step and within its range.
+fn drive_rpm(ml_min: f64, ml_per_rpm: f64) -> f64 {
+    quantize(ml_min / ml_per_rpm, setpoint_grid(ControlVar::Rpm)).clamp(0.0, limits::RPM_MAX)
 }
 
 /// Classify a failed setpoint write. Only MODBUS `0x03` (illegal *data value*)
@@ -2626,7 +2708,14 @@ fn write_setpoint<T: Transport>(
 /// data *address*) is a register-map / firmware mismatch, not something the
 /// operator fixes by changing the setpoint, so it stays a plain
 /// [`EngineError::Pump`] along with every other failure.
-fn setpoint_error(e: PumpError, control_var: ControlVar, value: f64) -> EngineError {
+///
+/// An ml/min run driven in rpm wrote an rpm: the refusal is reported as such,
+/// never pointing at the head/tubing table that mode does not use.
+fn setpoint_error(e: PumpError, control_var: ControlVar, value: f64, drive: Option<f64>) -> EngineError {
+    let (control_var, value) = match (control_var, drive) {
+        (ControlVar::MlMin, Some(r)) => (ControlVar::Rpm, drive_rpm(value, r)),
+        _ => (control_var, value),
+    };
     match &e {
         PumpError::Pdu(PduError::Exception(0x03)) => EngineError::PumpRejectedSetpoint {
             code: 0x03,
@@ -2638,13 +2727,16 @@ fn setpoint_error(e: PumpError, control_var: ControlVar, value: f64) -> EngineEr
 }
 
 /// Read the pump's current value for the run's control variable.
+/// In the run's unit: a driven ml/min run reads the speed and converts it.
 fn read_actual<T: Transport>(
     pump: &mut Pump<T>,
     control_var: ControlVar,
+    drive: Option<f64>,
 ) -> std::result::Result<f32, PumpError> {
-    match control_var {
-        ControlVar::Rpm => pump.read_speed_rpm(),
-        ControlVar::MlMin => pump.read_flow_ml_min(),
+    match (control_var, drive) {
+        (ControlVar::MlMin, Some(r)) => pump.read_speed_rpm().map(|v| v * r as f32),
+        (ControlVar::MlMin, None) => pump.read_flow_ml_min(),
+        (ControlVar::Rpm, _) => pump.read_speed_rpm(),
     }
 }
 
@@ -2661,9 +2753,24 @@ fn setpoint_grid(control_var: ControlVar) -> f64 {
     }
 }
 
+/// The setpoint step in the run's unit: a driven ml/min run moves by whole
+/// 0.1 rpm motor steps, so a new value is written only when the speed changes.
+fn drive_grid(control_var: ControlVar, drive: Option<f64>) -> f64 {
+    match (control_var, drive) {
+        (ControlVar::MlMin, Some(r)) => setpoint_grid(ControlVar::Rpm) * r,
+        _ => setpoint_grid(control_var),
+    }
+}
+
 /// ml/min delivered per commanded rpm, from an rpm-mode tubing calibration.
 fn calibration_ml_per_rpm(cal: &crate::store::CalibrationRow) -> f64 {
     cal.mean_measured_ml_min / cal.setpoint
+}
+
+/// Time since `t`, in whole milliseconds (a simulated pump answers in
+/// microseconds: 0, so test timestamps stay exact).
+fn whole_ms(t: std::time::Instant) -> SignedDuration {
+    SignedDuration::from_millis(t.elapsed().as_millis() as i64)
 }
 
 /// Snap `value` to the nearest multiple of `step`.
@@ -3201,6 +3308,24 @@ mod tests {
     }
 
     #[test]
+    fn a_calibration_burst_journals_the_balance_every_second() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[700.0, 699.5, 699.0])));
+        let cfg = RunConfig {
+            kind: RunKind::Calibration,
+            curve: CurveSpec::linear(50.0, 50.0, Duration::from_secs(300)),
+            ..linear_cfg()
+        };
+        let id = e.start_run(cfg, t0()).unwrap();
+        for i in 1..=3 {
+            e.probe_scale();
+            e.tick(at(i)).unwrap();
+        }
+        let w: Vec<Option<f64>> = e.store().ticks(id, 0, 10).unwrap().iter().map(|t| t.weight_g).collect();
+        assert_eq!(w, [Some(700.0), Some(699.5), Some(699.0)]);
+    }
+
+    #[test]
     fn a_trimmed_run_keeps_the_live_weight_current() {
         let mut e = engine();
         e.attach_scale_for_test(Box::new(ScriptedScale::new(&[1000.0, 999.0])));
@@ -3639,6 +3764,42 @@ mod tests {
     }
 
     #[test]
+    fn a_pour_that_starts_with_a_small_step_journals_the_weight_before_it() {
+        // Run 65: 564.9 g, then +11 g and +28 g (a touch, by size), then the
+        // rest of the pour. The refill's "before" is 564.9, not 603.8.
+        let spec = CurveSpec::linear(9.0, 9.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let mut w = 600.0;
+        let mut before = 0.0;
+        for i in 0..200i64 {
+            match i {
+                60 => {
+                    before = w;
+                    w += 11.0;
+                }
+                61 => w += 28.0,
+                62..=66 => w += 25.0,
+                _ => {}
+            }
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            w -= 0.15 * e.trim_c();
+        }
+        let refills: Vec<(f64, f64)> = e
+            .store()
+            .events(Some(id), 100)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == "refill")
+            .filter_map(|ev| parse_refill(ev.detail.as_deref()?))
+            .collect();
+        assert_eq!(refills.len(), 1, "{refills:?}");
+        assert!((refills[0].0 - before).abs() < 0.5, "before {} vs {before}", refills[0].0);
+    }
+
+    #[test]
     fn after_a_refill_the_regulation_resumes_without_a_catch_up_burst() {
         let (dry_at, refill_at, end) = (1500, 2700, 4500);
         let (e, id, cs) = bottle_runs_dry(dry_at, refill_at, end);
@@ -4019,6 +4180,82 @@ mod tests {
         assert!((e.trim_c() - 1.0).abs() < 0.01, "c = {}", e.trim_c());
     }
 
+    /// A run in ml/min on an rpm calibration (2.4 ml/min per rpm, from
+    /// `seed_calibration`'s 600 g in 5 min at 50 rpm).
+    fn driven_cfg(cal: i64, spec: CurveSpec) -> RunConfig {
+        RunConfig {
+            control_var: ControlVar::MlMin,
+            tubing_calibration_id: Some(cal),
+            curve: spec,
+            ..linear_cfg()
+        }
+    }
+
+    #[test]
+    fn an_ml_min_run_on_an_rpm_calibration_is_driven_in_rpm() {
+        let mut e = engine();
+        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        let spec = CurveSpec::linear(24.0, 48.0, Duration::from_secs(3600));
+        e.start_run(driven_cfg(cal, spec), t0()).unwrap();
+        assert!((e.pump.transport().speed_rpm() as f64 - 10.0).abs() < 1e-3, "24 ml/min = 10 rpm");
+        for i in 1..=1800 {
+            e.apply_setpoint(at(i)).unwrap();
+            e.tick(at(i)).unwrap();
+        }
+        // 36 ml/min half way: 15 rpm, and the pump's own ml/min never used.
+        assert!((e.pump.transport().speed_rpm() as f64 - 15.0).abs() < 0.11, "{}", e.pump.transport().speed_rpm());
+        assert_eq!(e.pump.transport().flow_ml_min(), 0.0);
+        let st = e.status();
+        assert!(st.pump_confirmed, "readback compares in ml/min");
+        assert!((st.active.unwrap().last_target.unwrap() - 36.0).abs() < 0.25, "journalled in ml/min");
+    }
+
+    #[test]
+    fn a_trim_past_full_speed_is_not_a_pump_fault() {
+        // 820 ml/min fits (840 at 350 rpm); c = 1.06 asks 869. The pump sits
+        // at 350 rpm, as written: the readback must not call it a fault.
+        let mut e = engine();
+        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig {
+            gravimetric_trim: true,
+            ..driven_cfg(cal, CurveSpec::linear(820.0, 820.0, Duration::from_secs(3600)))
+        };
+        e.start_run(cfg, t0()).unwrap();
+        e.set_trim_c_for_test(1.06);
+        for i in 1..=40 {
+            e.tick(at(i)).unwrap();
+        }
+        assert!((e.pump.transport().speed_rpm() as f64 - limits::RPM_MAX).abs() < 1e-3);
+        assert!(e.status().pump_confirmed);
+    }
+
+    #[test]
+    fn a_driven_run_beyond_the_tube_at_full_speed_is_refused() {
+        let mut e = engine();
+        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        // 350 rpm x 2.4 = 840 ml/min at most.
+        let spec = CurveSpec::linear(100.0, 900.0, Duration::from_secs(3600));
+        let err = e.start_run(driven_cfg(cal, spec), t0()).unwrap_err();
+        assert!(matches!(&err, EngineError::Config(m) if m.contains("840")), "{err:?}");
+        assert!(e.status().active.is_none());
+    }
+
+    #[test]
+    fn a_driven_run_resumes_in_rpm() {
+        let db = TempDb::new();
+        let spec = CurveSpec::linear(24.0, 48.0, Duration::from_secs(3600));
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let cal = seed_calibration(&a.store, ControlVar::Rpm, 50.0, 600.0);
+            a.start_run(driven_cfg(cal, spec), t0()).unwrap();
+        }
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        b.resume(at(1800), grace()).unwrap();
+        assert!((b.pump.transport().speed_rpm() as f64 - 15.0).abs() < 0.11, "{}", b.pump.transport().speed_rpm());
+        assert_eq!(b.pump.transport().flow_ml_min(), 0.0);
+    }
+
     #[test]
     fn tracking_survives_a_crash_resume() {
         let db = TempDb::new();
@@ -4088,11 +4325,17 @@ mod tests {
     }
 
     #[test]
-    fn a_calibration_for_the_other_unit_or_an_unknown_id_is_refused() {
+    fn an_ml_min_calibration_on_an_rpm_run_or_an_unknown_id_is_refused() {
+        // The other way round, an rpm calibration on an ml/min run, drives
+        // the pump in rpm (`an_ml_min_run_on_an_rpm_calibration_is_driven_in_rpm`).
         let mut e = engine();
-        let rpm_cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 100.0);
+        let ml_cal = seed_calibration(&e.store, ControlVar::MlMin, 10.0, 45.0);
         e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
-        let cfg = RunConfig { tubing_calibration_id: Some(rpm_cal), ..trim_cfg() };
+        let cfg = RunConfig {
+            control_var: ControlVar::Rpm,
+            tubing_calibration_id: Some(ml_cal),
+            ..trim_cfg()
+        };
         assert!(matches!(e.start_run(cfg, t0()), Err(EngineError::Config(_))));
         let cfg = RunConfig { tubing_calibration_id: Some(9999), ..trim_cfg() };
         assert!(matches!(e.start_run(cfg, t0()), Err(EngineError::Config(_))));
@@ -4583,9 +4826,22 @@ mod tests {
             setpoint_error(
                 PumpError::Pdu(PduError::Exception(0x03)),
                 ControlVar::MlMin,
-                12.0
+                12.0,
+                None
             ),
             EngineError::PumpRejectedSetpoint { code: 0x03, .. }
+        ));
+        // Driven in rpm (2.4 ml/min per rpm), the refused value is the rpm
+        // written, reported in rpm: 12 ml/min = 5 rpm.
+        assert!(matches!(
+            setpoint_error(
+                PumpError::Pdu(PduError::Exception(0x03)),
+                ControlVar::MlMin,
+                12.0,
+                Some(2.4)
+            ),
+            EngineError::PumpRejectedSetpoint { code: 0x03, control_var: ControlVar::Rpm, value }
+                if (value - 5.0).abs() < 1e-9
         ));
         // 0x02 (illegal data address) is a register-map fault, not a value the
         // operator can fix, it must stay a plain pump error.
@@ -4593,7 +4849,8 @@ mod tests {
             setpoint_error(
                 PumpError::Pdu(PduError::Exception(0x02)),
                 ControlVar::Rpm,
-                50.0
+                50.0,
+                None
             ),
             EngineError::Pump(_)
         ));
@@ -4602,7 +4859,8 @@ mod tests {
             setpoint_error(
                 PumpError::Transport(fermentool_modbus::TransportError::Timeout),
                 ControlVar::Rpm,
-                50.0
+                50.0,
+                None
             ),
             EngineError::Pump(_)
         ));

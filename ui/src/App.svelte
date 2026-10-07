@@ -7,6 +7,7 @@
   import Settings from './routes/Settings.svelte';
   import TubingCalibration from './routes/TubingCalibration.svelte';
   import PumpHead from './components/PumpHead.svelte';
+  import Icon from './components/Icon.svelte';
   import ConnBar from './components/ConnBar.svelte';
   import ResumeModal from './components/ResumeModal.svelte';
   import FinishModal from './components/FinishModal.svelte';
@@ -19,9 +20,9 @@
   // "New run" isn't a tab, Overview already offers it (idle empty state,
   // completed run) and History's "Run again" jumps straight to it.
   const pumpTabs = [
-    ['overview', 'Overview'],
-    ['history', 'History'],
-    ['calibration', 'Tubing calibration'],
+    ['overview', 'Overview', 'dashboard'],
+    ['history', 'History', 'history'],
+    ['calibration', 'Tubing calibration', 'ruler'],
   ];
 
   const running = $derived(!!app.status?.active);
@@ -40,14 +41,14 @@
     if (s.scale_connected === false) {
       return {
         tone: 'bad',
-        label: 'Balance disconnected',
+        label: 'Balance: disconnected',
         title: 'The balance is not answering. Check its cable; the daemon keeps retrying.',
       };
     }
     if (s.tracking?.wrong_side) {
       return {
         tone: 'bad',
-        label: 'Balance on the other side · trim frozen',
+        label: 'Balance: on the other side | trim frozen',
         title:
           'The weight moves the wrong way for where Settings says the balance is (feed bottle or receiving vessel). Fix "Balance weighs" in Settings for the next run; this run keeps its pump setpoint, uncorrected.',
       };
@@ -55,7 +56,7 @@
     if (s.tracking?.alarm === 'feed_stopped') {
       return {
         tone: 'bad',
-        label: 'Feed stopped · bottle empty or line blocked',
+        label: 'Feed stopped | bottle empty or line blocked',
         title:
           'The pump is running but the bottle weight has not moved for 3 minutes: refill the bottle, or check the line (pinched, disconnected, air). The correction is held at its last good value and resumes by itself once the feed flows again; what was missed meanwhile is not caught up.',
       };
@@ -63,21 +64,21 @@
     if (!s.scale_ok) {
       return {
         tone: 'bad',
-        label: 'Balance · correction out of bounds',
+        label: 'Balance: correction out of bounds',
         title:
           'For 5 minutes the pump has delivered further from its setpoint than the correction limit (Settings, Balance) can make up: check the tube in the head, leaks, the bottle. The correction is held at its value from before; it resumes by itself once the pump is back within bounds, or if you widen the limit.',
       };
     }
     const trimOn = !!s.active?.gravimetric_trim;
-    const c = trimOn && s.trim_c != null ? ` · ×${s.trim_c.toFixed(3)}` : '';
+    const c = trimOn && s.trim_c != null ? ` | ×${s.trim_c.toFixed(3)}` : '';
     // Live reading; "~" while the balance itself says it is still moving.
     const w =
       s.scale_weight_g != null
-        ? ` · ${s.scale_weight_g.toFixed(1)} g${s.scale_stable === false ? ' ~' : ''}`
+        ? `${s.scale_weight_g.toFixed(1)} g${s.scale_stable === false ? ' ~' : ''} | `
         : '';
     return {
       tone: 'ok',
-      label: `Balance${w} · ${SCALE_STATES[s.scale_state] ?? s.scale_state}${c}`,
+      label: `Balance: ${w}${SCALE_STATES[s.scale_state] ?? s.scale_state}${c}`,
       title: trimOn
         ? `Gravimetric trim active: the pump setpoint is multiplied by ${s.trim_c?.toFixed(3)}.`
         : 'Balance connected. The trim applies only to runs started with it enabled.',
@@ -234,7 +235,7 @@
         class:running
         onclick={() => (app.route = 'pump')}
       >
-        <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} /></span>Pump control
+        <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} solid /></span>Pump control
       </button>
     </nav>
 
@@ -243,7 +244,22 @@
       class:active={app.route === 'settings'}
       onclick={() => (app.route = 'settings')}
     >
-      <span class="ic" aria-hidden="true">⚙</span>Settings
+      <span class="ic gear-ic" aria-hidden="true">
+        <!-- same drawing as the pump glyph: one flat colour, ring cut out -->
+        <svg viewBox="-2 -2 104 104">
+          <defs>
+            <mask id="gear-hole">
+              <rect x="-2" y="-2" width="104" height="104" fill="white" />
+              <circle cx="50" cy="50" r="15" fill="black" />
+            </mask>
+          </defs>
+          <path
+            mask="url(#gear-hole)"
+            class="gear-body"
+            d="M41.6 15.0 L42.1 4.7 L57.9 4.7 L58.4 15.0 L68.8 19.3 L76.5 12.4 L87.6 23.5 L80.7 31.2 L85.0 41.6 L95.3 42.1 L95.3 57.9 L85.0 58.4 L80.7 68.8 L87.6 76.5 L76.5 87.6 L68.8 80.7 L58.4 85.0 L57.9 95.3 L42.1 95.3 L41.6 85.0 L31.2 80.7 L23.5 87.6 L12.4 76.5 L19.3 68.8 L15.0 58.4 L4.7 57.9 L4.7 42.1 L15.0 41.6 L19.3 31.2 L12.4 23.5 L23.5 12.4 L31.2 19.3Z"
+          />
+        </svg>
+      </span>Settings
     </button>
 
     <div class="rail-foot">
@@ -260,7 +276,7 @@
       <div class="rail-foot-row">
         <span class="status" class:on={app.connected}>
           <span class="dot" aria-hidden="true"></span>
-          {app.connected ? 'daemon online' : 'reconnecting…'}
+          {app.connected ? 'Daemon online' : 'Reconnecting…'}
         </span>
         <button class="theme" onclick={setTheme} title="Toggle theme">◐</button>
       </div>
@@ -274,7 +290,7 @@
       {#each pageRuns as p (p.run_id)}
         <div class="paging" role="alert">
           <span class="paging-text">
-            <b>{pages.filter((q) => q.run_id === p.run_id).map((q) => q.title).join(' · ')}</b>
+            <b>{pages.filter((q) => q.run_id === p.run_id).map((q) => q.title).join(' | ')}</b>
             <span class="paging-sub">Reminding {p.responsible}'s phone every few minutes until acknowledged ({p.sent} sent).</span>
           </span>
           <button class="btn-ghost" onclick={() => acknowledge(p.run_id)}>Acknowledge</button>
@@ -294,14 +310,14 @@
           style="--ind-x:{ind.x}px; --ind-w:{ind.w}px"
         >
           <span class="tab-ind" aria-hidden="true"></span>
-          {#each pumpTabs as [id, label]}
+          {#each pumpTabs as [id, label, icon]}
             <button
               class="tab"
               class:on={app.tab === id}
               role="tab"
               aria-selected={app.tab === id}
               onclick={() => (app.tab = id)}
-            >{label}</button>
+            ><Icon name={icon} size={15} />{label}</button>
           {/each}
         </div>
 
@@ -368,21 +384,22 @@
     width: 18px; height: 18px;
     display: inline-flex; align-items: center; justify-content: center;
     opacity: 0.8;
-    /* filled square body in the label colour (green while running); the central
-       disc stays hollow, filled with the rail's own background so it reads as
-       an empty ring */
+    /* one flat colour, ring cut out (see PumpHead `solid`) */
     --ph-body: currentColor;
-    --ph-fill: var(--surface);
-    --ph-line: currentColor;
     --ph-detail: currentColor;
   }
   /* A live run: the glyph goes green (semantic) and spins, so the pump's
      state is visible from any section. Text keeps its normal colour. */
   .nav-item.running .pump-ic {
     opacity: 1;
-    --ph-line: var(--green-500);
     --ph-detail: var(--green-500);
   }
+  .nav-item .gear-ic {
+    width: 18px; height: 18px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .gear-ic svg { display: block; width: 100%; height: 100%; overflow: visible; }
+  .gear-body { fill: currentColor; stroke: currentColor; stroke-width: 6; stroke-linejoin: round; }
   .nav-item:hover { background: var(--surface-sunken); color: var(--ink); }
   .nav-item.active {
     background: color-mix(in srgb, var(--teal-700) 11%, var(--surface));
@@ -396,7 +413,7 @@
     display: flex; flex-direction: column; align-items: stretch; gap: var(--s-2);
   }
   .rail-foot-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
-  .status { display: inline-flex; align-items: center; gap: var(--s-2); font-size: 12px; color: var(--muted); }
+  .status { display: inline-flex; align-items: center; gap: var(--s-2); font-size: 12px; font-weight: 600; color: var(--muted); }
   .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
   .status.on { color: var(--green-600); }
   .status.on .dot { background: var(--green-500); }
@@ -460,6 +477,7 @@
     cursor: pointer;
     transition: color 0.2s ease;
   }
+  .tab { display: inline-flex; align-items: center; gap: 6px; }
   .tab:hover:not(.on) { color: var(--ink); }
   .tab.on { color: var(--teal-700); font-weight: 600; }
   .tab:focus-visible {
@@ -485,7 +503,8 @@
   }
 
   @media (max-width: 820px) {
-    .app { grid-template-columns: 1fr; }
+    /* minmax(0, …): the bar scrolls inside itself instead of widening the page */
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
     .rail {
       flex-direction: row; align-items: center;
       border-right: none; border-bottom: 1px solid var(--line-soft);
@@ -495,7 +514,20 @@
       height: auto;
       overflow-y: visible;
     }
-    .rail-foot { margin-top: 0; }
+    /* Phone: one compact bar, the status lines wrapped under it as chips. */
+    .rail { flex-wrap: wrap; gap: var(--s-2) var(--s-3); padding: var(--s-3) var(--s-4); }
+    .brand .word { display: none; }
+    nav { flex-direction: row; }
+    .nav-item { width: auto; white-space: nowrap; }
+    .nav-settings { margin-top: 0; }
+    .rail-foot {
+      margin-top: 0; padding: 0;
+      flex-basis: 100%;
+      flex-direction: row; flex-wrap: wrap; align-items: center;
+      gap: var(--s-1) var(--s-4);
+    }
+    .rail-foot-row { gap: var(--s-4); }
+    .rail-foot .theme { display: none; }
     .main { padding: var(--s-5) var(--s-4) var(--s-7); }
   }
 </style>
