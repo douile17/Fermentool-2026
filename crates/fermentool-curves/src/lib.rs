@@ -347,6 +347,24 @@ impl CurveSpec {
         v
     }
 
+    /// The highest value the curve takes over its duration, for a ceiling
+    /// check: 201 even samples plus every breakpoint of a step or custom
+    /// profile, so a narrow peak between two samples is not missed.
+    pub fn peak_value(&self) -> f64 {
+        let d = self.duration.as_secs_f64();
+        let mut times: Vec<f64> = (0..=200).map(|i| d * i as f64 / 200.0).collect();
+        match &self.params {
+            CurveParams::Step { segments } => times.extend(segments.iter().map(|s| s.at_seconds)),
+            CurveParams::Custom { points, .. } => times.extend(points.iter().map(|p| p.at_seconds)),
+            _ => {}
+        }
+        times
+            .into_iter()
+            .filter(|t| t.is_finite())
+            .map(|t| self.value_at(Duration::from_secs_f64(t.clamp(0.0, d))))
+            .fold(f64::MIN, f64::max)
+    }
+
     /// Sample the curve into `(elapsed_seconds, value)` pairs for the UI preview
     /// chart. `samples` is the point count including both endpoints (min 2).
     pub fn preview(&self, samples: usize) -> Vec<(f64, f64)> {
@@ -907,6 +925,22 @@ mod tests {
         assert!(bad_clamp.validate().is_err());
         let v = bad_clamp.value_at(Duration::from_secs_f64(1800.0));
         assert!(v.is_finite(), "value_at must stay total for a NaN clamp bound");
+    }
+
+    #[test]
+    fn the_peak_includes_a_narrow_step_between_samples() {
+        // 1 h at 10, with a 2 s spike to 900 that no even sample lands on.
+        let c = CurveSpec {
+            params: CurveParams::Step {
+                segments: vec![
+                    StepSegment { at_seconds: 1001.0, value: 900.0 },
+                    StepSegment { at_seconds: 1003.0, value: 10.0 },
+                ],
+            },
+            ..CurveSpec::constant(10.0, hours(1))
+        };
+        assert!(close(c.peak_value(), 900.0));
+        assert!(close(CurveSpec::linear(5.0, 50.0, hours(1)).peak_value(), 50.0));
     }
 
     #[test]

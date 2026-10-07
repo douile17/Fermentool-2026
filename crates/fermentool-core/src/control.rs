@@ -137,6 +137,9 @@ pub struct DaemonStatus {
     pub rate_g_per_min: Option<f64>,
     /// Cumulative feed tracking, `Some` only during a trimmed run.
     pub tracking: Option<crate::engine::TrackingStatus>,
+    /// A Stop did not reach the pump: it may still be running. Sent again
+    /// until it gets through; the UI raises it.
+    pub stop_pending: bool,
 }
 
 /// Sending / receiving on the control channel failed, the thread is gone.
@@ -207,6 +210,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         trim_c: st.trim_c,
         rate_g_per_min: st.rate_g_per_min,
         tracking: st.tracking,
+        stop_pending: st.stop_pending,
     }
 }
 
@@ -274,6 +278,8 @@ fn control_loop<T: Transport + SwapTransport>(
     // Cooldown between automatic scale-reopen attempts, the balance's
     // counterpart to `next_serial_retry`.
     let mut next_scale_retry: Option<(Instant, Duration)> = None;
+    // Next resend of a Stop that did not reach the pump.
+    let mut next_stop_retry: Option<Instant> = None;
 
     loop {
         // Keep the monotonic run epoch in sync with what the engine is running.
@@ -297,6 +303,25 @@ fn control_loop<T: Transport + SwapTransport>(
         if engine.tick_interval().is_none() {
             next_journal = None;
             next_write = None;
+            // A Stop that did not get through is sent again, once a second,
+            // as soon as the link is back: the pump may still be running.
+            if engine.stop_pending() && !engine.serial_lost() {
+                let due = *next_stop_retry.get_or_insert_with(Instant::now);
+                if Instant::now() >= due {
+                    let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        engine.retry_pending_stop(Timestamp::now())
+                    }))
+                    .unwrap_or(false);
+                    if sent {
+                        tracing::info!("pending Stop delivered, pump stopped");
+                        let _ = events.send(current_status(engine, grace));
+                    }
+                    next_stop_retry = Some(Instant::now() + LINK_PROBE_INTERVAL);
+                    continue;
+                }
+            } else {
+                next_stop_retry = None;
+            }
             // No run: read the balance about once a second, for the live
             // weight on screen and to notice it being unplugged between runs.
             if engine.scale_wanted() {

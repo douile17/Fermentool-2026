@@ -83,6 +83,18 @@ pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>,
     }
 }
 
+/// What stands in for a real port that will not reopen. Every transaction
+/// fails: while the link is down nothing may read as written, a Stop
+/// included (a no-op simulator here used to make the journal say
+/// `written_ok` and a Stop "succeed" during the whole outage).
+pub struct DeadLink;
+
+impl Transport for DeadLink {
+    fn transaction(&mut self, _request: &[u8]) -> Result<Vec<u8>, TransportError> {
+        Err(TransportError::Io("pump link down".into()))
+    }
+}
+
 /// A live engine transport that can be rebuilt in place from a [`SerialConfig`].
 ///
 /// Implemented for the daemon's boxed transport (a real swap) and for [`SimPump`]
@@ -91,9 +103,9 @@ pub trait SwapTransport {
     fn swap(&mut self, serial: &SerialConfig, pump_addr: u8) -> TransportKind;
 
     /// Like [`swap`](Self::swap) but for automatic recovery: it does **not**
-    /// fall back to the simulator. On failure it leaves a safe no-op sink in
-    /// place (so writes don't error-spam) and returns `None`, so the caller
-    /// keeps retrying the real port instead of silently driving nothing.
+    /// fall back to the simulator. On failure it leaves a [`DeadLink`] in
+    /// place and returns `None`, so the caller keeps retrying the real port
+    /// instead of silently driving nothing.
     fn swap_strict(&mut self, serial: &SerialConfig, pump_addr: u8) -> Option<TransportKind>;
 }
 
@@ -122,9 +134,11 @@ impl SwapTransport for Box<dyn Transport + Send> {
                 *self = Box::new(t);
                 Some(TransportKind::Serial(serial.path.clone()))
             }
-            // `*self` is now a SimPump no-op sink: the pump keeps its last real
-            // setpoint, and the caller will retry.
-            Err(_) => None,
+            // The pump keeps its last real setpoint; the caller retries.
+            Err(_) => {
+                *self = Box::new(DeadLink);
+                None
+            }
         }
     }
 }
@@ -310,8 +324,8 @@ impl SwapTransport for WatchdogTransport {
                     Box::new(t) as Box<dyn Transport + Send>,
                     Some(TransportKind::Serial(s.path.clone())),
                 ),
-                // A SimPump no-op sink holds the last real setpoint; caller retries.
-                Err(_) => (Box::new(SimPump::new(pump_addr)) as Box<dyn Transport + Send>, None),
+                // The pump keeps its last real setpoint; the caller retries.
+                Err(_) => (Box::new(DeadLink) as Box<dyn Transport + Send>, None),
             }
         }));
         self.serial = serial.clone();
@@ -375,6 +389,14 @@ mod tests {
         assert!(t.swap_strict(&sc("NOPE_NOT_A_REAL_PORT_99999"), 1).is_none());
         // The simulator is always available.
         assert_eq!(t.swap_strict(&sc("sim"), 1).unwrap(), TransportKind::Sim);
+    }
+
+    #[test]
+    fn a_port_that_will_not_reopen_leaves_a_link_that_fails() {
+        let mut t: Box<dyn Transport + Send> = Box::new(SimPump::new(1));
+        assert!(t.swap_strict(&sc("NOPE_NOT_A_REAL_PORT_99999"), 1).is_none());
+        // Nothing may read as delivered while the port is gone.
+        assert!(t.transaction(&[1, 6, 3, 0xEE, 0, 0, 0, 0]).is_err());
     }
 
     #[test]

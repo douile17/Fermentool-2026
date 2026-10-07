@@ -16,6 +16,15 @@ export function linkState(status, connected) {
   const s = status;
   if (!connected || !s)
     return { tone: 'idle', label: 'Connecting to daemon…', short: 'Daemon…', connectable: false };
+  // Before anything else: the pump may be feeding with no run behind it.
+  if (s.stop_pending)
+    return {
+      tone: 'bad',
+      label: 'Stop not confirmed: the pump may still be running',
+      short: 'Stop pending',
+      hint: 'The Stop did not reach the pump. Fermentool sends it again as soon as the pump answers; check the pump, and stop it by hand if needed.',
+      connectable: true,
+    };
   if (s.simulator && s.allow_simulator)
     return {
       tone: 'sim',

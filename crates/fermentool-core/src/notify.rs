@@ -88,6 +88,8 @@ pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
             _ => (Info, "Run stopped".into()),
         },
         "abort" => (Alarm, "Run aborted".into()),
+        "stop_pending" => (Alarm, "The Stop did not reach the pump: it may still be running".into()),
+        "pump_stopped" => (Good, "Pump stopped".into()),
         _ => return None,
     };
     Some(Message { tone, title })
@@ -104,6 +106,7 @@ pub fn family_of(kind: &str) -> Option<&'static str> {
         "readback_mismatch" => Some("readback"),
         "journal_stalled" => Some("journal"),
         "crash_detected" => Some("crash"),
+        "stop_pending" => Some("stop"),
         // "abort" ends the run: said once, nothing goes on to repeat.
         _ => None,
     }
@@ -117,6 +120,7 @@ pub fn clears(kind: &str) -> Option<Option<&'static str>> {
         "serial_recovered" => Some("serial"),
         "readback_ok" => Some("readback"),
         "resume" => Some("crash"),
+        "pump_stopped" => Some("stop"),
         "stop" | "abort" => None,
         _ => return None,
     })
@@ -339,10 +343,18 @@ pub fn test_page(name: &str, ntfy: Target) -> Page {
     }
 }
 
-/// Drop the pages an event ends (see [`clears`]).
+/// Drop the pages an event ends (see [`clears`]). The end of a run ends
+/// every page of it but a Stop still pending: that one is about the pump
+/// left running after the run, and rings until the Stop gets through.
 pub fn apply_clears(pages: &mut Vec<Page>, run_id: i64, kind: &str) {
     if let Some(family) = clears(kind) {
-        pages.retain(|p| p.run_id != run_id || family.is_some_and(|f| f != p.family));
+        pages.retain(|p| {
+            p.run_id != run_id
+                || match family {
+                    Some(f) => f != p.family,
+                    None => p.family == "stop",
+                }
+        });
     }
 }
 
@@ -804,6 +816,12 @@ mod tests {
         apply_clears(&mut pages, 7, "stop");
         let left: Vec<_> = pages.iter().map(|p| p.run_id).collect();
         assert_eq!(left, [8], "stop ends every page of its run only");
+        // A Stop that did not reach the pump outlives the run's end.
+        let mut pages = vec![page(7, "stop"), page(7, "trim")];
+        apply_clears(&mut pages, 7, "stop");
+        assert_eq!(pages.iter().map(|p| p.family).collect::<Vec<_>>(), ["stop"]);
+        apply_clears(&mut pages, 7, "pump_stopped");
+        assert!(pages.is_empty());
     }
 
     #[test]
