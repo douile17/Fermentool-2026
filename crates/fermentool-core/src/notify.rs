@@ -32,9 +32,12 @@ use crate::store::{EventLevel, EventRow, NewEvent, RunKind, RunRow, RunStatus, S
 /// `app_state` key: id of the last event handled.
 const CURSOR_KEY: &str = "notify_cursor";
 const POLL: Duration = Duration::from_secs(5);
-const SEND_TIMEOUT: Duration = Duration::from_secs(15);
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// Waits between attempts; past the last, the message is dropped (logged).
 const RETRY_WAITS: [Duration; 3] = [Duration::from_secs(5), Duration::from_secs(30), Duration::from_secs(120)];
+/// Messages waiting to go out at most; past it the oldest news goes first,
+/// alarms are kept.
+const OUTBOX_CAP: usize = 500;
 /// A link that drops and comes back is said at most once per this per run.
 const LINK_QUIET: Duration = Duration::from_secs(15 * 60);
 /// An unacknowledged alarm is sent again this often.
@@ -428,6 +431,23 @@ struct Notifier {
     pages: Pages,
     /// Ack topic -> last time it was polled.
     ack_polled: HashMap<String, Instant>,
+    /// Messages not delivered yet, each with its own retry time. Sending used
+    /// to retry in line (up to ~3.5 min a channel): one unreachable service
+    /// held every later event, alarms included, behind it.
+    outbox: Vec<Outgoing>,
+}
+
+/// One message to one channel, until it is delivered or given up.
+struct Outgoing {
+    target: Target,
+    note: Note,
+    ack: Option<i64>,
+    responsible: String,
+    kind: String,
+    run_id: i64,
+    /// Failed attempts so far.
+    failures: usize,
+    next_at: Instant,
 }
 
 impl Notifier {
@@ -441,21 +461,95 @@ impl Notifier {
                 c
             }
         };
-        Self { store, config, cursor, link_said: HashMap::new(), pages, ack_polled: HashMap::new() }
+        Self {
+            store,
+            config,
+            cursor,
+            link_said: HashMap::new(),
+            pages,
+            ack_polled: HashMap::new(),
+            outbox: Vec::new(),
+        }
     }
 
-    /// Handle every event since the cursor, then move it past them.
+    /// Handle every event since the cursor, then move it past them, then send
+    /// what is due.
     fn pass(&mut self) {
-        let Ok(events) = self.store.events_after(self.cursor, 200) else {
-            return;
-        };
-        for e in events {
-            self.handle(&e);
-            self.cursor = e.id;
-            let _ = self.store.set_state(CURSOR_KEY, &e.id.to_string());
+        if let Ok(events) = self.store.events_after(self.cursor, 200) {
+            for e in events {
+                self.handle(&e);
+                self.cursor = e.id;
+                let _ = self.store.set_state(CURSOR_KEY, &e.id.to_string());
+            }
         }
+        self.send_due();
         self.poll_acks();
         self.ring();
+        self.forget_old();
+    }
+
+    /// One attempt for each message whose time has come, alarms first. A
+    /// channel that fails is not tried again in the same pass: an unreachable
+    /// host costs its timeout once, not once per waiting message.
+    fn send_due(&mut self) {
+        let now = Instant::now();
+        let mut due: Vec<Outgoing> = Vec::new();
+        let mut later: Vec<Outgoing> = Vec::new();
+        for m in self.outbox.drain(..) {
+            if m.next_at <= now {
+                due.push(m);
+            } else {
+                later.push(m);
+            }
+        }
+        due.sort_by_key(|m| (m.note.tone != Tone::Alarm, m.next_at));
+        let mut failed_targets: Vec<Target> = Vec::new();
+        for mut m in due {
+            if failed_targets.contains(&m.target) {
+                later.push(m);
+                continue;
+            }
+            match deliver_with(&m.target, &m.note, m.ack) {
+                Ok(()) => {}
+                Err(err) => {
+                    tracing::warn!(attempt = m.failures, "notifying {} ({}): {err}", m.responsible, m.kind);
+                    failed_targets.push(m.target.clone());
+                    match RETRY_WAITS.get(m.failures) {
+                        Some(wait) => {
+                            m.failures += 1;
+                            m.next_at = Instant::now() + *wait;
+                            later.push(m);
+                        }
+                        None => tracing::error!(
+                            "gave up notifying {} of {} on {} (run {})",
+                            m.responsible,
+                            m.kind,
+                            m.target.label(),
+                            m.run_id
+                        ),
+                    }
+                }
+            }
+        }
+        self.outbox = later;
+    }
+
+    /// Queue a message, keeping the queue bounded: past `OUTBOX_CAP` the
+    /// oldest non-alarm goes (an alarm is never dropped for room).
+    fn enqueue(&mut self, m: Outgoing) {
+        if self.outbox.len() >= OUTBOX_CAP {
+            if let Some(i) = self.outbox.iter().position(|o| o.note.tone != Tone::Alarm) {
+                let dropped = self.outbox.remove(i);
+                tracing::warn!("notification queue full: dropped \"{}\" for {}", dropped.note.title, dropped.responsible);
+            }
+        }
+        self.outbox.push(m);
+    }
+
+    /// The rate-limit and poll bookkeeping only needs its recent entries.
+    fn forget_old(&mut self) {
+        self.link_said.retain(|_, at| at.elapsed() < LINK_QUIET);
+        self.ack_polled.retain(|_, at| at.elapsed() < ACK_POLL * 4);
     }
 
     fn pages(&self) -> std::sync::MutexGuard<'_, Vec<Page>> {
@@ -599,23 +693,17 @@ impl Notifier {
             return;
         }
         let ack = family.map(|_| run_id);
-        for t in &targets {
-            let mut sent = false;
-            for (attempt, wait) in std::iter::once(None).chain(RETRY_WAITS.iter().map(Some)).enumerate() {
-                if let Some(w) = wait {
-                    thread::sleep(*w);
-                }
-                match deliver_with(t, &note, ack) {
-                    Ok(()) => {
-                        sent = true;
-                        break;
-                    }
-                    Err(err) => tracing::warn!(attempt, "notifying {responsible} ({}): {err}", e.kind),
-                }
-            }
-            if !sent {
-                tracing::error!("gave up notifying {responsible} of {} on {} (run {run_id})", e.kind, t.label());
-            }
+        for t in targets {
+            self.enqueue(Outgoing {
+                target: t,
+                note: note.clone(),
+                ack,
+                responsible: responsible.to_string(),
+                kind: e.kind.clone(),
+                run_id,
+                failures: 0,
+                next_at: Instant::now(),
+            });
         }
     }
 }
@@ -861,6 +949,63 @@ mod tests {
         let posted = json!({ "event": "message", "time": 1, "message": a["body"] }).to_string();
         assert_eq!(parse_acks(&posted), [(51, 1)], "what the button posts is what the poll reads");
         assert!(ntfy_body("t", &note).get("actions").is_none(), "plain news has no button");
+    }
+
+    /// The run of `run_row`, with Drew reachable on `server` only.
+    fn notifier_for(server: &str) -> (Notifier, EventRow) {
+        let s = Store::open_in_memory().unwrap();
+        let id = s
+            .insert_run(&crate::store::NewRun {
+                name: "fed-batch".into(),
+                started_at: jiff::Timestamp::now(),
+                control_var: crate::store::ControlVar::MlMin,
+                direction: crate::store::Direction::Cw,
+                tick_interval_s: 1,
+                pump_addr: 1,
+                app_version: "test".into(),
+                curve: fermentool_curves::CurveSpec::linear(1.0, 1.0, Duration::from_secs(3600)),
+                gravimetric_trim: true,
+                kind: RunKind::Dosing,
+                tubing_calibration_id: None,
+                responsible: Some("Drew".into()),
+                density_g_per_ml: None,
+            })
+            .unwrap();
+        let mut cfg = Config::default();
+        cfg.notify.ntfy_server = server.into();
+        cfg.notify.people.push(Person { name: "Drew".into(), ntfy_topic: "fermentool-drew-x7k2".into(), webhook: String::new() });
+        let n = Notifier::new(s, Arc::new(RwLock::new(cfg)), Pages::default());
+        let mut e = event("alarm_feed_stopped", None);
+        e.run_id = Some(id);
+        (n, e)
+    }
+
+    #[test]
+    fn an_unreachable_service_holds_up_nothing() {
+        // Nothing listens there: each attempt fails at once.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let (mut n, e) = notifier_for(&url);
+        let t = Instant::now();
+        n.handle(&e);
+        n.send_due();
+        assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+        // Kept for a later try, not retried in line.
+        assert_eq!(n.outbox.len(), 1);
+        assert_eq!(n.outbox[0].failures, 1);
+        assert!(n.outbox[0].next_at > Instant::now());
+    }
+
+    #[test]
+    fn a_queued_message_goes_out_once_the_service_answers() {
+        let (url, server) = one_shot_server();
+        let (mut n, e) = notifier_for(&url);
+        n.handle(&e);
+        n.send_due();
+        let (_, body) = server.join().unwrap();
+        assert!(body.contains("bottle empty"), "{body}");
+        assert!(n.outbox.is_empty());
     }
 
     #[test]
