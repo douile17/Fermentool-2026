@@ -47,14 +47,21 @@
   loading={!loaded}
 >
   <div class="grid">
-    <label class="field"><span>Resume grace (minutes)</span>
-      <input type="number" min="0" bind:value={graceMinutes} />
-    </label>
-
     <label class="field check">
       <input type="checkbox" bind:checked={prompt} />
       <span>Ask before resuming an interrupted run</span>
     </label>
+
+    <label class="field"><span>Calibration burst grace (minutes)</span>
+      <input type="number" min="0" bind:value={graceMinutes} />
+    </label>
+
+    <p class="field-note">
+      {prompt
+        ? 'Ticked: after a restart, an interrupted run waits for someone to choose Resume, Finish or Abort.'
+        : 'Unticked: a feeding run interrupted by a power cut, a crash or a reboot resumes by itself as soon as the pump answers, at the point its curve has reached. Nothing is asked.'}
+      A calibration burst always waits for you, and can still be resumed this long past its end.
+    </p>
   </div>
 
   {#snippet foot()}

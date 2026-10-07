@@ -241,6 +241,11 @@ async fn put_config(State(s): State<AppState>, Json(new): Json<Config>) -> ApiRe
         .control
         .call(|reply| Command::SetAllowSimulator(new.serial.allow_simulator, reply))
         .await;
+    // Same for `[resume] prompt` (Settings, Crash resume).
+    let _ = s
+        .control
+        .call(|reply| Command::SetAutoResume(!new.resume.prompt, reply))
+        .await;
     Ok(Json(json!({
         "saved": true,
         "scale_connected": scale_connected,

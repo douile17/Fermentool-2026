@@ -38,6 +38,11 @@ pub(crate) const HARD_TXN_TIMEOUT: Duration = Duration::from_secs(2);
 /// background and the next recovery pass picks it up.
 pub(crate) const OPEN_WAIT: Duration = Duration::from_secs(3);
 
+/// How long a respawn waits for the current worker to close its port before
+/// opening the new one: a transaction in flight finishes first (at most the
+/// port's own 1.5 s timeout).
+const RELEASE_WAIT: Duration = Duration::from_secs(2);
+
 /// Which transport an engine is currently driving. Surfaced in the status frame
 /// so the UI can show "Connected to: COM3" / "simulator".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,9 +176,14 @@ enum Job {
 /// is in its place and the caller should keep retrying).
 pub type Opener = Box<dyn FnOnce() -> (Box<dyn Transport + Send>, Option<TransportKind>) + Send>;
 
-fn spawn_worker(opener: Opener) -> (mpsc::Sender<Job>, JoinHandle<()>, Option<TransportKind>) {
+/// A running worker: its job queue, its thread, what it opened, and the
+/// channel it signals on once its port is closed.
+type Worker = (mpsc::Sender<Job>, JoinHandle<()>, Option<TransportKind>, mpsc::Receiver<()>);
+
+fn spawn_worker(opener: Opener) -> Worker {
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let (kind_tx, kind_rx) = mpsc::channel::<Option<TransportKind>>();
+    let (closed_tx, closed_rx) = mpsc::channel::<()>();
 
     let handle = thread::Builder::new()
         .name("serial-worker".into())
@@ -193,6 +203,10 @@ fn spawn_worker(opener: Opener) -> (mpsc::Sender<Job>, JoinHandle<()>, Option<Tr
                     Job::Shutdown => break,
                 }
             }
+            // Close the port, then say so: a respawn waits for this before
+            // opening the same port again.
+            drop(real);
+            let _ = closed_tx.send(());
         })
         .expect("spawn serial-worker thread");
 
@@ -200,7 +214,7 @@ fn spawn_worker(opener: Opener) -> (mpsc::Sender<Job>, JoinHandle<()>, Option<Tr
         Ok(k) => k,
         Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => None,
     };
-    (job_tx, handle, kind)
+    (job_tx, handle, kind, closed_rx)
 }
 
 /// A [`Transport`] whose blocking work happens on a separate thread, so the
@@ -214,6 +228,8 @@ pub struct WatchdogTransport {
     /// `true` once a transaction timed out: the worker is presumed stuck, so
     /// further transactions fail fast until a swap respawns it.
     stuck: bool,
+    /// Signalled by the current worker once its port is closed.
+    closed: mpsc::Receiver<()>,
     serial: SerialConfig,
     pump_addr: u8,
 }
@@ -223,7 +239,7 @@ impl WatchdogTransport {
     /// falls back to the simulator, so the daemon always comes up.
     pub fn spawn(serial: &SerialConfig, pump_addr: u8) -> (Self, TransportKind) {
         let s = serial.clone();
-        let (tx, worker, kind) =
+        let (tx, worker, kind, closed) =
             spawn_worker(Box::new(move || {
                 let (t, k) = open(&s, pump_addr);
                 (t, Some(k))
@@ -232,19 +248,27 @@ impl WatchdogTransport {
             tx,
             _worker: worker,
             stuck: false,
+            closed,
             serial: serial.clone(),
             pump_addr,
         };
         (this, kind.unwrap_or(TransportKind::Sim))
     }
 
-    /// Drop the current worker (whatever state it is in) and start a fresh one
-    /// on a clean handle.
+    /// Retire the current worker (whatever state it is in) and start a fresh
+    /// one on a clean handle. The old one closes its port first: a COM port is
+    /// exclusive on Windows, and a new worker opening the same port while the
+    /// old one still held it failed, so a Connect on the port already in use
+    /// fell back to the simulator. A worker stuck in a syscall never closes:
+    /// it is not waited for, and is left behind as before.
     fn respawn(&mut self, opener: Opener) -> Option<TransportKind> {
-        let (tx, worker, kind) = spawn_worker(opener);
-        let old_tx = std::mem::replace(&mut self.tx, tx);
-        let _ = old_tx.send(Job::Shutdown); // no-op if it's wedged; harmless if not
-        drop(old_tx);
+        let _ = self.tx.send(Job::Shutdown); // no-op if it's wedged
+        if !self.stuck {
+            let _ = self.closed.recv_timeout(RELEASE_WAIT);
+        }
+        let (tx, worker, kind, closed) = spawn_worker(opener);
+        self.tx = tx;
+        self.closed = closed;
         // Detach the old worker: never block the daemon joining a stuck thread.
         let _old = std::mem::replace(&mut self._worker, worker);
         self.stuck = false;
@@ -252,11 +276,12 @@ impl WatchdogTransport {
     }
 
     pub fn spawn_with(opener: Opener) -> (Self, Option<TransportKind>) {
-        let (tx, worker, kind) = spawn_worker(opener);
+        let (tx, worker, kind, closed) = spawn_worker(opener);
         let this = Self {
             tx,
             _worker: worker,
             stuck: false,
+            closed,
             serial: SerialConfig {
                 path: "sim".into(),
                 baud: 9600,
@@ -466,6 +491,36 @@ mod tests {
         wd.respawn_with(Box::new(|| (Box::new(EchoTransport), Some(TransportKind::Sim))));
         assert!(!wd.is_stuck());
         assert_eq!(wd.transaction(b"back").unwrap(), b"back");
+    }
+
+    /// One exclusive "COM port": opening it while it is held fails, as on
+    /// Windows; dropping the handle releases it.
+    static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    struct ExclusivePort;
+    impl Transport for ExclusivePort {
+        fn transaction(&mut self, req: &[u8]) -> Result<Vec<u8>, TransportError> {
+            Ok(req.to_vec())
+        }
+    }
+    impl Drop for ExclusivePort {
+        fn drop(&mut self) {
+            HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn open_exclusive() -> (Box<dyn Transport + Send>, Option<TransportKind>) {
+        if HELD.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            (Box::new(DeadLink), None)
+        } else {
+            (Box::new(ExclusivePort), Some(TransportKind::Serial("COM-X".into())))
+        }
+    }
+
+    #[test]
+    fn reconnecting_to_the_port_in_use_releases_it_first() {
+        let (mut wd, kind) = WatchdogTransport::spawn_with(Box::new(open_exclusive));
+        assert!(kind.is_some());
+        wd.respawn_with(Box::new(open_exclusive));
+        assert_eq!(wd.transaction(b"ok").unwrap(), b"ok", "the same port reopened");
     }
 
     #[test]

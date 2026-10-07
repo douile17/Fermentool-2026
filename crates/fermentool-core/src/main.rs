@@ -211,33 +211,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("fermentool-core {VERSION} starting");
     tracing::info!(data_dir = %paths.data_dir.display(), "paths resolved");
 
-    let mut engine = build_engine(&config, &paths.db)?;
-    let scale = build_scale(&config.scale);
-    engine.attach_scale(
-        scale.map(|w| Box::new(w) as Box<dyn Transport + Send>),
-        config.scale.clone(),
-    );
-    let (events, _) = broadcast::channel(64);
-    let control = Arc::new(control::spawn(engine, config.grace(), events.clone()));
-    let shutdown = Arc::new(Notify::new());
-    // Opened after the engine's, which has already migrated the file.
-    let db = Arc::new(api::ApiDb::new(Store::open(&paths.db).context("open journal for the API")?));
-
-    let state = AppState {
-        control: Arc::clone(&control),
-        config: Arc::new(RwLock::new(config.clone())),
-        config_path: Arc::new(paths.config.clone()),
-        shutdown: Arc::clone(&shutdown),
-        events,
-        pages: notify::Pages::default(),
-        db,
-    };
-    // Notifications follow the journal on their own thread, reading the
-    // people/channels from the live config (Settings edits apply at once).
-    if let Err(e) = notify::spawn(paths.db.clone(), Arc::clone(&state.config), Arc::clone(&state.pages)) {
-        tracing::error!("cannot start the notifier ({e}); runs go on without alerts");
-    }
-
+    // The port first: a second instance (the log-on task, the desktop window,
+    // a double click) must stop here, before it opens the journal and tries
+    // the pump's port, which the running daemon holds (it used to journal a
+    // false "serial_lost" in the shared database on its way out).
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -257,6 +234,38 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e).context("bind listener"),
     };
+
+    let mut engine = build_engine(&config, &paths.db)?;
+    let scale = build_scale(&config.scale);
+    engine.attach_scale(
+        scale.map(|w| Box::new(w) as Box<dyn Transport + Send>),
+        config.scale.clone(),
+    );
+    let (events, _) = broadcast::channel(64);
+    let control = Arc::new(control::spawn(engine, config.grace(), events.clone()));
+    // `[resume] prompt = false`: an interrupted run resumes by itself.
+    let _ = control
+        .call(|reply| control::Command::SetAutoResume(!config.resume.prompt, reply))
+        .await;
+    let shutdown = Arc::new(Notify::new());
+    // Opened after the engine's, which has already migrated the file.
+    let db = Arc::new(api::ApiDb::new(Store::open(&paths.db).context("open journal for the API")?));
+
+    let state = AppState {
+        control: Arc::clone(&control),
+        config: Arc::new(RwLock::new(config.clone())),
+        config_path: Arc::new(paths.config.clone()),
+        shutdown: Arc::clone(&shutdown),
+        events,
+        pages: notify::Pages::default(),
+        db,
+    };
+    // Notifications follow the journal on their own thread, reading the
+    // people/channels from the live config (Settings edits apply at once).
+    if let Err(e) = notify::spawn(paths.db.clone(), Arc::clone(&state.config), Arc::clone(&state.pages)) {
+        tracing::error!("cannot start the notifier ({e}); runs go on without alerts");
+    }
+
     let url = format!("http://{addr}");
     tracing::info!("API listening on {url}");
 

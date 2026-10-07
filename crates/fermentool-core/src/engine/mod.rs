@@ -189,6 +189,17 @@ impl EngineError {
         Some(text.to_string())
     }
 
+    /// A refusal that only says the pump cannot be reached right now: trying
+    /// again once it answers may well work.
+    pub fn is_link_problem(&self) -> bool {
+        matches!(
+            self,
+            EngineError::SerialDown
+                | EngineError::SimulatorNotAllowed
+                | EngineError::Pump(PumpError::Transport(_))
+        )
+    }
+
     /// The full structured form for the HTTP API.
     pub fn detail(&self) -> ErrDetail {
         ErrDetail {
@@ -1185,20 +1196,7 @@ impl<T: Transport> Engine<T> {
         // show it as down instead of hiding the indicator.
         let scale_shown = self.scale.is_some() || self.scale_wanted();
         EngineStatus {
-            active: self.active.as_ref().map(|a| ActiveStatus {
-                run_id: a.id,
-                started_at: a.started_at,
-                duration_s: a.duration_s,
-                control_var: a.control_var,
-                tick_interval_s: TICK_INTERVAL.as_secs() as u32,
-                last_seq: (a.next_seq > 0).then_some(a.next_seq - 1),
-                last_target: a.last_target,
-                volume_added_ml: a.volume_added_ml,
-                gravimetric_trim: a.gravimetric_trim,
-                kind: a.kind,
-                name: a.name.clone(),
-                curve_done: a.curve_done,
-            }),
+            active: self.active_status(),
             transport: self.transport.label(),
             holding: self.holding.clone(),
             serial_ok: !self.serial_lost,
@@ -1230,6 +1228,25 @@ impl<T: Transport> Engine<T> {
             }),
             stop_pending: self.stop_pending.is_some(),
         }
+    }
+
+    /// The active run's part of [`status`](Self::status) alone: what the
+    /// control loop checks several times a pass, without building the rest.
+    pub fn active_status(&self) -> Option<ActiveStatus> {
+        self.active.as_ref().map(|a| ActiveStatus {
+            run_id: a.id,
+            started_at: a.started_at,
+            duration_s: a.duration_s,
+            control_var: a.control_var,
+            tick_interval_s: TICK_INTERVAL.as_secs() as u32,
+            last_seq: (a.next_seq > 0).then_some(a.next_seq - 1),
+            last_target: a.last_target,
+            volume_added_ml: a.volume_added_ml,
+            gravimetric_trim: a.gravimetric_trim,
+            kind: a.kind,
+            name: a.name.clone(),
+            curve_done: a.curve_done,
+        })
     }
 
     /// [`TICK_INTERVAL`] while a run is active, so the control loop knows how
@@ -2544,7 +2561,7 @@ impl<T: Transport> Engine<T> {
             self.scale_cfg = cfg;
             return Ok(true);
         }
-        let had_link = self.scale.take().is_some();
+        self.scale = None;
         self.scale_read_fails = 0;
         self.scale_unconfirmed = false;
         self.live_weight = None;
@@ -2552,24 +2569,12 @@ impl<T: Transport> Engine<T> {
         if !self.scale_wanted() {
             return Ok(false);
         }
-        if had_link {
-            // The old poll thread closes its port asynchronously; reopening
-            // the same COM port before that fails with "access denied".
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        if !self.recover_scale() {
-            return Ok(false);
-        }
-        // Settings tells the operator whether the balance answers: give the
-        // new link its first read (one SICS timeout, bounded) before saying.
-        let deadline = std::time::Instant::now() + scale::SCALE_OPEN_TIMEOUT + Duration::from_millis(300);
-        while self.scale_unconfirmed && std::time::Instant::now() < deadline {
-            if let Some(Ok(r)) = self.ask_scale() {
-                self.took_scale_reading(r);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        // No waiting here, on the control thread that also writes the pump
+        // (a plain dosing run may be going): the link opens now if it can,
+        // the background retry takes it from there, and the balance shows as
+        // connected once it answers. The old poll thread lets go of its COM
+        // port on its own; an attempt made before that is simply retried.
+        self.recover_scale();
         Ok(self.scale_link_up())
     }
 
@@ -2816,6 +2821,37 @@ impl<T: Transport> Engine<T> {
         Ok(run.id)
     }
 
+    /// `[resume] prompt = false`: resume the interrupted dosing run without
+    /// asking, once the pump answers a read. `None` while there is nothing to
+    /// try (no interrupted run, a run already going, the link down); a
+    /// calibration burst is left to the operator, its weighing needs them.
+    pub fn try_auto_resume(&mut self, now: Timestamp, grace: Duration) -> Option<Result<i64>> {
+        if self.active.is_some() || self.serial_lost || (self.on_simulator() && !self.allow_simulator) {
+            return None;
+        }
+        let run = self.store.running_run().ok().flatten()?;
+        if run.kind != RunKind::Dosing {
+            return None;
+        }
+        // An open port is not a live pump: one read first, so a silent pump
+        // is waited for instead of failing the resume (and journalling a
+        // crash_detected) every few seconds.
+        if !self.on_simulator() && self.pump.read_speed_rpm().is_err() {
+            return Some(Err(EngineError::SerialDown));
+        }
+        let resumed = self.resume(now, grace);
+        if let Ok(id) = &resumed {
+            let _ = self.store.log_event(&NewEvent {
+                run_id: Some(*id),
+                wall_time: now,
+                level: EventLevel::Info,
+                kind: "auto_resume".into(),
+                detail: Some("resumed without asking (Settings, Crash resume)".into()),
+            });
+        }
+        Some(resumed)
+    }
+
     /// Reconstruct `volume_added_ml` after a crash: the in-memory accumulator
     /// from before the restart is gone, but every tick's `(elapsed_s, target)`
     /// is already journalled, trapezoid-integrate straight from those rows
@@ -2835,14 +2871,15 @@ impl<T: Transport> Engine<T> {
         // reasoning as `tick`'s: a calibration burst ends at its duration; a
         // dosing run keeps pumping through its hold phase (infinite horizon).
         let d = horizon_s;
-        let ticks = self.store.ticks(run_id, 0, i64::MAX)?;
+        // Streamed row by row: a 100 h run journals ~360k ticks, loading them
+        // all at once cost tens of MB on the control thread.
         let mut total = 0.0;
         let mut prev = (0.0, start);
-        for t in &ticks {
-            let te = t.elapsed_s.min(d);
-            total += volume_slice(prev, (te, t.target));
-            prev = (te, t.target);
-        }
+        self.store.for_each_target(run_id, |elapsed_s, target| {
+            let te = elapsed_s.min(d);
+            total += volume_slice(prev, (te, target));
+            prev = (te, target);
+        })?;
         total += volume_slice(prev, (resume_elapsed_s.min(d), resume_target));
         Ok(total)
     }
@@ -5873,6 +5910,46 @@ mod tests {
         b.resume(at(130), g).unwrap();
         assert!(matches!(b.tick(at(140)).unwrap(), TickOutcome::Applied { .. }));
         assert!(b.status().active.unwrap().curve_done);
+    }
+
+    #[test]
+    fn an_interrupted_dosing_run_resumes_by_itself_when_asked_to() {
+        let db = TempDb::new();
+        let id = {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let id = a.start_run(linear_cfg(), t0()).unwrap();
+            a.tick(at(600)).unwrap();
+            id
+        };
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        assert_eq!(b.try_auto_resume(at(1800), grace()).unwrap().unwrap(), id);
+        assert_eq!(b.status().active.unwrap().run_id, id);
+        assert!(b.pump.transport().running());
+        assert_eq!(event_times(&b, id, "auto_resume").len(), 1);
+        // Nothing more to do once it runs.
+        assert!(b.try_auto_resume(at(1810), grace()).is_none());
+    }
+
+    #[test]
+    fn an_automatic_resume_waits_for_a_pump_that_answers() {
+        let db = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.start_run(linear_cfg(), t0()).unwrap();
+        }
+        // The link is down: nothing is tried.
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        b.serial_lost = true;
+        assert!(b.try_auto_resume(at(1800), grace()).is_none());
+        // A calibration burst is never resumed without the operator.
+        let db2 = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db2.store(), "test");
+            let cfg = RunConfig { kind: RunKind::Calibration, ..linear_cfg() };
+            a.start_run(cfg, t0()).unwrap();
+        }
+        let mut c = Engine::new(Pump::new(SimPump::new(1), 1), db2.store(), "test");
+        assert!(c.try_auto_resume(at(30), grace()).is_none());
     }
 
     #[test]

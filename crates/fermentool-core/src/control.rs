@@ -57,6 +57,23 @@ const LINK_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 /// tick so the pump doesn't lurch to the wrong point on the curve.
 const CLOCK_STEP_LIMIT: Duration = Duration::from_secs(5);
 
+/// Consecutive panicking passes of the control loop before the process exits
+/// (see `control_loop`).
+const MAX_LOOP_PANICS: u32 = 50;
+
+/// An interrupted run is resumed by itself (`[resume] prompt = false`) no
+/// sooner than this after the daemon starts, so the link probe has had time to
+/// tell a silent pump from a live one.
+const AUTO_RESUME_DELAY: Duration = Duration::from_secs(10);
+/// Between two automatic resume attempts.
+const AUTO_RESUME_RETRY: Duration = Duration::from_secs(15);
+
+/// What one pass of the control loop asks for next.
+enum Step {
+    Next,
+    Stop,
+}
+
 /// One request to the control thread. Each carries a `oneshot` reply channel.
 pub enum Command {
     Status(oneshot::Sender<DaemonStatus>),
@@ -94,6 +111,9 @@ pub enum Command {
     TriggerRefillMode(oneshot::Sender<()>),
     /// Operator-declared "bottle is back, settled".
     TriggerRefillDone(oneshot::Sender<()>),
+    /// `[resume] prompt = false`: resume an interrupted dosing run without
+    /// asking, once the pump answers. Sent at boot and on each config save.
+    SetAutoResume(bool, oneshot::Sender<()>),
     Shutdown,
 }
 
@@ -280,212 +300,275 @@ fn control_loop<T: Transport + SwapTransport>(
     let mut next_scale_retry: Option<(Instant, Duration)> = None;
     // Next resend of a Stop that did not reach the pump.
     let mut next_stop_retry: Option<Instant> = None;
+    // The wall clock is off the monotonic one (see `run_now`): logged when it
+    // starts and when it ends, not on every tick in between.
+    let mut clock_stepped = false;
+    // Automatic resume (`[resume] prompt = false`): when to try next, and how
+    // many attempts failed for a reason a later try won't fix.
+    let mut next_auto_resume: Instant = Instant::now() + AUTO_RESUME_DELAY;
+    let mut auto_resume_failures = 0u32;
 
+    // Each pass runs inside `catch_unwind`, not only the engine calls: a
+    // panic anywhere in it used to end this thread while the HTTP server
+    // lived on, every command answering "control thread is not running"
+    // and the pump left on its last setpoint, unregulated, unjournalled.
+    // A pass that keeps panicking ends the process instead, so the log-on
+    // task restarts the daemon and crash-resume takes over.
+    let mut panics = 0u32;
+    let mut auto_resume_flag = false;
+    let auto_resume = &mut auto_resume_flag;
     loop {
-        // Keep the monotonic run epoch in sync with what the engine is running.
-        match engine.status().active {
-            Some(a) if run_epoch.map(|(_, _, _, id)| id) != Some(a.run_id) => {
-                let anchor = Instant::now();
-                let elapsed_at_anchor = Timestamp::now()
-                    .duration_since(a.started_at)
-                    .max(SignedDuration::ZERO);
-                run_epoch = Some((a.started_at, anchor, elapsed_at_anchor, a.run_id));
-            }
-            Some(_) => {}
-            None => run_epoch = None,
-        }
-
-        // Scale auto-recovery runs on its own backoff whenever the engine
-        // wants it (idle, or during a trimmed run), not only from the trim's
-        // probe: a trimmed run can't start until the scale is back.
-        maybe_recover_scale(engine, events, grace, &mut next_scale_retry);
-
-        if engine.tick_interval().is_none() {
-            next_journal = None;
-            next_write = None;
-            // A Stop that did not get through is sent again, once a second,
-            // as soon as the link is back: the pump may still be running.
-            if engine.stop_pending() && !engine.serial_lost() {
-                let due = *next_stop_retry.get_or_insert_with(Instant::now);
-                if Instant::now() >= due {
-                    let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        engine.retry_pending_stop(Timestamp::now())
-                    }))
-                    .unwrap_or(false);
-                    if sent {
-                        tracing::info!("pending Stop delivered, pump stopped");
-                        let _ = events.send(current_status(engine, grace));
+        let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Step {
+                // Keep the monotonic run epoch in sync with what the engine is running.
+                match engine.active_status() {
+                    Some(a) if run_epoch.map(|(_, _, _, id)| id) != Some(a.run_id) => {
+                        let anchor = Instant::now();
+                        let elapsed_at_anchor = Timestamp::now()
+                            .duration_since(a.started_at)
+                            .max(SignedDuration::ZERO);
+                        run_epoch = Some((a.started_at, anchor, elapsed_at_anchor, a.run_id));
                     }
-                    next_stop_retry = Some(Instant::now() + LINK_PROBE_INTERVAL);
-                    continue;
+                    Some(_) => {}
+                    None => run_epoch = None,
                 }
-            } else {
-                next_stop_retry = None;
-            }
-            // No run: read the balance about once a second, for the live
-            // weight on screen and to notice it being unplugged between runs.
-            if engine.scale_wanted() {
-                let due =
-                    *next_scale_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
-                if Instant::now() >= due {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        engine.probe_scale()
-                    }));
-                    let _ = events.send(current_status(engine, grace));
-                    next_scale_probe = Some(advance_past(due, LINK_PROBE_INTERVAL));
-                    continue;
-                }
-            } else {
-                next_scale_probe = None;
-            }
-            // No run: keep the serial link's health current so a cable pulled
-            // between runs still trips the alarm and the auto-reopen. A link
-            // already lost is the recovery's to confirm (with its own reads,
-            // on its backoff): probing a silent pump every second as well only
-            // held the control thread on a read timeout each time.
-            if engine.serial_is_real() && !engine.serial_lost() {
-                let probe_due =
-                    *next_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
-                if Instant::now() >= probe_due {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        engine.probe_link()
-                    }));
-                    maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
-                    next_probe = Some(advance_past(probe_due, LINK_PROBE_INTERVAL));
-                    continue;
-                }
-            } else {
-                next_probe = None;
-                // Backoff-gated, so free until a retry is due; here as well
-                // as on a quiet `recv_timeout`, which steady UI traffic can
-                // keep from ever firing.
-                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
-            }
-        } else {
-            next_probe = None;
-            let journal_due = *next_journal.get_or_insert_with(|| Instant::now() + TICK_INTERVAL);
-            let write_due =
-                *next_write.get_or_insert_with(|| Instant::now() + WRITE_SETPOINT_INTERVAL);
-            // A calibration burst ends on its exact length, not on the next
-            // whole-second tick: the flow is computed from that length.
-            let end_due = burst_end(engine.status().active.as_ref(), run_epoch)
-                .filter(|_| burst_end_fired != run_epoch.map(|e| e.3));
-            let tick_due = end_due.map_or(journal_due, |end| end.min(journal_due));
 
-            if Instant::now() >= tick_due {
-                if end_due.is_some_and(|e| e <= journal_due) {
-                    burst_end_fired = run_epoch.map(|e| e.3);
-                }
-                let now = run_now(run_epoch);
-                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match engine.tick(now) {
-                        Ok(TickOutcome::Finished { seq, target }) => {
-                            tracing::info!(seq, target, "run finished");
-                            true
-                        }
-                        Ok(TickOutcome::Applied { .. }) => true,
-                        Ok(TickOutcome::Idle) => false,
-                        Err(e) => {
-                            tracing::warn!("tick error: {e}");
-                            false
+                // Scale auto-recovery runs on its own backoff whenever the engine
+                // wants it (idle, or during a trimmed run), not only from the trim's
+                // probe: a trimmed run can't start until the scale is back.
+                maybe_recover_scale(engine, events, grace, &mut next_scale_retry);
+
+                if engine.tick_interval().is_none() {
+                    next_journal = None;
+                    next_write = None;
+                    // `[resume] prompt = false`: an interrupted dosing run goes on
+                    // by itself once the pump answers, instead of waiting for
+                    // someone to open the UI after a night-time power cut.
+                    if *auto_resume && auto_resume_failures < 3 && Instant::now() >= next_auto_resume {
+                        next_auto_resume = Instant::now() + AUTO_RESUME_RETRY;
+                        let tried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            engine.try_auto_resume(Timestamp::now(), grace)
+                        }));
+                        match tried {
+                            Ok(Some(Ok(id))) => {
+                                tracing::info!(run_id = id, "interrupted run resumed by itself");
+                                let _ = events.send(current_status(engine, grace));
+                                return Step::Next;
+                            }
+                            Ok(Some(Err(e))) if !e.is_link_problem() => {
+                                auto_resume_failures += 1;
+                                tracing::warn!(attempt = auto_resume_failures, "automatic resume refused: {e}");
+                            }
+                            Ok(Some(Err(e))) => tracing::debug!("automatic resume waits for the pump: {e}"),
+                            Ok(None) => {}
+                            Err(_) => tracing::error!("panic in the automatic resume; loop continues"),
                         }
                     }
-                }));
-                match done {
-                    Ok(true) => {
-                        let _ = events.send(current_status(engine, grace));
-                    }
-                    Ok(false) => {}
-                    Err(_) => tracing::error!("panic in tick; loop continues"),
-                }
-                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
-                next_journal = Some(advance_past(journal_due, TICK_INTERVAL));
-                // The journal tick just wrote the pump, hold the next sub-second
-                // write a full interval off so we don't write twice in a row.
-                next_write = Some(Instant::now() + WRITE_SETPOINT_INTERVAL);
-                continue;
-            }
-
-            if Instant::now() >= write_due {
-                let now = run_now(run_epoch);
-                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine.apply_setpoint(now)
-                }));
-                match done {
-                    Ok(Ok(true)) => {
-                        let _ = events.send(current_status(engine, grace));
-                    }
-                    Ok(Ok(false)) => {}
-                    Ok(Err(e)) => tracing::warn!("apply_setpoint error: {e}"),
-                    Err(_) => tracing::error!("panic in apply_setpoint; loop continues"),
-                }
-                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
-                next_write = Some(advance_past(write_due, WRITE_SETPOINT_INTERVAL));
-                continue;
-            }
-
-            // A trimmed run reads the balance for its regulation; a
-            // calibration burst only for its journal (weight every second, so
-            // the flow can be checked across the burst).
-            let active = engine.status().active;
-            let trims = active.as_ref().is_some_and(|a| a.gravimetric_trim);
-            let calibrating = engine.scale_wanted()
-                && active.as_ref().is_some_and(|a| a.kind == RunKind::Calibration);
-            if trims || calibrating {
-                let scale_probe_due =
-                    *next_scale_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
-                if Instant::now() >= scale_probe_due {
-                    let now = run_now(run_epoch);
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        if trims {
-                            engine.scale_tick(now)
-                        } else {
-                            engine.probe_scale()
+                    // A Stop that did not get through is sent again, once a second,
+                    // as soon as the link is back: the pump may still be running.
+                    if engine.stop_pending() && !engine.serial_lost() {
+                        let due = *next_stop_retry.get_or_insert_with(Instant::now);
+                        if Instant::now() >= due {
+                            let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                engine.retry_pending_stop(Timestamp::now())
+                            }))
+                            .unwrap_or(false);
+                            if sent {
+                                tracing::info!("pending Stop delivered, pump stopped");
+                                let _ = events.send(current_status(engine, grace));
+                            }
+                            next_stop_retry = Some(Instant::now() + LINK_PROBE_INTERVAL);
+                            return Step::Next;
                         }
-                    }));
-                    next_scale_probe = Some(advance_past(scale_probe_due, LINK_PROBE_INTERVAL));
-                    continue;
-                }
-            } else {
-                next_scale_probe = None;
-            }
-        }
-
-        let wait = match (next_journal, next_write) {
-            (Some(j), Some(w)) => {
-                let end = burst_end(engine.status().active.as_ref(), run_epoch)
-                    .filter(|_| burst_end_fired != run_epoch.map(|e| e.3));
-                end.map_or(j, |e| e.min(j)).min(w).saturating_duration_since(Instant::now())
-            }
-            // Idle: wake for the link probe if one is scheduled, else just poll.
-            _ => [next_probe, next_scale_probe]
-                .into_iter()
-                .flatten()
-                .min()
-                .map(|p| p.saturating_duration_since(Instant::now()).min(IDLE_POLL))
-                .unwrap_or(IDLE_POLL),
-        };
-        match rx.recv_timeout(wait) {
-            Ok(Command::Shutdown) => break,
-            Ok(cmd) => {
-                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    handle(engine, cmd, grace)
-                }));
-                match done {
-                    Ok(true) => {
-                        let _ = events.send(current_status(engine, grace));
+                    } else {
+                        next_stop_retry = None;
                     }
-                    Ok(false) => {}
-                    Err(_) => tracing::error!("panic while handling a command; loop continues"),
+                    // No run: read the balance about once a second, for the live
+                    // weight on screen and to notice it being unplugged between runs.
+                    if engine.scale_wanted() {
+                        let due =
+                            *next_scale_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
+                        if Instant::now() >= due {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                engine.probe_scale()
+                            }));
+                            let _ = events.send(current_status(engine, grace));
+                            next_scale_probe = Some(advance_past(due, LINK_PROBE_INTERVAL));
+                            return Step::Next;
+                        }
+                    } else {
+                        next_scale_probe = None;
+                    }
+                    // No run: keep the serial link's health current so a cable pulled
+                    // between runs still trips the alarm and the auto-reopen. A link
+                    // already lost is the recovery's to confirm (with its own reads,
+                    // on its backoff): probing a silent pump every second as well only
+                    // held the control thread on a read timeout each time.
+                    if engine.serial_is_real() && !engine.serial_lost() {
+                        let probe_due =
+                            *next_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
+                        if Instant::now() >= probe_due {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                engine.probe_link()
+                            }));
+                            maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
+                            next_probe = Some(advance_past(probe_due, LINK_PROBE_INTERVAL));
+                            return Step::Next;
+                        }
+                    } else {
+                        next_probe = None;
+                        // Backoff-gated, so free until a retry is due; here as well
+                        // as on a quiet `recv_timeout`, which steady UI traffic can
+                        // keep from ever firing.
+                        maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
+                    }
+                } else {
+                    next_probe = None;
+                    let journal_due = *next_journal.get_or_insert_with(|| Instant::now() + TICK_INTERVAL);
+                    let write_due =
+                        *next_write.get_or_insert_with(|| Instant::now() + WRITE_SETPOINT_INTERVAL);
+                    // A calibration burst ends on its exact length, not on the next
+                    // whole-second tick: the flow is computed from that length.
+                    let end_due = burst_end(engine.active_status().as_ref(), run_epoch)
+                        .filter(|_| burst_end_fired != run_epoch.map(|e| e.3));
+                    let tick_due = end_due.map_or(journal_due, |end| end.min(journal_due));
+
+                    if Instant::now() >= tick_due {
+                        if end_due.is_some_and(|e| e <= journal_due) {
+                            burst_end_fired = run_epoch.map(|e| e.3);
+                        }
+                        let now = run_now(run_epoch, &mut clock_stepped);
+                        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            match engine.tick(now) {
+                                Ok(TickOutcome::Finished { seq, target }) => {
+                                    tracing::info!(seq, target, "run finished");
+                                    true
+                                }
+                                Ok(TickOutcome::Applied { .. }) => true,
+                                Ok(TickOutcome::Idle) => false,
+                                Err(e) => {
+                                    tracing::warn!("tick error: {e}");
+                                    false
+                                }
+                            }
+                        }));
+                        match done {
+                            Ok(true) => {
+                                let _ = events.send(current_status(engine, grace));
+                            }
+                            Ok(false) => {}
+                            Err(_) => tracing::error!("panic in tick; loop continues"),
+                        }
+                        maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
+                        next_journal = Some(advance_past(journal_due, TICK_INTERVAL));
+                        // The journal tick just wrote the pump, hold the next sub-second
+                        // write a full interval off so we don't write twice in a row.
+                        next_write = Some(Instant::now() + WRITE_SETPOINT_INTERVAL);
+                        return Step::Next;
+                    }
+
+                    if Instant::now() >= write_due {
+                        let now = run_now(run_epoch, &mut clock_stepped);
+                        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            engine.apply_setpoint(now)
+                        }));
+                        match done {
+                            Ok(Ok(true)) => {
+                                let _ = events.send(current_status(engine, grace));
+                            }
+                            Ok(Ok(false)) => {}
+                            Ok(Err(e)) => tracing::warn!("apply_setpoint error: {e}"),
+                            Err(_) => tracing::error!("panic in apply_setpoint; loop continues"),
+                        }
+                        maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
+                        next_write = Some(advance_past(write_due, WRITE_SETPOINT_INTERVAL));
+                        return Step::Next;
+                    }
+
+                    // A trimmed run reads the balance for its regulation; a
+                    // calibration burst only for its journal (weight every second, so
+                    // the flow can be checked across the burst).
+                    let active = engine.active_status();
+                    let trims = active.as_ref().is_some_and(|a| a.gravimetric_trim);
+                    let calibrating = engine.scale_wanted()
+                        && active.as_ref().is_some_and(|a| a.kind == RunKind::Calibration);
+                    if trims || calibrating {
+                        let scale_probe_due =
+                            *next_scale_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
+                        if Instant::now() >= scale_probe_due {
+                            let now = run_now(run_epoch, &mut clock_stepped);
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                if trims {
+                                    engine.scale_tick(now)
+                                } else {
+                                    engine.probe_scale()
+                                }
+                            }));
+                            next_scale_probe = Some(advance_past(scale_probe_due, LINK_PROBE_INTERVAL));
+                            return Step::Next;
+                        }
+                    } else {
+                        next_scale_probe = None;
+                    }
                 }
+
+                let wait = match (next_journal, next_write) {
+                    (Some(j), Some(w)) => {
+                        let end = burst_end(engine.active_status().as_ref(), run_epoch)
+                            .filter(|_| burst_end_fired != run_epoch.map(|e| e.3));
+                        end.map_or(j, |e| e.min(j)).min(w).saturating_duration_since(Instant::now())
+                    }
+                    // Idle: wake for the link probe if one is scheduled, else just poll.
+                    _ => [next_probe, next_scale_probe]
+                        .into_iter()
+                        .flatten()
+                        .min()
+                        .map(|p| p.saturating_duration_since(Instant::now()).min(IDLE_POLL))
+                        .unwrap_or(IDLE_POLL),
+                };
+                match rx.recv_timeout(wait) {
+                    Ok(Command::Shutdown) => return Step::Stop,
+                    Ok(Command::SetAutoResume(on, reply)) => {
+                        if on != *auto_resume {
+                            tracing::info!(on, "automatic resume of an interrupted run");
+                        }
+                        *auto_resume = on;
+                        auto_resume_failures = 0;
+                        let _ = reply.send(());
+                    }
+                    Ok(cmd) => {
+                        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            handle(engine, cmd, grace)
+                        }));
+                        match done {
+                            Ok(true) => {
+                                let _ = events.send(current_status(engine, grace));
+                            }
+                            Ok(false) => {}
+                            Err(_) => tracing::error!("panic while handling a command; loop continues"),
+                        }
+                    }
+                    // Woke on a deadline (or early): the due checks at the top of the
+                    // loop do the work. Also keep chipping at a lost serial link even
+                    // when no run is active.
+                    Err(RecvTimeoutError::Timeout) => {
+                        maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return Step::Stop,
+                }
+            Step::Next
+        }));
+        match step {
+            Ok(Step::Next) => panics = 0,
+            Ok(Step::Stop) => break,
+            Err(_) => {
+                panics += 1;
+                tracing::error!(panics, "panic in the control loop; it carries on");
+                if panics >= MAX_LOOP_PANICS {
+                    tracing::error!("the control loop keeps panicking; exiting so the daemon is restarted");
+                    std::process::exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            // Woke on a deadline (or early): the due checks at the top of the
-            // loop do the work. Also keep chipping at a lost serial link even
-            // when no run is active.
-            Err(RecvTimeoutError::Timeout) => {
-                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     tracing::info!("control loop stopped");
@@ -500,9 +583,9 @@ fn burst_end(
 ) -> Option<Instant> {
     let a = active.filter(|a| a.kind == RunKind::Calibration)?;
     let (_, anchor, elapsed_at_anchor, _) = epoch.filter(|e| e.3 == a.run_id)?;
-    let left = SignedDuration::from_secs(a.duration_s) - elapsed_at_anchor;
+    let left = SignedDuration::from_secs(a.duration_s).checked_sub(elapsed_at_anchor)?;
     let left = Duration::try_from(left).unwrap_or(Duration::ZERO);
-    Some(anchor + left + Duration::from_millis(2))
+    anchor.checked_add(left + Duration::from_millis(2))
 }
 
 /// Advance `deadline` by whole `step`s until it is in the future, keeps the
@@ -528,21 +611,33 @@ fn advance_past(mut deadline: Instant, step: Duration) -> Instant {
 /// run, the pre-restart elapsed for a resume) plus real monotonic time since.
 /// Without the `elapsed_at_anchor` term every resume would look like a multi-
 /// minute clock step and rewind the curve to its start.
-fn run_now(run_epoch: Option<(Timestamp, Instant, SignedDuration, i64)>) -> Timestamp {
+///
+/// `stepped` remembers whether the clocks disagree, so the step is logged
+/// when it starts and when it ends, not on each of the ~8 calls a second in
+/// between (a step that lasts the rest of a 100 h run flooded the log).
+fn run_now(run_epoch: Option<(Timestamp, Instant, SignedDuration, i64)>, stepped: &mut bool) -> Timestamp {
     let Some((wall_start, mono_start, elapsed_at_anchor, _)) = run_epoch else {
+        *stepped = false;
         return Timestamp::now();
     };
     let wall = Timestamp::now();
     let wall_secs = wall.duration_since(wall_start).as_secs_f64();
     let mono_secs = elapsed_at_anchor.as_secs_f64() + mono_start.elapsed().as_secs_f64();
     if (wall_secs - mono_secs).abs() > CLOCK_STEP_LIMIT.as_secs_f64() {
-        tracing::warn!(
-            wall_secs,
-            mono_secs,
-            "system clock stepped mid-run; using monotonic time for this tick"
-        );
+        if !*stepped {
+            tracing::warn!(
+                wall_secs,
+                mono_secs,
+                "system clock stepped mid-run; using monotonic time until it agrees again"
+            );
+            *stepped = true;
+        }
         wall_start + SignedDuration::from_nanos((mono_secs * 1e9) as i64)
     } else {
+        if *stepped {
+            tracing::info!("system clock agrees with the run's monotonic time again");
+            *stepped = false;
+        }
         wall
     }
 }
@@ -613,7 +708,7 @@ fn maybe_recover_scale<T: Transport>(
     // During a run the balance coming and going is part of its story (and
     // notified): journal it. Idle, the log line is enough.
     let journal = |engine: &Engine<T>, kind: &str, level: EventLevel, detail: &str| {
-        if let Some(a) = engine.status().active {
+        if let Some(a) = engine.active_status() {
             let _ = engine.store().log_event(&NewEvent {
                 run_id: Some(a.run_id),
                 wall_time: Timestamp::now(),
@@ -821,6 +916,11 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             engine.trigger_refill_done();
             let _ = reply.send(());
             true
+        }
+        // Handled by the loop itself, which owns the flag.
+        Command::SetAutoResume(_, reply) => {
+            let _ = reply.send(());
+            false
         }
     }
 }
@@ -1242,7 +1342,7 @@ mod tests {
         let wall_start = Timestamp::now() - elapsed_at_resume;
         let epoch = Some((wall_start, Instant::now(), elapsed_at_resume, 1_i64));
 
-        let handed = run_now(epoch);
+        let handed = run_now(epoch, &mut false);
         let elapsed = handed.duration_since(wall_start).as_secs_f64();
         assert!(
             (elapsed - 3600.0).abs() < 2.0,
@@ -1258,8 +1358,10 @@ mod tests {
         let wall_start = Timestamp::now() - SignedDuration::from_secs(120);
         let epoch = Some((wall_start, Instant::now(), SignedDuration::ZERO, 1_i64));
 
-        let handed = run_now(epoch);
+        let mut stepped = false;
+        let handed = run_now(epoch, &mut stepped);
         let elapsed = handed.duration_since(wall_start).as_secs_f64();
+        assert!(stepped, "the step is noted, to be logged once");
         assert!(
             elapsed < 5.0,
             "clock-step guard did not pin to the anchor: elapsed {elapsed}s"

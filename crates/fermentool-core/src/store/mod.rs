@@ -764,6 +764,19 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// `(elapsed_s, target)` of every tick of a run, in `seq` order, handed to
+    /// `f` one row at a time instead of collected (a 100 h run has ~360k).
+    pub fn for_each_target(&self, run_id: i64, mut f: impl FnMut(f64, f64)) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT elapsed_s, target FROM ticks WHERE run_id = ?1 ORDER BY seq")?;
+        let mut rows = stmt.query([run_id])?;
+        while let Some(row) = rows.next()? {
+            f(row.get(0)?, row.get(1)?);
+        }
+        Ok(())
+    }
+
     pub fn tick_count(&self, run_id: i64) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT count(*) FROM ticks WHERE run_id = ?1",

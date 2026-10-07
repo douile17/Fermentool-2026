@@ -66,7 +66,7 @@
       });
       if (path === '') msg = 'Saved: no balance.';
       else if (res.scale_connected === false)
-        msg = `Saved, but the balance does not answer on ${path} yet. Check the port, the cable and the baud; Fermentool keeps retrying.`;
+        msg = `Saved. Connecting to the balance on ${path}: its weight shows at the bottom of the sidebar once it answers. If it does not, check the port, the cable and the baud; Fermentool keeps retrying.`;
       else msg = `Saved: balance on ${path}.`;
     } catch (e) {
       err = e.message;

@@ -20,6 +20,11 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Longest run a curve may describe. Far past any fed-batch, and it keeps
+/// every duration well inside the signed 64-bit seconds the engine and the
+/// journal count in.
+pub const MAX_DURATION: Duration = Duration::from_secs(366 * 24 * 3600);
+
 /// Default dimensionless steepness for an endpoints-mode sigmoid.
 pub const DEFAULT_SIGMOID_STEEPNESS: f64 = 8.0;
 
@@ -382,6 +387,9 @@ impl CurveSpec {
     pub fn validate(&self) -> Result<(), String> {
         if self.duration.is_zero() {
             return Err("duration must be greater than zero".into());
+        }
+        if self.duration > MAX_DURATION {
+            return Err("duration must be at most 366 days".into());
         }
         if !self.start.is_finite() || !self.end.is_finite() {
             return Err("start and end must be finite numbers".into());
@@ -862,6 +870,10 @@ mod tests {
             .is_ok());
 
         assert!(CurveSpec::linear(1.0, 10.0, Duration::ZERO)
+            .validate()
+            .is_err());
+        assert!(CurveSpec::linear(1.0, 10.0, MAX_DURATION).validate().is_ok());
+        assert!(CurveSpec::linear(1.0, 10.0, Duration::from_secs(u64::MAX))
             .validate()
             .is_err());
         assert!(CurveSpec::exponential_endpoints(0.0, 10.0, hours(1))
