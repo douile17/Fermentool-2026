@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -80,6 +81,7 @@ impl ApiDb {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/api/health", get(health))
         .route("/api/status", get(status))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/preview", post(preview))
@@ -115,7 +117,62 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ws", get(ws_upgrade))
         .fallback(static_handler)
         .layer(cors_layer())
+        .layer(middleware::from_fn(local_callers_only))
         .with_state(state)
+}
+
+/// The Tauri window's origins, the only cross-origin pages allowed in.
+const TAURI_ORIGINS: [&str; 3] = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
+
+/// Who may call the API. It listens on 127.0.0.1 only, yet any web page open
+/// in this PC's browser can still send it requests: CORS keeps that page from
+/// reading the answers, not from sending a body-less POST (a form, a
+/// `no-cors` fetch) that stops or aborts a run or shuts the daemon down, nor
+/// from opening the WebSocket. A DNS-rebinding page can even pass for the
+/// same origin. So:
+/// * `Host` must name this machine (`127.0.0.1` or `localhost`, any port: the
+///   Vite dev proxy forwards its own),
+/// * an `Origin`, which browsers send with every POST, every cross-origin
+///   request and every WebSocket, must be this same host (the daemon's own
+///   page, or the dev server behind its proxy) or the Tauri window.
+///
+/// Callers without an `Origin` (curl, the installer's PowerShell, the tray)
+/// are not web pages and go through.
+async fn local_callers_only(req: Request, next: Next) -> Response {
+    match refusal(req.headers()) {
+        None => next.run(req).await,
+        Some(why) => {
+            tracing::warn!("refused a request to {}: {why}", req.uri().path());
+            (StatusCode::FORBIDDEN, Json(json!({ "error": why }))).into_response()
+        }
+    }
+}
+
+/// Why `local_callers_only` turns a request away, `None` to let it in.
+fn refusal(headers: &HeaderMap) -> Option<&'static str> {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    if let Some(host) = host {
+        if !is_local_host(host) {
+            return Some("this API answers only to 127.0.0.1 or localhost");
+        }
+    }
+    let origin = headers.get(header::ORIGIN)?.to_str().ok();
+    let allowed = origin.is_some_and(|o| {
+        TAURI_ORIGINS.contains(&o)
+            || host.is_some_and(|h| {
+                o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) == Some(h)
+            })
+    });
+    (!allowed).then_some("requests from other web pages are not accepted")
+}
+
+/// `127.0.0.1` or `localhost`, with or without a port.
+fn is_local_host(host: &str) -> bool {
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
+        _ => host,
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1"
 }
 
 /// The Svelte UI bundled into the Tauri desktop shell runs on the
@@ -186,6 +243,14 @@ type ApiResult<T> = Result<T, ApiError>;
 // ---------------------------------------------------------------------------
 // handlers
 // ---------------------------------------------------------------------------
+
+/// "The daemon is up": answered by the HTTP server itself, never queued
+/// behind the control thread (the desktop window polls this to decide
+/// whether a daemon must be started; `/api/status` could be slow to answer
+/// while the control thread waits on a device).
+async fn health() -> Response {
+    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })).into_response()
+}
 
 async fn status(State(s): State<AppState>) -> ApiResult<Response> {
     let st = s
@@ -1384,17 +1449,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cors_does_not_echo_an_unknown_origin() {
+    async fn another_web_page_is_turned_away() {
         let app = router(test_state());
         let req = Request::builder()
             .uri("/api/status")
+            .header("host", "127.0.0.1:8730")
             .header("origin", "http://evil.example")
             .body(Body::empty())
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
-        // Still served, CORS is browser-enforced, but with no allow-origin echo.
-        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
         assert!(res.headers().get("access-control-allow-origin").is_none());
+    }
+
+    /// The CSRF: a page anywhere on the web posts a body-less form to the
+    /// daemon. It used to be executed, CORS only hiding the answer.
+    #[tokio::test]
+    async fn a_cross_site_post_cannot_shut_the_daemon_down() {
+        let state = test_state();
+        let shutdown = Arc::clone(&state.shutdown);
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/shutdown")
+            .header("host", "127.0.0.1:8730")
+            .header("origin", "https://some-site.example")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let notified = tokio::time::timeout(Duration::from_millis(50), shutdown.notified()).await;
+        assert!(notified.is_err(), "the shutdown must not have been asked for");
+    }
+
+    /// DNS rebinding: the attacker's own name resolves to 127.0.0.1, so the
+    /// page is "same origin", but the Host it sends is that name.
+    #[tokio::test]
+    async fn a_rebound_host_name_is_turned_away() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .uri("/api/config")
+            .header("host", "attacker.example:8730")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_daemon_page_the_dev_server_and_the_window_get_in() {
+        let app = router(test_state());
+        for (host, origin) in [
+            ("127.0.0.1:8730", Some("http://127.0.0.1:8730")),
+            ("localhost:8730", Some("http://localhost:8730")),
+            ("localhost:5173", Some("http://localhost:5173")),
+            ("127.0.0.1:8730", Some("http://tauri.localhost")),
+            ("127.0.0.1:8730", None),
+        ] {
+            let mut req = Request::builder().method("POST").uri("/api/scale/refill_done").header("host", host);
+            if let Some(o) = origin {
+                req = req.header("origin", o);
+            }
+            let res = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{host} {origin:?}");
+        }
+        let res = app.oneshot(get("/api/health")).await.unwrap();
+        assert_eq!(body_json(res).await["ok"], true);
     }
 
     // ---- tubing calibrations (Task 13) ----
