@@ -18,12 +18,26 @@ async function body(res) {
   }
 }
 
+// A request the daemon never answers (its control thread waiting on a
+// device) must not leave a button on "Stopping…" for good.
+const TIMEOUT_MS = 15000;
+
 async function req(method, path, payload) {
-  const res = await fetch(BASE + path, {
-    method,
-    headers: payload !== undefined ? { 'content-type': 'application/json' } : undefined,
-    body: payload !== undefined ? JSON.stringify(payload) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(BASE + path, {
+      method,
+      headers: payload !== undefined ? { 'content-type': 'application/json' } : undefined,
+      body: payload !== undefined ? JSON.stringify(payload) : undefined,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (e) {
+    const err = new Error(
+      e?.name === 'TimeoutError' ? 'The daemon did not answer in time.' : 'The daemon cannot be reached.',
+    );
+    err.status = 0;
+    throw err;
+  }
   const data = await body(res);
   if (!res.ok) {
     const msg = (data && data.error) || `${res.status} ${res.statusText}`;
@@ -44,13 +58,18 @@ export const post = (path, payload) => req('POST', path, payload ?? {});
 export const put = (path, payload) => req('PUT', path, payload);
 export const del = (path) => req('DELETE', path);
 
-/** Subscribe to status frames. Returns an unsubscribe function. Auto-reconnects. */
-export function connectWs(onStatus) {
+/** Subscribe to status frames; `onDown` is called when the socket drops.
+ *  Returns an unsubscribe function. Auto-reconnects. */
+export function connectWs(onStatus, onDown = () => {}) {
   let live = true;
   let ws = null;
   let retry = 1500;
+  let timer = null;
 
   const open = () => {
+    // A reconnect scheduled before an unsubscribe must not open a socket
+    // nobody closes.
+    if (!live) return;
     const wsBase = BASE
       ? BASE.replace(/^http/, 'ws')
       : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
@@ -73,7 +92,8 @@ export function connectWs(onStatus) {
     };
     ws.onclose = () => {
       if (!live) return;
-      setTimeout(open, retry);
+      onDown();
+      timer = setTimeout(open, retry);
       retry = Math.min(retry * 2, 15000); // backoff, capped at 15s
     };
     ws.onerror = () => ws && ws.close();
@@ -82,6 +102,7 @@ export function connectWs(onStatus) {
 
   return () => {
     live = false;
+    clearTimeout(timer);
     if (ws) ws.close();
   };
 }

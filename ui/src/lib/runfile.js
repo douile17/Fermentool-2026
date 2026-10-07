@@ -49,7 +49,8 @@ export function downloadSettings(settings) {
   a.href = url;
   a.download = fileName(picked.name);
   a.click();
-  URL.revokeObjectURL(url);
+  // Not at once: some browsers drop a download whose URL is gone before it starts.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 /** Parse an exported file's text: the known, valid fields only, or throws. */

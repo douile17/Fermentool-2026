@@ -34,12 +34,20 @@
     note: '',
     // run the three bursts and their weighing without a click (balance needed)
     auto: false,
+    // the page (tab, window) driving the automatic mode: only that one acts
+    auto_owner: null,
     // [{ run_id, weight_g, start_g }], at most three; start_g is the balance
     // reading just before the burst (null without a balance)
     bursts: [],
   });
 
   let d = $state(blank());
+  // This page's identity for the automatic mode: with the page open in two
+  // places (the desktop window and a browser tab), both used to start bursts
+  // and save their own copy of the draft over the other's.
+  const PAGE = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const autoHere = $derived(d.auto && d.auto_owner === PAGE);
+  const autoElsewhere = $derived(d.auto && d.auto_owner !== PAGE);
   let loaded = $state(false);
   let err = $state(null);
   let working = $state(false);
@@ -269,12 +277,13 @@
 
   async function setAuto(on) {
     d.auto = on;
+    d.auto_owner = on ? PAGE : null;
     err = null;
     await persist();
   }
 
   $effect(() => {
-    if (!d.auto || working || burstRunning) return;
+    if (!autoHere || working || burstRunning) return;
     if (complete) {
       setAuto(false);
       return;
@@ -290,6 +299,7 @@
           hint: 'Is the feed bottle on the balance, and the line drawing from it? Weigh this burst by hand, or redo it.',
         };
         d.auto = false;
+        d.auto_owner = null;
         persist();
       }
     } else if (canStartBurst) {
@@ -493,7 +503,8 @@
     a.href = URL.createObjectURL(blob);
     a.download = 'tubing-calibrations.csv';
     a.click();
-    URL.revokeObjectURL(a.href);
+    // Not at once: some browsers drop a download whose URL is gone before it starts.
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
   }
 
   const cvBad = (cv) => cv > CV_WARN_PCT;
@@ -632,7 +643,13 @@
         </p>
       {/if}
 
-      {#if d.auto}
+      {#if autoElsewhere}
+        <div class="actions">
+          <span class="live mono">Automatic mode is driving this calibration from another window.</span>
+          <button class="btn-ghost" onclick={() => setAuto(true)}>Take over here</button>
+          <button class="btn-ghost" onclick={() => setAuto(false)}>Stop automatic</button>
+        </div>
+      {:else if d.auto}
         <div class="actions">
           <span class="live mono">Automatic: {autoStep}</span>
           <button class="btn-ghost" onclick={() => setAuto(false)}>Stop automatic</button>

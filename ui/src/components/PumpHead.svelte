@@ -30,7 +30,11 @@
     return { x, y, w: hi(88) - x, h: hi(86) - y };
   });
 
-  let angle = $state(0);
+  // The rotor is turned straight on its element, not through a reactive
+  // value: that re-rendered the component every frame, for every glyph on
+  // screen, for the whole length of a run.
+  let rotor = $state(null);
+  let angle = 0;
 
   const reduced =
     typeof window !== 'undefined' &&
@@ -56,6 +60,7 @@
       const secPerTurn = 4 - f * 3.4;
       const dir = direction === 'ccw' ? -1 : 1;
       angle = (angle + dir * (360 / (secPerTurn * 1000)) * dt) % 360;
+      if (rotor) rotor.style.transform = `rotate(${angle}deg)`;
     };
 
     raf = requestAnimationFrame(step);
@@ -79,7 +84,7 @@
       <circle class="ring" cx="50" cy="50" r="29" />
     {/if}
 
-    <g class="rotor" style="transform: rotate({angle}deg)">
+    <g class="rotor" bind:this={rotor}>
       <!-- symmetric bbox so fill-box rotation stays centred on the ring -->
       <circle cx="50" cy="50" r="26" fill="none" stroke="none" />
       <circle class="hub" cx="50" cy="50" r="8" />

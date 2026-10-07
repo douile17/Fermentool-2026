@@ -58,6 +58,7 @@ Sur le PC de développement (Rust, Node, `cargo tauri` installés).
    l'ancien (sinon rien ne permet de savoir quelle version est installée) :
    - `Cargo.toml` : `[workspace.package] version = "x.y.z"`
    - `src-tauri/tauri.conf.json` : `"version": "x.y.z"`
+   - `ui/package.json` (et `ui/package-lock.json`) : `"version": "x.y.z"`
 3. **Tests** :
    ```sh
    cargo test --workspace --exclude fermentool-tauri

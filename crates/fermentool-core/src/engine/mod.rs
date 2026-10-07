@@ -395,11 +395,14 @@ pub struct ActiveStatus {
     /// The curve reached its end: the run is in its hold phase, the pump at
     /// the curve's final value, trim and journal still running, until Stop.
     pub curve_done: bool,
+    /// Who the run's alerts go to (Settings warns before removing them).
+    pub responsible: Option<String>,
 }
 
 struct ActiveRun {
     id: i64,
     name: String,
+    responsible: Option<String>,
     /// Past `duration_s`, see [`ActiveStatus::curve_done`].
     curve_done: bool,
     started_at: Timestamp,
@@ -1260,6 +1263,7 @@ impl<T: Transport> Engine<T> {
             kind: a.kind,
             name: a.name.clone(),
             curve_done: a.curve_done,
+            responsible: a.responsible.clone(),
         })
     }
 
@@ -1457,6 +1461,7 @@ impl<T: Transport> Engine<T> {
         self.active = Some(ActiveRun {
             id,
             name: cfg.name.clone(),
+            responsible: cfg.responsible.clone(),
             curve_done: false,
             started_at,
             spec,
@@ -2818,6 +2823,7 @@ impl<T: Transport> Engine<T> {
         self.active = Some(ActiveRun {
             id: run.id,
             name: run.name.clone(),
+            responsible: run.responsible.clone(),
             curve_done: run.kind == RunKind::Dosing && elapsed_s >= run.duration_s as f64,
             started_at: run.started_at,
             spec: run.curve,

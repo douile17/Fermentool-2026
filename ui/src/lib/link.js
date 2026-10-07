@@ -14,8 +14,16 @@
 //                      touch, the bar shows just the status line.
 export function linkState(status, connected) {
   const s = status;
-  if (!connected || !s)
-    return { tone: 'idle', label: 'Connecting to daemon…', short: 'Daemon…', connectable: false };
+  if (!s) return { tone: 'idle', label: 'Connecting to daemon…', short: 'Daemon…', connectable: false };
+  // It was there, and is not any more: what the page shows is from before.
+  if (!connected)
+    return {
+      tone: 'bad',
+      label: 'Daemon not responding: what is shown here may be out of date',
+      short: 'Daemon offline',
+      hint: 'Fermentool keeps trying to reach it. If it does not come back, start Fermentool again; a run that was going resumes from where its curve is.',
+      connectable: false,
+    };
   // Before anything else: the pump may be feeding with no run behind it.
   if (s.stop_pending)
     return {

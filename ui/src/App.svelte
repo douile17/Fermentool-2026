@@ -119,6 +119,10 @@
     return () => window.removeEventListener('resize', onResize);
   });
 
+  // `connected` must also go false: a daemon that stopped left the UI saying
+  // "Daemon online" with its last status frozen (a run still "running", its
+  // clock still advancing). The socket says when it drops; a health poll,
+  // answered without the control thread, catches a daemon gone silent.
   $effect(() => {
     get('/api/status')
       .then((s) => {
@@ -126,10 +130,27 @@
         app.connected = true;
       })
       .catch(() => {});
-    return connectWs((s) => {
-      app.status = s;
-      app.connected = true;
-    });
+    const stop = connectWs(
+      (s) => {
+        app.status = s;
+        app.connected = true;
+      },
+      () => (app.connected = false),
+    );
+    const health = setInterval(() => {
+      get('/api/health')
+        .then(() => {
+          if (!app.connected)
+            get('/api/status')
+              .then((s) => ((app.status = s), (app.connected = true)))
+              .catch(() => {});
+        })
+        .catch(() => (app.connected = false));
+    }, 5000);
+    return () => {
+      stop();
+      clearInterval(health);
+    };
   });
 
   // "run complete" pop-up: shows once per completed run per browser session.

@@ -80,7 +80,7 @@
   }
 
   $effect(() => {
-    get('/api/runs?limit=1000')
+    get('/api/runs?limit=100000')
       .then((r) => (runs = r))
       .catch((e) => (err = e.message));
   });
@@ -117,7 +117,9 @@
     try {
       const run = await get(`/api/runs/${id}`);
       const p = await post('/api/preview', { curve: run.curve, samples: 200 });
-      const ticks = await fetchAllTicks(id);
+      // A sample for the chart: the full journal (up to ~360k rows for a
+      // 100 h run) is only fetched for the CSV export.
+      const ticks = await get(`/api/runs/${id}/ticks?sample=3000`);
       const events = await get(`/api/runs/${id}/events?limit=100`);
       // Runs without the balance trim have no report (404): no summary then.
       const report = await get(`/api/runs/${id}/tracking`).catch(() => null);
@@ -153,9 +155,15 @@
     };
   }
 
+  // The curve shapes the New run form can rebuild. A step or custom curve
+  // (made through the API) would come back as a constant one.
+  const FORM_KINDS = ['linear', 'exponential', 'sigmoid', 'constant'];
+  const replayable = $derived(!!sel && FORM_KINDS.includes(sel.run.curve.params.kind));
+  const notReplayable = 'New run cannot rebuild this curve shape';
+
   // Seed NewRun from a past run's options and jump there.
   function runAgain() {
-    if (!sel) return;
+    if (!sel || !replayable) return;
     app.prefill = settingsOf(sel.run);
     app.tab = 'new';
   }
@@ -180,9 +188,8 @@
     deleting = false;
   }
 
-  // A 100 h run journals ~360k ticks; drawing them all is a 360k-segment SVG
-  // path that locks the tab. Downsample to a few thousand for the chart only,
-  // the CSV export still uses the full set.
+  // The detail holds a server-side sample (a few thousand ticks); thinned
+  // again here only if a caller ever hands it more.
   const chartActual = $derived.by(() => {
     if (!sel) return [];
     const t = sel.ticks;
@@ -215,9 +222,20 @@
 
   // A summary block (run, bottle weights, totals), a blank line, then one row
   // per journalled second with the balance reading and the delivered total.
-  function exportCsv() {
-    if (!sel) return;
+  let exporting = $state(false);
+  async function exportCsv() {
+    if (!sel || exporting) return;
     const { run, report } = sel;
+    exporting = true;
+    let ticks;
+    try {
+      ticks = await fetchAllTicks(run.id);
+    } catch (e) {
+      err = e.message;
+      exporting = false;
+      return;
+    }
+    exporting = false;
     const cell = (v) => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
@@ -252,7 +270,7 @@
     }
     rows.push([]);
     rows.push(['seq', 'wall_time', 'elapsed_s', 'target', 'written_ok', 'readback', 'balance_g', 'delivered_g']);
-    for (const t of sel.ticks) {
+    for (const t of ticks) {
       rows.push([
         t.seq, t.wall_time, t.elapsed_s, t.target, t.written_ok ? 1 : 0, t.readback ?? '',
         t.weight_g ?? '', t.delivered_g ?? '',
@@ -262,9 +280,10 @@
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${sel.run.name}-run${sel.run.id}.csv`;
+    a.download = `${run.name}-run${run.id}.csv`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Not at once: some browsers drop a download whose URL is gone before it starts.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 </script>
 
@@ -391,10 +410,12 @@
           </div>
         </div>
         <div class="hd-actions">
-          <button class="btn-ghost" onclick={exportCsv} title="Download the run's journal (one row per second)">
-            Export CSV
+          <button class="btn-ghost" disabled={exporting} onclick={exportCsv}
+            title="Download the run's journal (one row per second)">
+            {exporting ? 'Exporting…' : 'Export CSV'}
           </button>
-          <button class="btn-primary" onclick={runAgain} title="Open New run with this run's settings">
+          <button class="btn-primary" disabled={!replayable} onclick={runAgain}
+            title={replayable ? "Open New run with this run's settings" : notReplayable}>
             Run again
           </button>
         </div>
@@ -444,8 +465,8 @@
         <button class="btn-danger del" disabled={sel.run.status === 'running'} onclick={() => { deleteErr = null; confirmDelete = true; }}>
           Delete run
         </button>
-        <button class="btn-ghost" onclick={() => downloadSettings(settingsOf(sel.run))}
-          title="Save this run's settings to a file, to import later in New run">
+        <button class="btn-ghost" disabled={!replayable} onclick={() => downloadSettings(settingsOf(sel.run))}
+          title={replayable ? "Save this run's settings to a file, to import later in New run" : notReplayable}>
           Export settings
         </button>
         <button class="btn-ghost" onclick={closeSel}>Close</button>

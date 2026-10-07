@@ -32,8 +32,11 @@
   // Parse the run's t0 once per status change, not once per animation frame.
   const startedAtMs = $derived(active ? Date.parse(active.started_at) : NaN);
 
+  // The clocks stop with the daemon: a run whose daemon went silent must not
+  // look like it is still advancing.
   $effect(() => {
     const id = setInterval(() => {
+      if (!app.connected) return;
       now = Date.now();
       nowAnim = Date.now();
     }, 1000);
@@ -49,7 +52,7 @@
     let lastCommit = 0;
     const step = (t) => {
       raf = requestAnimationFrame(step);
-      if (t - lastCommit >= 66) {
+      if (app.connected && t - lastCommit >= 66) {
         lastCommit = t;
         nowAnim = Date.now();
       }
@@ -168,16 +171,24 @@
     return Math.max(0, Math.min(1, v / top));
   });
 
+  // Stopping ends the run for good (a stopped run is not resumed): asked in
+  // a small dialog of its own first, like a delete.
+  let confirmStop = $state(false);
   let stopping = $state(false);
+  let stopErr = $state(null);
   async function stop() {
     stopping = true;
-    err = null;
+    stopErr = null;
     try {
       await post(`/api/runs/${loadedId}/stop`);
+      confirmStop = false;
     } catch (e) {
-      err = e.message;
+      stopErr = e.message;
     }
     stopping = false;
+  }
+  function onKey(e) {
+    if (e.key === 'Escape' && confirmStop && !stopping) confirmStop = false;
   }
 
   // Bottle refill on a trimmed run: announce it, then "Done" once poured.
@@ -210,6 +221,28 @@
     stoppingPump = false;
   }
 </script>
+
+<svelte:window on:keydown={onKey} />
+
+{#if confirmStop && active && run}
+  <button class="backdrop" aria-label="Cancel" onclick={() => !stopping && (confirmStop = false)}></button>
+  <div class="layer">
+    <div class="modal card confirm" role="alertdialog" aria-modal="true" aria-labelledby="ft-stop">
+      <div class="eyebrow">Stop run</div>
+      <h2 id="ft-stop">Stop “{run.name}”?</h2>
+      <p class="lede">
+        {inHold
+          ? 'Its curve is done: the run is recorded completed and the pump stops.'
+          : 'The pump stops and the run is recorded stopped: it cannot be resumed.'}
+      </p>
+      {#if stopErr}<div class="err">{stopErr}</div>{/if}
+      <div class="modal-foot">
+        <button class="btn-danger" disabled={stopping} onclick={stop}>{stopping ? 'Stopping…' : 'Stop run'}</button>
+        <button class="btn-ghost" disabled={stopping} onclick={() => (confirmStop = false)}>Keep running</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if complete}
   <section class="card done">
@@ -308,7 +341,11 @@
         <div class="eyebrow">Feed profile | {run ? run.curve.params.kind : ''}</div>
         <h2>{run?.name ?? 'Loading…'}</h2>
       </div>
-      <span class="pill running">{inHold ? 'holding end value' : 'running'}</span>
+      {#if app.connected}
+        <span class="pill running">{inHold ? 'holding end value' : 'running'}</span>
+      {:else}
+        <span class="pill" title="The daemon does not answer: this is the last state it reported">no news</span>
+      {/if}
     </div>
 
     {#if err}<div class="err" style="margin-bottom:16px">{err}</div>{/if}
@@ -359,7 +396,7 @@
       </div>
 
       <div class="foot">
-        <button class="btn-danger" disabled={stopping} onclick={stop}>Stop run</button>
+        <button class="btn-danger" disabled={stopping} onclick={() => { stopErr = null; confirmStop = true; }}>Stop run</button>
         {#if active?.gravimetric_trim}
           {#if refilling}
             <button class="btn-ghost" disabled={refillBusy} onclick={() => refill(true)}>Refill done</button>
@@ -489,6 +526,26 @@
     .pill.complete,
     .live-dot { animation: none; }
   }
+
+  .backdrop {
+    position: fixed; inset: 0; border: none; padding: 0;
+    background: rgba(18, 41, 46, 0.28); cursor: default; z-index: 60;
+  }
+  .layer {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    padding: var(--s-5); z-index: 61; pointer-events: none;
+  }
+  .modal { box-shadow: var(--shadow-pop); pointer-events: auto; animation: pop 0.18s ease-out; }
+  @keyframes pop {
+    from { transform: scale(0.97); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
+  .confirm { max-width: 420px; }
+  .confirm h2 { font-size: 17px; margin: 6px 0 var(--s-3); }
+  .confirm .lede { margin: 0; color: var(--muted); font-size: 13px; }
+  .confirm .err { margin-top: var(--s-3); }
+  .modal-foot { display: flex; gap: var(--s-3); justify-content: flex-end; flex-wrap: wrap; margin-top: var(--s-5); }
+  @media (prefers-reduced-motion: reduce) { .modal { animation: none; } }
 
   .empty { text-align: center; }
   .empty h2 { font-size: 18px; margin: 6px 0; }

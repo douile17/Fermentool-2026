@@ -1,4 +1,5 @@
 <script>
+  import { app } from '../../lib/state.svelte.js';
   import { post } from '../../lib/api.js';
   import { loadConfig, patchConfig } from '../../lib/config.js';
   import SettingsCard from './SettingsCard.svelte';
@@ -40,11 +41,14 @@
 
   let stopErr = $state(null);
   let stopped = $state(false);
+  let confirmStop = $state(false);
+  const runName = $derived(app.status?.active?.name ?? null);
   async function shutdown() {
     stopErr = null;
     try {
       await post('/api/shutdown');
       stopped = true;
+      confirmStop = false;
     } catch (e) {
       stopErr = e.message;
     }
@@ -76,5 +80,23 @@
   err={stopErr}
   msg={stopped ? 'Daemon stopped. This page is now offline.' : null}
 >
-  <button class="btn-danger" disabled={stopped} onclick={shutdown}>Shut down daemon</button>
+  {#if confirmStop}
+    <p class="field-note confirm-note">
+      {runName
+        ? `Run “${runName}” is in progress: its regulation stops, the pump stays at its last speed, uncorrected and unrecorded, until the daemon is started again.`
+        : 'The page goes offline until the daemon is started again.'}
+      Shut it down?
+    </p>
+    <div class="row">
+      <button class="btn-danger" onclick={shutdown}>Shut down daemon</button>
+      <button class="btn-ghost" onclick={() => (confirmStop = false)}>Cancel</button>
+    </div>
+  {:else}
+    <button class="btn-danger" disabled={stopped} onclick={() => (confirmStop = true)}>Shut down daemon</button>
+  {/if}
 </SettingsCard>
+
+<style>
+  .confirm-note { margin-bottom: var(--s-3); color: var(--danger); }
+  .row { display: flex; gap: var(--s-3); flex-wrap: wrap; }
+</style>

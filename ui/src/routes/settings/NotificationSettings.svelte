@@ -1,4 +1,5 @@
 <script>
+  import { app } from '../../lib/state.svelte.js';
   import { post } from '../../lib/api.js';
   import { loadConfig, patchConfig } from '../../lib/config.js';
   import QRCode from 'qrcode';
@@ -25,6 +26,7 @@
           ntfy_topic: p.ntfy_topic ?? '',
           webhook: p.webhook ?? '',
           showTeams: !!p.webhook,
+          saved: { name: p.name, ntfy_topic: p.ntfy_topic ?? '', webhook: p.webhook ?? '' },
         }));
         loaded = true;
       })
@@ -34,7 +36,17 @@
   function addPerson() {
     people.push({ name: '', ntfy_topic: '', webhook: '', showTeams: false });
   }
+  // The person a running run's alerts go to: removing them silences that
+  // run, so it takes a second click.
+  let confirmRemove = $state(null);
+  const activeResponsible = $derived(app.status?.active?.responsible?.trim().toLowerCase() ?? null);
   function removePerson(i) {
+    const isResponsible = activeResponsible && people[i].name.trim().toLowerCase() === activeResponsible;
+    if (isResponsible && confirmRemove !== i) {
+      confirmRemove = i;
+      return;
+    }
+    confirmRemove = null;
     people.splice(i, 1);
   }
 
@@ -89,11 +101,13 @@
     if (hook && !hook.startsWith('https://')) return 'an https:// Teams webhook';
     return null;
   }
+  // A row being edited (a topic cleared to paste a new one) keeps its last
+  // saved channels meanwhile: dropping it removed the person, and a run they
+  // were responsible for stopped alerting them.
+  const current = (p) => ({ name: p.name.trim(), ntfy_topic: p.ntfy_topic.trim(), webhook: p.webhook.trim() });
   const snapshot = $derived(
     JSON.stringify({
-      people: people
-        .filter((p) => !missing(p))
-        .map((p) => ({ name: p.name.trim(), ntfy_topic: p.ntfy_topic.trim(), webhook: p.webhook.trim() })),
+      people: people.map((p) => (missing(p) ? p.saved : current(p))).filter(Boolean),
       ntfy_server: ntfyServer.trim() || 'https://ntfy.sh',
     }),
   );
@@ -116,6 +130,7 @@
     saveErr = null;
     try {
       await patchConfig((c) => (c.notify = JSON.parse(snap)));
+      for (const p of people) if (!missing(p)) p.saved = current(p);
       savedSnapshot = snap;
       saveState = 'saved';
     } catch (e) {
@@ -187,7 +202,14 @@
         <button class="btn-ghost" disabled={testing === i || !p.ntfy_topic.trim()}
                 onclick={() => testPerson(i, true)}
                 title="An alarm that comes back every minute until you press Acknowledge">Test alarm</button>
-        <button class="btn-ghost" onclick={() => removePerson(i)} aria-label="Remove {p.name}">Remove</button>
+        <button class={confirmRemove === i ? 'btn-danger' : 'btn-ghost'} onclick={() => removePerson(i)}
+                aria-label="Remove {p.name}">{confirmRemove === i ? 'Remove anyway' : 'Remove'}</button>
+        {#if confirmRemove === i}
+          <p class="pending">
+            {p.name.trim()} is responsible for the run in progress: once removed, its alerts go to nobody.
+            <button class="linkish" onclick={() => (confirmRemove = null)}>Keep</button>
+          </p>
+        {/if}
         {#if qrFor === i}
           <div class="qr">
             <div class="qr-img" role="img" aria-label="QR code to subscribe to {p.ntfy_topic}">{@html qrSvg}</div>
@@ -207,7 +229,9 @@
           <button class="linkish teams" onclick={() => (p.showTeams = true)}>+ Teams webhook (optional)</button>
         {/if}
         {#if missing(p)}
-          <p class="pending">Not saved yet: needs {missing(p)}.</p>
+          <p class="pending">
+            Not saved yet: needs {missing(p)}.{p.saved ? ' Meanwhile the last saved channels stay in use.' : ''}
+          </p>
         {/if}
       </div>
     {:else}

@@ -31,6 +31,10 @@
     markers = [],
   } = $props();
 
+  // Two charts can share a page (a run's curve and its weighed feed): each
+  // needs its own gradient id.
+  const fillId = `ftfill-${Math.random().toString(36).slice(2, 9)}`;
+
   const W = 960;
   const H = 240;
   // No horizontal inset: the plot spans the full width so it lines up edge to
@@ -165,7 +169,7 @@
   <svg viewBox="0 0 {W} {H}" preserveAspectRatio="xMidYMid meet" role="img"
        aria-label="Planned {unit} curve over {Math.round(durationS / 3600)} hours">
     <defs>
-      <linearGradient id="ftfill" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="var(--lime-300)" stop-opacity="0.42" />
         <stop offset="100%" stop-color="var(--lime-300)" stop-opacity="0" />
       </linearGradient>
@@ -177,7 +181,7 @@
     {/each}
 
     {#if area}
-      <path d={area} fill="url(#ftfill)" />
+      <path d={area} fill="url(#{fillId})" />
       <path d={line} fill="none" stroke="var(--teal-400)" stroke-width="2.25" />
     {/if}
 

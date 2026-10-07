@@ -190,6 +190,9 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .pill.running { background: color-mix(in srgb, var(--green-500) 16%, var(--surface)); color: var(--green-600); }
 .pill.completed { background: color-mix(in srgb, var(--teal-400) 18%, var(--surface)); color: var(--teal-700); }
 .pill.stopped, .pill.aborted { background: var(--danger-bg); color: var(--danger); }
+/* Journal levels (event.level): warnings amber, errors red, info grey. */
+.pill.warn { background: color-mix(in srgb, #d68b45 16%, var(--surface)); color: #a2621c; }
+.pill.error { background: var(--danger-bg); color: var(--danger); }
 
 pre {
   font-family: var(--mono); font-size: 12px;

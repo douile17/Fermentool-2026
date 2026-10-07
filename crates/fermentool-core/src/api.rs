@@ -357,7 +357,7 @@ fn default_limit() -> i64 {
 }
 
 async fn list_runs(State(s): State<AppState>, Query(q): Query<LimitQuery>) -> ApiResult<Response> {
-    let limit = q.limit.clamp(1, 1000);
+    let limit = q.limit.clamp(1, 100_000);
     let runs = s
         .db
         .call(move |db| db.list_runs(limit))
@@ -535,6 +535,10 @@ struct TickQuery {
     from: i64,
     #[serde(default = "i64_max")]
     to: i64,
+    /// About this many ticks spread over the whole run instead of a range
+    /// (`from`/`to` ignored), for a chart.
+    #[serde(default)]
+    sample: Option<i64>,
 }
 fn i64_max() -> i64 {
     i64::MAX
@@ -551,9 +555,13 @@ async fn get_ticks(
 ) -> ApiResult<Response> {
     let from = q.from.max(0);
     let to = q.to.min(from.saturating_add(MAX_TICKS_SPAN));
+    let sample = q.sample.map(|n| n.clamp(2, MAX_TICKS_SPAN));
     let ticks = s
         .db
-        .call(move |db| db.ticks(id, from, to))
+        .call(move |db| match sample {
+            Some(n) => db.ticks_sampled(id, n),
+            None => db.ticks(id, from, to),
+        })
         .await?
         .map_err(|e| ApiError::Conflict(e.to_string()))?;
     Ok(Json(ticks).into_response())

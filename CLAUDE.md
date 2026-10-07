@@ -47,8 +47,8 @@ else to install:
   `config.toml`) to the bundle `resources`, nor seed one from this PC's data
   dir: a fresh install must start with no runs. An update on a PC keeps that
   PC's own history.
-- **Bump the version on every export** (`Cargo.toml` workspace version and
-  `src-tauri/tauri.conf.json`): two builds with the same number cannot be told
+- **Bump the version on every export** (`Cargo.toml` workspace version,
+  `src-tauri/tauri.conf.json` and `ui/package.json`): two builds with the same number cannot be told
   apart on the target PC.
 - The NSIS pre-install hook (`src-tauri/installer/hooks.nsh`) stops a running
   daemon cleanly before copying (a locked exe is otherwise left at the old

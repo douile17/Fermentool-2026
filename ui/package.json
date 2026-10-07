@@ -1,7 +1,7 @@
 {
   "name": "fermentool-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.5",
   "type": "module",
   "description": "Fermentool web UI, built to static assets and embedded in the daemon binary",
   "scripts": {

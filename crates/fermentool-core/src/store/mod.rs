@@ -731,6 +731,21 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// About `max_points` of a run's ticks, one in N by `seq` plus the last,
+    /// for a chart: the detail of a 100 h run without its ~360k rows.
+    pub fn ticks_sampled(&self, run_id: i64, max_points: i64) -> Result<Vec<TickRow>> {
+        let n = self.tick_count(run_id)?;
+        let stride = ((n + max_points - 1) / max_points.max(1)).max(1);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TICK_COLS} FROM ticks
+             WHERE run_id = ?1
+               AND (seq % ?2 = 0 OR seq = (SELECT max(seq) FROM ticks WHERE run_id = ?1))
+             ORDER BY seq"
+        ))?;
+        let rows = stmt.query_map(params![run_id, stride], row_to_tick)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// `(elapsed_s, delivered_g)` of a run's ticks that carry a delivered
     /// mass, sampled in SQL to about `max_points` (one tick in N, plus the
     /// latest) and reading only those two columns: a 100 h run journals
@@ -1353,6 +1368,30 @@ mod tests {
         assert_eq!(pts.last(), Some(&(4_999.0, 2_499.5)), "the latest tick is kept");
         assert!(pts[0].0 <= 10.0, "starts near the first delivered tick: {:?}", pts[0]);
         assert!(pts.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn sampled_ticks_are_bounded_and_end_on_the_last() {
+        let s = Store::open_in_memory().unwrap();
+        let run = s.insert_run(&sample_run()).unwrap();
+        for seq in 0..1_001 {
+            s.append_tick(&NewTick {
+                run_id: run,
+                seq,
+                wall_time: ts("2026-09-01T09:30:01Z"),
+                elapsed_s: seq as f64,
+                target: 1.0,
+                written_ok: true,
+                readback: None,
+                note: None,
+                weight_g: None,
+                delivered_g: None,
+            })
+            .unwrap();
+        }
+        let t = s.ticks_sampled(run, 100).unwrap();
+        assert!(t.len() <= 101 && t.len() >= 90, "{}", t.len());
+        assert_eq!(t.last().unwrap().seq, 1_000);
     }
 
     #[test]
