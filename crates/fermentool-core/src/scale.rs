@@ -9,35 +9,133 @@
 //! Fermentool yet, `ScaleConfig` would need `parity`/`data_bits` fields.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fermentool_modbus::{Transport, TransportError};
 use serialport::{DataBits, Parity, StopBits};
 
 use crate::config::ScaleConfig;
-use crate::transport::{TransportKind, WatchdogTransport};
+use crate::transport::OPEN_WAIT;
 
 pub const SICS_IMMEDIATE: &[u8] = b"SI\r\n";
 
 /// Bound on one scale transaction, mirrors the pump's `OPEN_TIMEOUT`.
 pub const SCALE_OPEN_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// Open the configured scale on its own watchdog worker, like the pump's
-/// port, so a wedged balance read only ever blocks that worker. `None` when
-/// the port does not open: unlike the pump there is no sensible simulated
-/// scale, so a scale that isn't really there must look absent, not like a
-/// silently broken stand-in. Shared by boot (`main.rs`) and
-/// `Engine::recover_scale`.
-pub fn open_watchdogged(cfg: &ScaleConfig) -> Option<WatchdogTransport> {
+/// How often the poll thread asks the balance for a weight. The engine reads
+/// about once a second, so a reading is at most this old when it is used.
+pub const SCALE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A result older than this is not handed out: the poll thread is stuck in a
+/// syscall, and the caller must see a miss, not the last weight forever.
+const SCALE_MAX_AGE: Duration = Duration::from_millis(2500);
+
+/// Open the configured scale behind its own poll thread ([`PolledScale`]).
+/// `None` when the port does not open within [`OPEN_WAIT`]: unlike the pump
+/// there is no sensible simulated scale, so a scale that isn't really there
+/// must look absent, not like a silently broken stand-in. Shared by boot
+/// (`main.rs`) and `Engine::recover_scale`.
+pub fn open_polled(cfg: &ScaleConfig) -> Option<PolledScale> {
     let path = cfg.path.clone();
     let baud = cfg.baud;
-    let (watchdog, kind) = WatchdogTransport::spawn_with(Box::new(move || {
-        match SicsScale::open(&path, baud, SCALE_OPEN_TIMEOUT) {
-            Ok(s) => (Box::new(s) as Box<dyn Transport + Send>, Some(TransportKind::Serial(path))),
-            Err(_) => (Box::new(fermentool_modbus::SimPump::new(1)) as Box<dyn Transport + Send>, None),
+    PolledScale::spawn(
+        move || {
+            SicsScale::open(&path, baud, SCALE_OPEN_TIMEOUT)
+                .map(|s| Box::new(s) as Box<dyn Transport + Send>)
+        },
+        SCALE_POLL_INTERVAL,
+    )
+}
+
+/// The balance, read by a thread of its own. The thread asks for a weight
+/// every [`SCALE_POLL_INTERVAL`] and keeps the latest answer (or failure);
+/// [`Transport::transaction`] hands that answer out at once. A silent balance
+/// costs each SICS read its full timeout (1.5 s): done on the control thread,
+/// that held up every command behind it (the UI's History and Calibration
+/// pages took seconds to load whenever the balance was off). Here it only
+/// ever holds up this thread. A read that never returns (adapter yanked
+/// mid-syscall) leaves the thread parked; the stale-age check turns that into
+/// misses, and the link is dropped and reopened on a fresh thread.
+pub struct PolledScale {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    latest: Mutex<Option<(Instant, Result<Vec<u8>, TransportError>)>>,
+    stop: AtomicBool,
+}
+
+impl PolledScale {
+    /// Run `open` on a new thread, then poll what it opened. Waits at most
+    /// [`OPEN_WAIT`] for the open itself; `None` if it failed or took longer
+    /// (the thread then gives up on its own).
+    pub fn spawn<F>(open: F, interval: Duration) -> Option<Self>
+    where
+        F: FnOnce() -> Result<Box<dyn Transport + Send>, TransportError> + Send + 'static,
+    {
+        let shared = Arc::new(Shared { latest: Mutex::new(None), stop: AtomicBool::new(false) });
+        let (opened_tx, opened_rx) = mpsc::channel::<bool>();
+        let worker = Arc::clone(&shared);
+        let spawned = std::thread::Builder::new()
+            .name("scale-poll".into())
+            .spawn(move || {
+                let Ok(mut port) = open() else {
+                    let _ = opened_tx.send(false);
+                    return;
+                };
+                if opened_tx.send(true).is_err() || worker.stop.load(Ordering::SeqCst) {
+                    return; // the caller stopped waiting: nobody reads this link
+                }
+                while !worker.stop.load(Ordering::SeqCst) {
+                    let started = Instant::now();
+                    let reply = port.transaction(SICS_IMMEDIATE);
+                    *worker.latest.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), reply));
+                    // Sleep out the interval in short steps, so a dropped link
+                    // lets go of its COM port promptly.
+                    while !worker.stop.load(Ordering::SeqCst) && started.elapsed() < interval {
+                        std::thread::sleep(Duration::from_millis(20).min(interval));
+                    }
+                }
+                // `port` drops here: the COM port is closed.
+            });
+        if spawned.is_err() {
+            return None;
         }
-    }));
-    kind.map(|_| watchdog)
+        match opened_rx.recv_timeout(OPEN_WAIT) {
+            Ok(true) => Some(Self { shared }),
+            _ => {
+                shared.stop.store(true, Ordering::SeqCst);
+                None
+            }
+        }
+    }
+}
+
+impl Transport for PolledScale {
+    /// The latest weight the poll thread got, without waiting for the balance.
+    /// Only the weight query is served: nothing else is ever sent. A silent
+    /// balance is a `Timeout` (the port is fine, keep it: the thread sees the
+    /// balance come back); a thread stuck past [`SCALE_MAX_AGE`] is an `Io`
+    /// error, like a broken port: the link must be reopened.
+    fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+        if request != SICS_IMMEDIATE {
+            return Err(TransportError::Io("the polled scale only answers weight queries".into()));
+        }
+        match &*self.shared.latest.lock().unwrap_or_else(|p| p.into_inner()) {
+            Some((at, reply)) if at.elapsed() <= SCALE_MAX_AGE => reply.clone(),
+            Some(_) => Err(TransportError::Io("balance poll thread stuck".into())),
+            // Opened, first answer not in yet.
+            None => Err(TransportError::Timeout),
+        }
+    }
+}
+
+impl Drop for PolledScale {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+    }
 }
 
 pub struct SicsScale {
@@ -218,5 +316,103 @@ mod tests {
     #[test]
     fn rejects_an_overload_reply() {
         assert!(parse_sics_weight(b"S +\r\n").is_err());
+    }
+
+    // ---- the poll thread ----
+
+    /// Answers each read after `delay`, with a weight one gram lighter each
+    /// time; flags when it is dropped (the port closed).
+    struct FakeBalance {
+        delay: Duration,
+        weight: f64,
+        dropped: Arc<AtomicBool>,
+    }
+    impl Transport for FakeBalance {
+        fn transaction(&mut self, _: &[u8]) -> Result<Vec<u8>, TransportError> {
+            std::thread::sleep(self.delay);
+            self.weight -= 1.0;
+            Ok(format!("S S {:.1} g\r\n", self.weight).into_bytes())
+        }
+    }
+    impl Drop for FakeBalance {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn fake(delay: Duration, dropped: &Arc<AtomicBool>) -> Option<PolledScale> {
+        let dropped = Arc::clone(dropped);
+        PolledScale::spawn(
+            move || Ok(Box::new(FakeBalance { delay, weight: 1000.0, dropped }) as Box<dyn Transport + Send>),
+            Duration::from_millis(10),
+        )
+    }
+
+    fn wait_until(mut ok: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if ok() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn hands_out_the_latest_weight() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut s = fake(Duration::ZERO, &dropped).unwrap();
+        assert!(wait_until(|| s.transaction(SICS_IMMEDIATE).is_ok()));
+        let first = parse_sics_weight(&s.transaction(SICS_IMMEDIATE).unwrap()).unwrap().weight_g;
+        assert!(wait_until(|| {
+            parse_sics_weight(&s.transaction(SICS_IMMEDIATE).unwrap()).unwrap().weight_g < first
+        }));
+    }
+
+    #[test]
+    fn a_silent_balance_never_holds_up_the_caller() {
+        // Each read of this balance takes a full second: the caller still
+        // gets its answer (a miss) straight away.
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut s = fake(Duration::from_secs(1), &dropped).unwrap();
+        let t = Instant::now();
+        assert_eq!(s.transaction(SICS_IMMEDIATE), Err(TransportError::Timeout));
+        assert!(t.elapsed() < Duration::from_millis(50), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_stuck_poll_thread_reads_as_a_broken_link() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut s = fake(Duration::ZERO, &dropped).unwrap();
+        assert!(wait_until(|| s.transaction(SICS_IMMEDIATE).is_ok()));
+        // The poll thread wedged long ago: its last answer is not the weight now.
+        s.shared.stop.store(true, Ordering::SeqCst);
+        assert!(wait_until(|| dropped.load(Ordering::SeqCst)));
+        *s.shared.latest.lock().unwrap() =
+            Some((Instant::now() - SCALE_MAX_AGE - Duration::from_millis(1), Ok(b"S S 1.0 g\r\n".to_vec())));
+        // Not the last weight, and not a mere timeout either: reopen it.
+        assert!(matches!(s.transaction(SICS_IMMEDIATE), Err(TransportError::Io(_))));
+    }
+
+    #[test]
+    fn dropping_the_link_closes_the_port() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let s = fake(Duration::ZERO, &dropped).unwrap();
+        drop(s);
+        assert!(wait_until(|| dropped.load(Ordering::SeqCst)), "the port was never closed");
+    }
+
+    #[test]
+    fn a_port_that_will_not_open_is_no_link() {
+        let s = PolledScale::spawn(|| Err(TransportError::Io("no such port".into())), SCALE_POLL_INTERVAL);
+        assert!(s.is_none());
+    }
+
+    #[test]
+    fn only_weight_queries_are_served() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut s = fake(Duration::ZERO, &dropped).unwrap();
+        assert!(s.transaction(b"Z\r\n").is_err());
     }
 }

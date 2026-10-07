@@ -327,6 +327,12 @@ const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
 const TICK_COLS: &str =
     "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note, weight_g, delivered_g";
 
+/// `app_state` key holding the in-progress tubing calibration session (the
+/// UI's own JSON), so a page refresh or daemon restart resumes it. Empty value
+/// = no session. One key is enough: like a run, only one calibration is ever
+/// in progress.
+pub const CALIBRATION_DRAFT_KEY: &str = "calibration_draft";
+
 const EVENT_COLS: &str = "id, run_id, wall_time, level, kind, detail";
 
 impl Store {
@@ -342,6 +348,10 @@ impl Store {
     }
 
     fn from_connection(conn: Connection) -> Result<Self> {
+        // Several connections share the file (the control thread's journal,
+        // the API's, the notifier's): a write that meets another one waits
+        // for it, briefly, instead of failing at once with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;

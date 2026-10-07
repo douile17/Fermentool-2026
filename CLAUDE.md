@@ -135,6 +135,23 @@ be stuck in a syscall forever) and spawn a fresh one on a clean handle.
 a stuck syscall can only block that one call, never the daemon.** Don't assume
 a configured timeout will actually fire at the OS level.
 
+Bounded is not enough either: the control thread serves every command one at
+a time, so a wait that is merely *slow* (a silent balance costs each SICS read
+its 1.5 s timeout) queued the whole UI behind it (History and Calibration took
+seconds to load with the balance off). Hence:
+- The balance is a `scale::PolledScale`: its own `scale-poll` thread asks for
+  a weight every 500 ms and keeps the latest answer; the engine's read returns
+  it at once. A silent balance is a `Timeout` (keep the link, the thread sees
+  it come back), a stuck thread or broken port an `Io` error (reopen). A
+  reopened port is `scale_unconfirmed` until a weight arrives: an open COM
+  port is not a connected balance, and counting it as one made a switched-off
+  balance flap lost/recovered every 20 s.
+- The API reads the journal on its own SQLite connection (`api::ApiDb`, via
+  `spawn_blocking`): runs, ticks, events, tracking, calibrations and the
+  calibration draft never go through the control thread. Only what needs the
+  live engine (start/stop, delete a run, status, scale/serial changes) does.
+  Every connection has a 5 s `busy_timeout`.
+
 ## Crash-resume clock anchor
 
 `run_now()` (`control.rs`) has a clock-step guard: it compares wall-clock

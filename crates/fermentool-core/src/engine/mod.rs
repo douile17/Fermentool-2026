@@ -491,12 +491,19 @@ pub struct Engine<T: Transport> {
     /// The `[scale]` config `scale` was attached from, kept so
     /// [`recover_scale`](Self::recover_scale) can reopen the same port later.
     scale_cfg: ScaleConfig,
+    /// How [`recover_scale`](Self::recover_scale) opens the port:
+    /// [`open_scale`] for the real balance, a stand-in in tests.
+    scale_open: fn(&ScaleConfig) -> Option<Box<dyn Transport + Send>>,
     /// Dimensionless correction multiplied onto every curve setpoint:
     /// `target = curve.value_at(elapsed) * trim_c`. `1.0` is a no-op, the
     /// value while `gravimetric_trim` is off (or unset) on the active run.
     trim_c: f64,
     scale_state: trim::ScaleState,
     scale_read_fails: u32,
+    /// `true` from a reopen of the port until the balance answers on it: a
+    /// COM port opens whether or not a balance is on the other end, so only
+    /// a weight shows the link is back (see [`scale_link_up`](Self::scale_link_up)).
+    scale_unconfirmed: bool,
     /// `false` once the tracker alarms (the pump stayed out of what c can
     /// correct for `tracking::ALARM_AFTER_SATURATED_UPDATES` updates).
     /// Sticky until the next `start_run`. A down link is tracked separately
@@ -763,6 +770,8 @@ impl<T: Transport> Engine<T> {
             trim_c,
             scale_state,
             scale_read_fails: 0,
+            scale_unconfirmed: false,
+            scale_open: open_scale,
             scale_ok: true,
             refill_weight_g,
             refill_at,
@@ -1109,10 +1118,10 @@ impl<T: Transport> Engine<T> {
             journal_ok: self.journal_fails < JOURNAL_STALL_LIMIT,
             simulator: self.on_simulator(),
             allow_simulator: self.allow_simulator,
-            scale_ok: !scale_shown || (self.scale_ok && !self.scale_link_down()),
-            scale_connected: scale_shown.then(|| !self.scale_link_down()),
-            scale_weight_g: self.live_weight.filter(|_| !self.scale_link_down()).map(|(w, _)| w),
-            scale_stable: self.live_weight.filter(|_| !self.scale_link_down()).map(|(_, s)| s),
+            scale_ok: !scale_shown || (self.scale_ok && self.scale_link_up()),
+            scale_connected: scale_shown.then(|| self.scale_link_up()),
+            scale_weight_g: self.live_weight.filter(|_| self.scale_link_up()).map(|(w, _)| w),
+            scale_stable: self.live_weight.filter(|_| self.scale_link_up()).map(|(_, s)| s),
             scale_state: scale_shown.then_some(self.scale_state),
             trim_c: scale_shown.then_some(self.trim_c),
             rate_g_per_min: scale_shown.then_some(self.last_rate_g_per_min).flatten(),
@@ -1600,37 +1609,26 @@ impl<T: Transport> Engine<T> {
     /// One balance read, shared by [`scale_tick`](Self::scale_tick) and
     /// [`probe_scale`](Self::probe_scale): updates the live weight and the
     /// read-failure streak. `None` on any failure, or without asking at all
-    /// once the link is known down: each failed read can cost up to the
-    /// watchdog's timeout on the shared control thread, which would starve
-    /// the pump's 150 ms setpoint cadence. `recover_scale`, on its own
-    /// backoff, owns bringing the link back. A good read never clears
-    /// `scale_ok`: that alarm is sticky until `start_run`.
+    /// once the link is known down: `recover_scale`, on its own backoff, owns
+    /// bringing the link back. (The real balance is a [`scale::PolledScale`],
+    /// so a read never waits on the device; a test transport may.) A good
+    /// read never clears `scale_ok`: that alarm is sticky until `start_run`.
     fn read_scale(&mut self) -> Option<(f64, bool)> {
         if self.scale_link_down() {
             return None;
         }
-        let reply = self
-            .scale
-            .as_mut()?
-            .transaction(scale::SICS_IMMEDIATE)
-            .map_err(scale::ScaleError::from)
-            .and_then(|r| scale::parse_sics_weight(&r));
-        match reply {
-            Ok(r) => {
-                let reading = (r.weight_g, r.stable);
-                self.scale_read_fails = 0;
-                self.scale_resolution_g = r.resolution_g;
-                self.live_weight = Some(reading);
-                Some(reading)
-            }
+        match self.ask_scale()? {
+            Ok(r) => Some(self.took_scale_reading(r)),
             Err(e) => {
                 // Log the first failure of a streak and the one that takes
                 // the link down: enough to see why, without a line a second.
-                if self.scale_read_fails == 0 {
+                // A just-reopened port that stays silent is the recovery's
+                // business, already logged once for the whole outage.
+                if self.scale_read_fails == 0 && !self.scale_unconfirmed {
                     tracing::warn!("{e}");
                 }
                 self.scale_read_fails = self.scale_read_fails.saturating_add(1);
-                if self.scale_read_fails == REOPEN_AFTER_WRITE_FAILS {
+                if self.scale_read_fails == REOPEN_AFTER_WRITE_FAILS && !self.scale_unconfirmed {
                     tracing::warn!("{e}; balance link down after {REOPEN_AFTER_WRITE_FAILS} failed reads");
                 }
                 self.live_weight = None;
@@ -1639,91 +1637,124 @@ impl<T: Transport> Engine<T> {
         }
     }
 
+    /// Ask the attached balance for a weight; `None` without one.
+    fn ask_scale(&mut self) -> Option<std::result::Result<scale::SicsReading, scale::ScaleError>> {
+        Some(
+            self.scale
+                .as_mut()?
+                .transaction(scale::SICS_IMMEDIATE)
+                .map_err(scale::ScaleError::from)
+                .and_then(|r| scale::parse_sics_weight(&r)),
+        )
+    }
+
+    /// A weight came back: the link is up (and confirmed, after a reopen).
+    fn took_scale_reading(&mut self, r: scale::SicsReading) -> (f64, bool) {
+        let reading = (r.weight_g, r.stable);
+        self.scale_read_fails = 0;
+        self.scale_unconfirmed = false;
+        self.scale_resolution_g = r.resolution_g;
+        self.live_weight = Some(reading);
+        reading
+    }
+
     /// Chart, R² and fitted µ for a run, from its journal. `None` when the
     /// run has no delivered-mass data (no balance, or not trimmed). Volumes
     /// use the configured feed density.
     pub fn tracking_report(&self, run_id: i64) -> Result<Option<TrackingReport>> {
-        let Some(run) = self.store.run(run_id)? else {
-            return Ok(None);
-        };
-        let ticks = self.store.delivery_samples(run_id, 1999)?; // + the latest tick: <= 2000
-        if ticks.len() < 2 {
-            return Ok(None);
-        }
-        let rho = self.scale_density_g_per_ml;
-        let ml_per_unit = match (run.control_var, run.tubing_calibration_id) {
-            (ControlVar::Rpm, Some(cal_id)) => self
-                .store
-                .calibration(cal_id)?
-                .map_or(1.0, |c| calibration_ml_per_rpm(&c)),
-            _ => 1.0,
-        };
-        let sampled = ticks;
-        let mut required_ml = Vec::with_capacity(sampled.len());
-        let (mut acc, mut prev) = (0.0, 0.0);
-        for &(t, _) in &sampled {
-            acc += integrate_curve_mass(&run.curve, prev, t, rho, ml_per_unit) / rho;
-            required_ml.push(acc);
-            prev = t;
-        }
-        let delivered_ml: Vec<f64> = sampled.iter().map(|&(_, d)| d / rho).collect();
-        let req_end = required_ml.last().copied().unwrap_or(0.0);
-        let del_end = delivered_ml.last().copied().unwrap_or(0.0);
-        let mu_requested = tracking::requested_mu_per_hour(&run.curve);
-        let mu_delivered = mu_requested.and_then(|mu| {
-            let pts: Vec<(f64, f64)> = sampled
-                .iter()
-                .zip(&delivered_ml)
-                .map(|(&(t, _), &v)| (t / 3600.0, v))
-                .collect();
-            tracking::fit_exponential_mu(&pts, mu)
-        });
-        let events = self.store.events(Some(run_id), 10_000)?;
-        let at = |e: &EventRow| e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0);
-        let markers = events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind.as_str(),
-                    "trim_start"
-                        | "trim_ratio"
-                        | "alarm_feed_stopped"
-                        | "alarm_saturated"
-                        | "alarm_wrong_side"
-                        | "alarm_cleared"
-                        | "refill"
-                )
-            })
-            .map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() })
-            .collect();
-        let mut refills: Vec<RefillRecord> = events
-            .iter()
-            .filter(|e| e.kind == "refill")
-            .filter_map(|e| {
-                let (before_g, after_g) = parse_refill(e.detail.as_deref()?)?;
-                Some(RefillRecord { t_s: at(e), before_g, after_g })
-            })
-            .collect();
-        refills.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
-        let (weight_start_g, weight_end_g) = self.store.weight_bounds(run_id)?;
-        Ok(Some(TrackingReport {
-            markers,
-            weight_start_g,
-            weight_end_g,
-            refills,
-            points: sampled
-                .iter()
-                .zip(required_ml.iter().zip(&delivered_ml))
-                .map(|(&(t, _), (&r, &d))| [t, r, d])
-                .collect(),
-            r_squared: tracking::r_squared(&required_ml, &delivered_ml),
-            deficit_ml: req_end - del_end,
-            deficit_pct: (req_end > 0.0).then(|| 100.0 * (req_end - del_end) / req_end),
-            mu_requested,
-            mu_delivered,
-        }))
+        tracking_report(&self.store, run_id, self.scale_density_g_per_ml)
     }
+}
 
+/// The real balance: the configured port behind its poll thread.
+fn open_scale(cfg: &ScaleConfig) -> Option<Box<dyn Transport + Send>> {
+    scale::open_polled(cfg).map(|s| Box::new(s) as Box<dyn Transport + Send>)
+}
+
+/// [`Engine::tracking_report`] from any connection to the journal: the API
+/// builds it on its own, off the control thread. `rho` is the feed density
+/// (g/mL) the volumes are counted in.
+pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<TrackingReport>> {
+    let Some(run) = store.run(run_id)? else {
+        return Ok(None);
+    };
+    let ticks = store.delivery_samples(run_id, 1999)?; // + the latest tick: <= 2000
+    if ticks.len() < 2 {
+        return Ok(None);
+    }
+    let ml_per_unit = match (run.control_var, run.tubing_calibration_id) {
+        (ControlVar::Rpm, Some(cal_id)) => store
+            .calibration(cal_id)?
+            .map_or(1.0, |c| calibration_ml_per_rpm(&c)),
+        _ => 1.0,
+    };
+    let sampled = ticks;
+    let mut required_ml = Vec::with_capacity(sampled.len());
+    let (mut acc, mut prev) = (0.0, 0.0);
+    for &(t, _) in &sampled {
+        acc += integrate_curve_mass(&run.curve, prev, t, rho, ml_per_unit) / rho;
+        required_ml.push(acc);
+        prev = t;
+    }
+    let delivered_ml: Vec<f64> = sampled.iter().map(|&(_, d)| d / rho).collect();
+    let req_end = required_ml.last().copied().unwrap_or(0.0);
+    let del_end = delivered_ml.last().copied().unwrap_or(0.0);
+    let mu_requested = tracking::requested_mu_per_hour(&run.curve);
+    let mu_delivered = mu_requested.and_then(|mu| {
+        let pts: Vec<(f64, f64)> = sampled
+            .iter()
+            .zip(&delivered_ml)
+            .map(|(&(t, _), &v)| (t / 3600.0, v))
+            .collect();
+        tracking::fit_exponential_mu(&pts, mu)
+    });
+    let events = store.events(Some(run_id), 10_000)?;
+    let at = |e: &EventRow| e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0);
+    let markers = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                "trim_start"
+                    | "trim_ratio"
+                    | "alarm_feed_stopped"
+                    | "alarm_saturated"
+                    | "alarm_wrong_side"
+                    | "alarm_cleared"
+                    | "refill"
+            )
+        })
+        .map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() })
+        .collect();
+    let mut refills: Vec<RefillRecord> = events
+        .iter()
+        .filter(|e| e.kind == "refill")
+        .filter_map(|e| {
+            let (before_g, after_g) = parse_refill(e.detail.as_deref()?)?;
+            Some(RefillRecord { t_s: at(e), before_g, after_g })
+        })
+        .collect();
+    refills.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
+    let (weight_start_g, weight_end_g) = store.weight_bounds(run_id)?;
+    Ok(Some(TrackingReport {
+        markers,
+        weight_start_g,
+        weight_end_g,
+        refills,
+        points: sampled
+            .iter()
+            .zip(required_ml.iter().zip(&delivered_ml))
+            .map(|(&(t, _), (&r, &d))| [t, r, d])
+            .collect(),
+        r_squared: tracking::r_squared(&required_ml, &delivered_ml),
+        deficit_ml: req_end - del_end,
+        deficit_pct: (req_end > 0.0).then(|| 100.0 * (req_end - del_end) / req_end),
+        mu_requested,
+        mu_delivered,
+    }))
+}
+
+impl<T: Transport> Engine<T> {
     /// Balance read, about once a second from the control loop: keeps the
     /// live weight on screen and notices an unplugged balance between runs.
     /// During a calibration burst it also puts the weight in each journal
@@ -2289,6 +2320,13 @@ impl<T: Transport> Engine<T> {
         self.scale.is_none() || self.scale_read_fails >= REOPEN_AFTER_WRITE_FAILS
     }
 
+    /// The balance is attached and answering: not down, and not a reopened
+    /// port still waiting for its first weight. What the status frame shows
+    /// as connected, and what ends an outage for the control loop.
+    pub fn scale_link_up(&self) -> bool {
+        !self.scale_link_down() && !self.scale_unconfirmed
+    }
+
     /// Whether the control loop should try to reopen the scale now: it is
     /// configured, its link is down, and either no run is active or the
     /// active run wants the trim. Idle retries matter because a trimmed run
@@ -2300,26 +2338,49 @@ impl<T: Transport> Engine<T> {
             && self.active.as_ref().is_none_or(|a| a.gravimetric_trim)
     }
 
-    /// The scale's counterpart to [`recover_serial`](Self::recover_serial):
-    /// reopen the configured port from scratch. No simulator fallback, a
-    /// failed attempt leaves `self.scale` as it was and returns `false` so the
-    /// caller retries on its own backoff. Returns `true` without doing
-    /// anything when no scale is configured or the link is healthy.
+    /// The scale's counterpart to [`recover_serial`](Self::recover_serial).
+    /// First asks the link already held: a balance switched back on answers
+    /// there, and one that is merely silent keeps that link (`false`). Only a
+    /// broken link (I/O error, stuck poll thread) or none at all is reopened
+    /// from scratch. No simulator fallback. Returns `true` when a weight came
+    /// back or the port reopened, `false` otherwise; either way the link counts as up only
+    /// once a weight arrives ([`scale_link_up`](Self::scale_link_up)): a COM
+    /// port opens whether or not a balance answers on it, and treating that
+    /// as a recovery made a switched-off balance flap "lost"/"recovered"
+    /// every few seconds. Returns `true` without doing anything when no scale
+    /// is configured or the link is not down.
     pub fn recover_scale(&mut self) -> bool {
         if !self.scale_wanted() || !self.scale_link_down() {
             return true;
         }
+        match self.ask_scale() {
+            Some(Ok(r)) => {
+                self.took_scale_reading(r);
+                return true;
+            }
+            // A silent balance on a port that works (switched off, its own
+            // cable out): the poll thread keeps asking and will see it back.
+            // Reopening would only fight that thread for the COM port.
+            Some(Err(scale::ScaleError::Transport(fermentool_modbus::TransportError::Timeout))) => {
+                return false;
+            }
+            // No link, a broken port, a stuck poll thread, garbage: reopen.
+            _ => {}
+        }
         // Let go of the stale link first: a COM port is exclusive on Windows,
-        // so opening it again while the old worker still holds it always
-        // fails. The worker closes it asynchronously; if this attempt is too
-        // early, the next retry (1 s later) gets the port.
+        // so opening it again while the old poll thread still holds it fails.
+        // The thread closes it asynchronously; if this attempt is too early,
+        // the next retry gets the port.
         self.scale = None;
-        let Some(watchdog) = scale::open_watchdogged(&self.scale_cfg) else {
+        self.live_weight = None;
+        let Some(link) = (self.scale_open)(&self.scale_cfg) else {
             return false;
         };
-        self.scale = Some(Box::new(watchdog));
-        self.scale_read_fails = 0;
-        self.live_weight = None;
+        self.scale = Some(link);
+        // One read decides: a weight confirms the link, a miss puts it back
+        // down (without a new five-read streak) for the next retry.
+        self.scale_read_fails = REOPEN_AFTER_WRITE_FAILS - 1;
+        self.scale_unconfirmed = true;
         true
     }
 
@@ -2355,17 +2416,31 @@ impl<T: Transport> Engine<T> {
         }
         let had_link = self.scale.take().is_some();
         self.scale_read_fails = 0;
+        self.scale_unconfirmed = false;
         self.live_weight = None;
         self.attach_scale(None, cfg);
         if !self.scale_wanted() {
             return Ok(false);
         }
         if had_link {
-            // The old worker closes its port asynchronously; reopening the
-            // same COM port before that fails with "access denied".
+            // The old poll thread closes its port asynchronously; reopening
+            // the same COM port before that fails with "access denied".
             std::thread::sleep(Duration::from_millis(300));
         }
-        Ok(self.recover_scale() && !self.scale_link_down())
+        if !self.recover_scale() {
+            return Ok(false);
+        }
+        // Settings tells the operator whether the balance answers: give the
+        // new link its first read (one SICS timeout, bounded) before saying.
+        let deadline = std::time::Instant::now() + scale::SCALE_OPEN_TIMEOUT + Duration::from_millis(300);
+        while self.scale_unconfirmed && std::time::Instant::now() < deadline {
+            if let Some(Ok(r)) = self.ask_scale() {
+                self.took_scale_reading(r);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(self.scale_link_up())
     }
 
     #[cfg(test)]
@@ -2373,6 +2448,10 @@ impl<T: Transport> Engine<T> {
         self.scale = Some(t);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_scale_opener_for_test(&mut self, open: fn(&ScaleConfig) -> Option<Box<dyn Transport + Send>>) {
+        self.scale_open = open;
+    }
 
     #[cfg(test)]
     pub(crate) fn trim_c(&self) -> f64 {
@@ -3368,12 +3447,12 @@ mod tests {
         assert!(e.recover_scale());
     }
 
-    /// Always times out; flags when the engine lets go of it (the worker
-    /// closing its COM port, in the real transport).
+    /// Always fails with an I/O error (the adapter is gone); flags when the
+    /// engine lets go of it (the poll thread closing its COM port, for real).
     struct DropFlagScale(std::sync::Arc<std::sync::atomic::AtomicBool>);
     impl Transport for DropFlagScale {
         fn transaction(&mut self, _: &[u8]) -> std::result::Result<Vec<u8>, fermentool_modbus::TransportError> {
-            Err(fermentool_modbus::TransportError::Timeout)
+            Err(fermentool_modbus::TransportError::Io("device removed".into()))
         }
     }
     impl Drop for DropFlagScale {
@@ -3383,7 +3462,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_scale_releases_the_stale_link_before_reopening_the_port() {
+    fn recover_scale_releases_a_broken_link_before_reopening_the_port() {
         // A COM port is exclusive on Windows: reopening it while the stale
         // link still holds it fails every time, so an idle balance that
         // missed a few reads stayed "disconnected" for good.
@@ -3409,6 +3488,96 @@ mod tests {
         assert!(e.scale_link_down());
         assert!(!e.recover_scale());
         assert!(e.scale_link_down());
+    }
+
+    /// A balance switched off: its COM port (the USB adapter) still opens.
+    fn open_silent(_: &ScaleConfig) -> Option<Box<dyn Transport + Send>> {
+        Some(Box::new(ScriptedScale::new(&[])))
+    }
+
+    fn open_answering(_: &ScaleConfig) -> Option<Box<dyn Transport + Send>> {
+        Some(Box::new(ScriptedScale::new(&[640.0, 640.0, 640.0])))
+    }
+
+    fn open_never(_: &ScaleConfig) -> Option<Box<dyn Transport + Send>> {
+        panic!("nothing to reopen here")
+    }
+
+    /// A link whose port broke (adapter pulled).
+    fn broken() -> Box<dyn Transport + Send> {
+        Box::new(DropFlagScale(Default::default()))
+    }
+
+    fn take_down(e: &mut Engine<SimPump>) {
+        for _ in 0..REOPEN_AFTER_WRITE_FAILS {
+            e.probe_scale();
+        }
+        assert!(e.scale_link_down());
+    }
+
+    #[test]
+    fn a_reopened_port_is_no_balance_until_a_weight_comes_back() {
+        // The bug: a reopen counted as a recovery, so a switched-off balance
+        // read "connected", then failed five fresh reads, every few seconds.
+        let mut e = engine();
+        e.attach_scale(Some(broken()), scale_cfg("COM-silent"));
+        e.set_scale_opener_for_test(open_silent);
+        take_down(&mut e);
+        assert!(e.recover_scale(), "the port reopened");
+        assert!(!e.scale_link_down(), "one read is allowed on the new link");
+        assert!(!e.scale_link_up());
+        assert_eq!(e.status().scale_connected, Some(false), "not shown connected on an open port");
+        e.probe_scale();
+        assert!(e.scale_link_down(), "a single miss puts it back down, no new five-read streak");
+        assert!(e.scale_recovery_wanted());
+        // Still silent: the link is kept for its poll thread, not reopened.
+        e.set_scale_opener_for_test(open_never);
+        assert!(!e.recover_scale());
+    }
+
+    #[test]
+    fn a_silent_balance_keeps_its_link() {
+        // Switched off: the port is fine. Reopening it would fight the poll
+        // thread (still holding it) for the COM port on every retry.
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[]))), scale_cfg("COM-off"));
+        e.set_scale_opener_for_test(open_never);
+        take_down(&mut e);
+        assert!(!e.recover_scale());
+        assert!(e.scale_link_down());
+        assert_eq!(e.status().scale_connected, Some(false));
+    }
+
+    #[test]
+    fn a_reopened_port_that_answers_is_the_balance_back() {
+        let mut e = engine();
+        e.attach_scale(Some(broken()), scale_cfg("COM-back"));
+        e.set_scale_opener_for_test(open_answering);
+        take_down(&mut e);
+        assert!(e.recover_scale());
+        e.probe_scale();
+        assert!(e.scale_link_up());
+        let st = e.status();
+        assert_eq!(st.scale_connected, Some(true));
+        assert_eq!(st.scale_weight_g, Some(640.0));
+    }
+
+    #[test]
+    fn a_balance_back_on_the_held_link_needs_no_reopen() {
+        // Switched off, then on again: the link held all along answers.
+        fn never_called(_: &ScaleConfig) -> Option<Box<dyn Transport + Send>> {
+            panic!("the held link answered, nothing to reopen")
+        }
+        let mut e = engine();
+        let mut replies: std::collections::VecDeque<_> =
+            (0..REOPEN_AFTER_WRITE_FAILS).map(|_| Err(fermentool_modbus::TransportError::Timeout)).collect();
+        replies.push_back(Ok(b"S S      512.0 g\r\n".to_vec()));
+        e.attach_scale(Some(Box::new(ScriptedScale { replies })), scale_cfg("COM-held"));
+        e.set_scale_opener_for_test(never_called);
+        take_down(&mut e);
+        assert!(e.recover_scale());
+        assert!(e.scale_link_up());
+        assert_eq!(e.status().scale_weight_g, Some(512.0));
     }
 
     // ---- scale settings from the UI ----

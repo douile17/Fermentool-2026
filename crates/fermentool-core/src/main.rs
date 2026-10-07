@@ -169,11 +169,11 @@ fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<WatchdogTransp
 /// Boot the scale link, or `None` if `[scale]` is unconfigured or the port
 /// did not open. A configured scale that is down at boot is not fatal: the
 /// control loop keeps retrying it (`Engine::recover_scale`).
-fn build_scale(cfg: &config::ScaleConfig) -> Option<WatchdogTransport> {
+fn build_scale(cfg: &config::ScaleConfig) -> Option<scale::PolledScale> {
     if !cfg.configured() {
         return None;
     }
-    let scale = scale::open_watchdogged(cfg);
+    let scale = scale::open_polled(cfg);
     if scale.is_none() {
         tracing::warn!(
             "cannot open scale {}; gravimetric trim unavailable, retrying in the background",
@@ -220,6 +220,8 @@ async fn main() -> anyhow::Result<()> {
     let (events, _) = broadcast::channel(64);
     let control = Arc::new(control::spawn(engine, config.grace(), events.clone()));
     let shutdown = Arc::new(Notify::new());
+    // Opened after the engine's, which has already migrated the file.
+    let db = Arc::new(api::ApiDb::new(Store::open(&paths.db).context("open journal for the API")?));
 
     let state = AppState {
         control: Arc::clone(&control),
@@ -228,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown: Arc::clone(&shutdown),
         events,
         pages: notify::Pages::default(),
+        db,
     };
     // Notifications follow the journal on their own thread, reading the
     // people/channels from the live config (Settings edits apply at once).

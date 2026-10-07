@@ -1,7 +1,11 @@
 //! The daemon's HTTP API (axum), bound to `127.0.0.1` only.
 //!
-//! Every route that touches the run forwards a [`Command`] to the control thread
-//! and awaits its reply; nothing here touches the pump or the database directly.
+//! Every route that touches the run or the pump forwards a [`Command`] to the
+//! control thread and awaits its reply. Reading the journal (history, ticks,
+//! events, tracking, calibrations) and the calibration records go through the
+//! API's own SQLite connection instead ([`ApiDb`]): the control thread also
+//! talks to the pump and the balance, and a page of history must never wait
+//! behind a device that is slow to answer.
 //! Milestone 7 is REST + polling; the WebSocket push and static-UI serving land
 //! with the UI (milestone 8).
 
@@ -24,7 +28,7 @@ use fermentool_modbus::serial::available_ports;
 use crate::config::Config;
 use crate::control::{Command, ControlHandle, DaemonStatus};
 use crate::engine::{ErrDetail, RunConfig};
-use crate::store::{NewCalibration, RunKind, RunStatus, StoreError};
+use crate::store::{NewCalibration, RunKind, RunStatus, Store, StoreError, CALIBRATION_DRAFT_KEY};
 
 /// The built Svelte UI (`ui/dist/`), baked into the binary. The folder path is
 /// resolved relative to this crate's `Cargo.toml`.
@@ -43,6 +47,30 @@ pub struct AppState {
     pub events: broadcast::Sender<DaemonStatus>,
     /// Alarms ringing until acknowledged, shared with the notifier.
     pub pages: crate::notify::Pages,
+    /// The API's own connection to the journal.
+    pub db: Arc<ApiDb>,
+}
+
+/// The API's connection to the journal, separate from the control thread's.
+/// SQLite in WAL mode lets it read while the control thread writes ticks.
+/// Calls run on tokio's blocking pool, one at a time on this connection.
+pub struct ApiDb(std::sync::Mutex<Store>);
+
+impl ApiDb {
+    pub fn new(store: Store) -> Self {
+        Self(std::sync::Mutex::new(store))
+    }
+
+    async fn call<R, F>(self: &Arc<Self>, f: F) -> ApiResult<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Store) -> R + Send + 'static,
+    {
+        let db = Arc::clone(self);
+        tokio::task::spawn_blocking(move || f(&db.0.lock().unwrap_or_else(|p| p.into_inner())))
+            .await
+            .map_err(|e| ApiError::Conflict(format!("journal access failed: {e}")))
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -231,15 +259,16 @@ fn default_samples() -> usize {
     240
 }
 
-async fn preview(State(s): State<AppState>, Json(req): Json<PreviewReq>) -> ApiResult<Response> {
+async fn preview(Json(req): Json<PreviewReq>) -> ApiResult<Response> {
     if let Err(e) = req.curve.validate() {
         return Err(ApiError::Bad(e));
     }
-    let series = s
-        .control
-        .call(|reply| Command::Preview(req.curve, req.samples.clamp(2, 5000), reply))
-        .await
-        .map_err(|_| ApiError::Down)?;
+    let samples = req.samples.clamp(2, 5000);
+    let series: Vec<[f64; 2]> = tokio::task::spawn_blocking(move || {
+        req.curve.preview(samples).into_iter().map(|(t, v)| [t, v]).collect()
+    })
+    .await
+    .map_err(|e| ApiError::Conflict(format!("preview failed: {e}")))?;
     Ok(Json(json!({ "series": series })).into_response())
 }
 
@@ -253,12 +282,12 @@ fn default_limit() -> i64 {
 }
 
 async fn list_runs(State(s): State<AppState>, Query(q): Query<LimitQuery>) -> ApiResult<Response> {
+    let limit = q.limit.clamp(1, 1000);
     let runs = s
-        .control
-        .call(|reply| Command::ListRuns(q.limit.clamp(1, 1000), reply))
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?;
+        .db
+        .call(move |db| db.list_runs(limit))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
     Ok(Json(runs).into_response())
 }
 
@@ -403,23 +432,22 @@ async fn delete_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult
 /// Delivered vs requested feed for a run: chart points, R², fitted µ. 404 when
 /// the run has no balance data.
 async fn get_tracking(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let rho = s.config.read().await.scale.density_g_per_ml;
     let report = s
-        .control
-        .call(|reply| Command::Tracking(id, reply))
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?
+        .db
+        .call(move |db| crate::engine::tracking_report(db, id, rho))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(report).into_response())
 }
 
 async fn get_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
     let run = s
-        .control
-        .call(|reply| Command::GetRun(id, reply))
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?
+        .db
+        .call(move |db| db.run(id))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(run).into_response())
 }
@@ -447,16 +475,10 @@ async fn get_ticks(
     let from = q.from.max(0);
     let to = q.to.min(from.saturating_add(MAX_TICKS_SPAN));
     let ticks = s
-        .control
-        .call(|reply| Command::GetTicks {
-            run_id: id,
-            from,
-            to,
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?;
+        .db
+        .call(move |db| db.ticks(id, from, to))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
     Ok(Json(ticks).into_response())
 }
 
@@ -465,16 +487,12 @@ async fn get_events(
     Path(id): Path<i64>,
     Query(q): Query<LimitQuery>,
 ) -> ApiResult<Response> {
+    let limit = q.limit.clamp(1, 5000);
     let events = s
-        .control
-        .call(|reply| Command::GetEvents {
-            run_id: id,
-            limit: q.limit.clamp(1, 5000),
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?;
+        .db
+        .call(move |db| db.events(Some(id), limit))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
     Ok(Json(events).into_response())
 }
 
@@ -517,15 +535,12 @@ async fn list_calibrations(
     Query(q): Query<CalibrationQuery>,
 ) -> ApiResult<Response> {
     let nonblank = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let lot_id = nonblank(q.lot_id);
     let rows = s
-        .control
-        .call(|reply| Command::ListCalibrations {
-            lot_id: nonblank(q.lot_id),
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?;
+        .db
+        .call(move |db| db.list_calibrations(lot_id.as_deref()))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
     Ok(Json(rows).into_response())
 }
 
@@ -536,10 +551,17 @@ async fn create_calibration(
     Json(cal): Json<NewCalibration>,
 ) -> ApiResult<Response> {
     let row = s
-        .control
-        .call(|reply| Command::InsertCalibration(cal, reply))
-        .await
-        .map_err(|_| ApiError::Down)?
+        .db
+        .call(move |db| {
+            db.insert_calibration(&cal).and_then(|id| {
+                // Only one session is ever in progress: once it is recorded
+                // the draft has served its purpose.
+                let _ = db.set_state(CALIBRATION_DRAFT_KEY, "");
+                db.calibration(id)?
+                    .ok_or_else(|| StoreError::Invalid(format!("calibration {id} vanished")))
+            })
+        })
+        .await?
         .map_err(|e| match e {
             StoreError::Invalid(m) => ApiError::Bad(m),
             other => ApiError::Conflict(other.to_string()),
@@ -558,11 +580,10 @@ async fn restore_calibration(State(s): State<AppState>, Path(id): Path<i64>) -> 
 
 async fn set_calibration_archived(s: &AppState, id: i64, archived: bool) -> ApiResult<Response> {
     let row = s
-        .control
-        .call(|reply| Command::SetCalibrationArchived { id, archived, reply })
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?
+        .db
+        .call(move |db| db.set_calibration_archived(id, archived))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(row).into_response())
 }
@@ -570,11 +591,11 @@ async fn set_calibration_archived(s: &AppState, id: i64, archived: bool) -> ApiR
 /// The in-progress calibration session, or `null` when there is none.
 async fn get_calibration_draft(State(s): State<AppState>) -> ApiResult<Response> {
     let draft = s
-        .control
-        .call(Command::GetCalibrationDraft)
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?;
+        .db
+        .call(|db| db.get_state(CALIBRATION_DRAFT_KEY))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .filter(|d| !d.is_empty());
     let value = draft
         .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
         .unwrap_or(serde_json::Value::Null);
@@ -593,11 +614,10 @@ async fn delete_calibration_draft(State(s): State<AppState>) -> ApiResult<Respon
 }
 
 async fn set_calibration_draft(s: &AppState, draft: Option<String>) -> ApiResult<Response> {
-    s.control
-        .call(|reply| Command::SetCalibrationDraft(draft, reply))
-        .await
-        .map_err(|_| ApiError::Down)?
-        .map_err(ApiError::Conflict)?;
+    s.db
+        .call(move |db| db.set_state(CALIBRATION_DRAFT_KEY, draft.as_deref().unwrap_or("")))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
     Ok(Json(json!({ "ok": true })).into_response())
 }
 
@@ -853,12 +873,37 @@ mod tests {
     use crate::store::Store;
     use fermentool_modbus::{Pump, SimPump};
 
-    fn test_state() -> AppState {
-        test_state_with(Store::open_in_memory().unwrap())
+    /// A fresh journal file: the control thread and the API each open their
+    /// own connection to it, as in the daemon (an in-memory database cannot
+    /// be shared). Files of earlier test processes are swept on first use;
+    /// this process's are still open, so they wait for the next run.
+    fn test_db() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        static SWEEP: std::sync::Once = std::sync::Once::new();
+        let dir = std::env::temp_dir().join("fermentool-api-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let pid = std::process::id();
+        SWEEP.call_once(|| {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if !e.file_name().to_string_lossy().starts_with(&format!("{pid}-")) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        });
+        dir.join(format!("{pid}-{}.sqlite", CTR.fetch_add(1, Ordering::Relaxed)))
     }
 
-    fn test_state_with(store: Store) -> AppState {
-        let engine = Engine::new(Pump::new(SimPump::new(1), 1), store, "test");
+    fn test_state() -> AppState {
+        test_state_at(&test_db())
+    }
+
+    fn test_state_at(db: &std::path::Path) -> AppState {
+        let engine = Engine::new(Pump::new(SimPump::new(1), 1), Store::open(db).unwrap(), "test");
+        state_for(engine, db)
+    }
+
+    fn state_for(engine: Engine<SimPump>, db: &std::path::Path) -> AppState {
         let (events, _) = broadcast::channel(16);
         AppState {
             control: Arc::new(crate::control::spawn(
@@ -871,17 +916,15 @@ mod tests {
             shutdown: Arc::new(Notify::new()),
             events,
             pages: Default::default(),
+            db: Arc::new(ApiDb::new(Store::open(db).unwrap())),
         }
     }
 
     /// Like [`test_state`] but with `serial.allow_simulator = false` applied to
     /// the live engine, so `POST /api/runs` is refused with a hinted error.
     fn test_state_no_sim_runs() -> AppState {
-        let mut engine = Engine::new(
-            Pump::new(SimPump::new(1), 1),
-            Store::open_in_memory().unwrap(),
-            "test",
-        );
+        let db = test_db();
+        let mut engine = Engine::new(Pump::new(SimPump::new(1), 1), Store::open(&db).unwrap(), "test");
         engine.set_serial(
             crate::config::SerialConfig {
                 path: "sim".into(),
@@ -890,19 +933,7 @@ mod tests {
             },
             1,
         );
-        let (events, _) = broadcast::channel(16);
-        AppState {
-            control: Arc::new(crate::control::spawn(
-                engine,
-                Duration::from_secs(300),
-                events.clone(),
-            )),
-            config: Arc::new(RwLock::new(Config::default())),
-            config_path: Arc::new(std::env::temp_dir().join("ft-api-test.toml")),
-            shutdown: Arc::new(Notify::new()),
-            events,
-            pages: Default::default(),
-        }
+        state_for(engine, &db)
     }
 
     #[tokio::test]
@@ -1316,7 +1347,8 @@ mod tests {
     /// minutes, which an API-driven start/stop in a test cannot give.
     fn state_with_three_bursts() -> (AppState, [i64; 3]) {
         use crate::store::{ControlVar, Direction, NewRun, RunKind};
-        let store = Store::open_in_memory().unwrap();
+        let db = test_db();
+        let store = Store::open(&db).unwrap();
         let mut ids = [0; 3];
         for (i, id) in ids.iter_mut().enumerate() {
             let started: jiff::Timestamp = "2026-09-01T09:00:00Z".parse().unwrap();
@@ -1341,7 +1373,43 @@ mod tests {
                 .finish_run(*id, RunStatus::Stopped, started + jiff::SignedDuration::from_mins(5))
                 .unwrap();
         }
-        (test_state_with(store), ids)
+        drop(store);
+        (test_state_at(&db), ids)
+    }
+
+    /// The bug: with the balance off, every read on the control thread waited
+    /// out its timeout, and the History and Calibration pages queued behind
+    /// it. Here the control thread is held up 1.5 s by every balance read;
+    /// the journal must still answer at once.
+    #[tokio::test]
+    async fn the_journal_answers_while_the_control_thread_waits_on_a_device() {
+        struct SlowSilentScale;
+        impl fermentool_modbus::Transport for SlowSilentScale {
+            fn transaction(&mut self, _: &[u8]) -> Result<Vec<u8>, fermentool_modbus::TransportError> {
+                std::thread::sleep(Duration::from_millis(1500));
+                Err(fermentool_modbus::TransportError::Timeout)
+            }
+        }
+        let db = test_db();
+        let mut engine = Engine::new(Pump::new(SimPump::new(1), 1), Store::open(&db).unwrap(), "test");
+        engine.attach_scale(
+            Some(Box::new(SlowSilentScale)),
+            crate::config::ScaleConfig { path: "COM-slow".into(), ..Default::default() },
+        );
+        let app = router(state_for(engine, &db));
+        // Let the idle balance probe start holding the control thread.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        for uri in [
+            "/api/runs?limit=1000",
+            "/api/calibrations",
+            "/api/calibrations/draft",
+            "/api/runs/1/events?limit=100",
+        ] {
+            let t = std::time::Instant::now();
+            let res = app.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+            assert!(res.status().is_success() || res.status() == StatusCode::NOT_FOUND, "{uri}: {}", res.status());
+            assert!(t.elapsed() < Duration::from_millis(300), "{uri} took {:?}", t.elapsed());
+        }
     }
 
     fn delete_req(uri: &str) -> Request<Body> {

@@ -16,7 +16,6 @@ use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot};
 
-use fermentool_curves::CurveSpec;
 use fermentool_modbus::Transport;
 
 use crate::config::{ScaleConfig, SerialConfig};
@@ -24,10 +23,9 @@ use crate::engine::{
     ActiveStatus, Engine, ErrDetail, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome,
     REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
 };
-use crate::store::{
-    CalibrationRow, EventLevel, EventRow, NewCalibration, NewEvent, RunKind, RunRow, RunStatus,
-    StoreError, TickRow,
-};
+#[cfg(test)]
+use crate::store::RunRow;
+use crate::store::{EventLevel, NewEvent, RunKind, RunStatus};
 use crate::transport::{SwapTransport, TransportKind};
 
 const IDLE_POLL: Duration = Duration::from_millis(500);
@@ -36,12 +34,6 @@ const IDLE_POLL: Duration = Duration::from_millis(500);
 /// transaction at 9600 8E1 and well under the 200 ms serial timeout, so a steep
 /// ramp steps through each pump grid value without loading the bus.
 const WRITE_SETPOINT_INTERVAL: Duration = Duration::from_millis(150);
-
-/// `app_state` key holding the in-progress tubing calibration session (the
-/// UI's own JSON), so a page refresh or daemon restart resumes it. Empty value
-/// = no session. One key is enough: like a run, only one calibration is ever
-/// in progress.
-const CALIBRATION_DRAFT_KEY: &str = "calibration_draft";
 
 /// While the serial link is lost, retry reopening the port on an exponential
 /// backoff: `SERIAL_RETRY_MIN`, then doubling, capped at `SERIAL_RETRY_MAX`. The
@@ -74,27 +66,14 @@ pub enum Command {
     Recovery(oneshot::Sender<Result<Option<RecoveryInfo>, String>>),
     Resume(oneshot::Sender<Result<i64, ErrDetail>>),
     DiscardRecovery(RunStatus, oneshot::Sender<Result<(), String>>),
+    /// Tests only: the API reads runs on its own connection.
+    #[cfg(test)]
     GetRun(i64, oneshot::Sender<Result<Option<RunRow>, String>>),
-    /// The delivered-vs-requested proof for a run (`None`: no balance data).
-    Tracking(i64, oneshot::Sender<Result<Option<crate::engine::TrackingReport>, String>>),
-    ListRuns(i64, oneshot::Sender<Result<Vec<RunRow>, String>>),
     /// Delete every run + journal. Refused while a run is active or a crash
     /// recovery is pending.
     ClearHistory(oneshot::Sender<Result<(), String>>),
     /// Delete one finished run; `Ok(false)` when it does not exist.
     DeleteRun(i64, oneshot::Sender<Result<bool, String>>),
-    GetTicks {
-        run_id: i64,
-        from: i64,
-        to: i64,
-        reply: oneshot::Sender<Result<Vec<TickRow>, String>>,
-    },
-    GetEvents {
-        run_id: i64,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<EventRow>, String>>,
-    },
-    Preview(CurveSpec, usize, oneshot::Sender<Vec<[f64; 2]>>),
     /// Rebuild the pump transport from a serial config, without restarting.
     Reconnect {
         serial: SerialConfig,
@@ -115,22 +94,6 @@ pub enum Command {
     TriggerRefillMode(oneshot::Sender<()>),
     /// Operator-declared "bottle is back, settled".
     TriggerRefillDone(oneshot::Sender<()>),
-    /// Record a tubing calibration, then drop the in-progress draft.
-    InsertCalibration(NewCalibration, oneshot::Sender<Result<CalibrationRow, StoreError>>),
-    ListCalibrations {
-        lot_id: Option<String>,
-        reply: oneshot::Sender<Result<Vec<CalibrationRow>, String>>,
-    },
-    /// Archive (`true`) or restore (`false`) a calibration; `None` = no such id.
-    SetCalibrationArchived {
-        id: i64,
-        archived: bool,
-        reply: oneshot::Sender<Result<Option<CalibrationRow>, String>>,
-    },
-    /// The in-progress calibration session, as the UI saved it (opaque JSON).
-    GetCalibrationDraft(oneshot::Sender<Result<Option<String>, String>>),
-    /// Save (`Some`) or drop (`None`) the in-progress calibration session.
-    SetCalibrationDraft(Option<String>, oneshot::Sender<Result<(), String>>),
     Shutdown,
 }
 
@@ -351,8 +314,11 @@ fn control_loop<T: Transport + SwapTransport>(
                 next_scale_probe = None;
             }
             // No run: keep the serial link's health current so a cable pulled
-            // between runs still trips the alarm and the auto-reopen.
-            if engine.serial_is_real() {
+            // between runs still trips the alarm and the auto-reopen. A link
+            // already lost is the recovery's to confirm (with its own reads,
+            // on its backoff): probing a silent pump every second as well only
+            // held the control thread on a read timeout each time.
+            if engine.serial_is_real() && !engine.serial_lost() {
                 let probe_due =
                     *next_probe.get_or_insert_with(|| Instant::now() + LINK_PROBE_INTERVAL);
                 if Instant::now() >= probe_due {
@@ -365,6 +331,10 @@ fn control_loop<T: Transport + SwapTransport>(
                 }
             } else {
                 next_probe = None;
+                // Backoff-gated, so free until a retry is due; here as well
+                // as on a quiet `recv_timeout`, which steady UI traffic can
+                // keep from ever firing.
+                maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
             }
         } else {
             next_probe = None;
@@ -604,24 +574,17 @@ fn maybe_recover_serial<T: Transport + SwapTransport>(
 /// never opened at boot), the gravimetric trim's counterpart to
 /// [`maybe_recover_serial`], spaced by the same exponential backoff. Acts
 /// only while [`Engine::scale_recovery_wanted`] holds (idle, or a trimmed run
-/// is active); otherwise it clears the backoff. No `[scale]` configured:
-/// never retries, never logs.
+/// is active). An outage (`next_retry` set) ends only on a weight
+/// ([`Engine::scale_link_up`]), never on a port that merely reopened: that
+/// used to reset the backoff, so a switched-off balance was reopened and read
+/// five times every few seconds, journalled lost/recovered each time. No
+/// `[scale]` configured: never retries, never logs.
 fn maybe_recover_scale<T: Transport>(
     engine: &mut Engine<T>,
     events: &broadcast::Sender<DaemonStatus>,
     grace: Duration,
     next_retry: &mut Option<(Instant, Duration)>,
 ) {
-    if !engine.scale_recovery_wanted() {
-        *next_retry = None;
-        return;
-    }
-    if next_retry.is_some_and(|(t, _)| Instant::now() < t) {
-        return;
-    }
-    let prev_delay = next_retry.map(|(_, d)| d);
-    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.recover_scale()))
-        .unwrap_or(false);
     // During a run the balance coming and going is part of its story (and
     // notified): journal it. Idle, the log line is enough.
     let journal = |engine: &Engine<T>, kind: &str, level: EventLevel, detail: &str| {
@@ -635,13 +598,44 @@ fn maybe_recover_scale<T: Transport>(
             });
         }
     };
-    if ok {
-        if prev_delay.is_some() {
-            tracing::info!("scale link reopened");
-            journal(engine, "scale_recovered", EventLevel::Info, "balance answering again");
-        }
+    let recovered = |engine: &Engine<T>, next_retry: &mut Option<(Instant, Duration)>| {
+        tracing::info!("scale link back, balance answering");
+        journal(engine, "scale_recovered", EventLevel::Info, "balance answering again");
         *next_retry = None;
-    } else {
+        let _ = events.send(current_status(engine, grace));
+    };
+    if !engine.scale_recovery_wanted() {
+        if next_retry.is_some() {
+            if engine.scale_link_up() {
+                recovered(engine, next_retry);
+            } else if !engine.scale_wanted() {
+                // The balance was removed in Settings: no outage to follow.
+                *next_retry = None;
+            }
+            // Otherwise a reopened port is waiting for its first weight (or
+            // a plain dosing run leaves the balance alone): keep the outage.
+        }
+        return;
+    }
+    if next_retry.is_some_and(|(t, _)| Instant::now() < t) {
+        return;
+    }
+    let prev_delay = next_retry.map(|(_, d)| d);
+    let reopened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.recover_scale()))
+        .unwrap_or(false);
+    if engine.scale_link_up() {
+        // The balance answered on the link already held.
+        if prev_delay.is_some() {
+            recovered(engine, next_retry);
+        } else {
+            *next_retry = None;
+        }
+        return;
+    }
+    if reopened {
+        tracing::debug!("scale port reopened, waiting for a weight");
+    }
+    {
         if prev_delay.is_none() {
             tracing::warn!(
                 "scale link down; auto-reconnecting (backoff {SERIAL_RETRY_MIN:?}..{SERIAL_RETRY_MAX:?})"
@@ -703,16 +697,9 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             );
             true
         }
+        #[cfg(test)]
         Command::GetRun(id, reply) => {
             let _ = reply.send(engine.store().run(id).map_err(|e| e.to_string()));
-            false
-        }
-        Command::Tracking(id, reply) => {
-            let _ = reply.send(engine.tracking_report(id).map_err(|e| e.to_string()));
-            false
-        }
-        Command::ListRuns(limit, reply) => {
-            let _ = reply.send(engine.store().list_runs(limit).map_err(|e| e.to_string()));
             false
         }
         Command::ClearHistory(reply) => {
@@ -753,42 +740,6 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
                 engine.store().delete_run(id).map_err(|e| e.to_string())
             };
             let _ = reply.send(res);
-            false
-        }
-        Command::GetTicks {
-            run_id,
-            from,
-            to,
-            reply,
-        } => {
-            let _ = reply.send(
-                engine
-                    .store()
-                    .ticks(run_id, from, to)
-                    .map_err(|e| e.to_string()),
-            );
-            false
-        }
-        Command::GetEvents {
-            run_id,
-            limit,
-            reply,
-        } => {
-            let _ = reply.send(
-                engine
-                    .store()
-                    .events(Some(run_id), limit)
-                    .map_err(|e| e.to_string()),
-            );
-            false
-        }
-        Command::Preview(spec, samples, reply) => {
-            let series = spec
-                .preview(samples)
-                .into_iter()
-                .map(|(t, v)| [t, v])
-                .collect();
-            let _ = reply.send(series);
             false
         }
         Command::Reconnect {
@@ -846,52 +797,6 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let _ = reply.send(());
             true
         }
-        Command::InsertCalibration(cal, reply) => {
-            let store = engine.store();
-            let res = store.insert_calibration(&cal).and_then(|id| {
-                // Only one session is ever in progress: once it is recorded
-                // the draft has served its purpose.
-                let _ = store.set_state(CALIBRATION_DRAFT_KEY, "");
-                store
-                    .calibration(id)?
-                    .ok_or_else(|| StoreError::Invalid(format!("calibration {id} vanished")))
-            });
-            let _ = reply.send(res);
-            false
-        }
-        Command::ListCalibrations { lot_id, reply } => {
-            let res = engine
-                .store()
-                .list_calibrations(lot_id.as_deref())
-                .map_err(|e| e.to_string());
-            let _ = reply.send(res);
-            false
-        }
-        Command::SetCalibrationArchived { id, archived, reply } => {
-            let res = engine
-                .store()
-                .set_calibration_archived(id, archived)
-                .map_err(|e| e.to_string());
-            let _ = reply.send(res);
-            false
-        }
-        Command::GetCalibrationDraft(reply) => {
-            let res = engine
-                .store()
-                .get_state(CALIBRATION_DRAFT_KEY)
-                .map(|v| v.filter(|s| !s.is_empty()))
-                .map_err(|e| e.to_string());
-            let _ = reply.send(res);
-            false
-        }
-        Command::SetCalibrationDraft(draft, reply) => {
-            let res = engine
-                .store()
-                .set_state(CALIBRATION_DRAFT_KEY, draft.as_deref().unwrap_or(""))
-                .map_err(|e| e.to_string());
-            let _ = reply.send(res);
-            false
-        }
     }
 }
 
@@ -917,6 +822,67 @@ mod tests {
             tubing_calibration_id: None,
             responsible: None,
         }
+    }
+
+    /// A balance switched off mid-run, then on again. One `scale_lost` for
+    /// the whole outage and a growing backoff, not a lost/recovered pair (and
+    /// five failed reads) every few seconds; no reopen of a port that works;
+    /// one `scale_recovered` once a weight comes back.
+    #[test]
+    fn a_silent_balance_is_lost_once_and_recovered_once() {
+        use fermentool_modbus::TransportError;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ON: AtomicBool = AtomicBool::new(false);
+        struct Balance;
+        impl Transport for Balance {
+            fn transaction(&mut self, _: &[u8]) -> Result<Vec<u8>, TransportError> {
+                if ON.load(Ordering::SeqCst) {
+                    Ok(b"S S      640.0 g\r\n".to_vec())
+                } else {
+                    Err(TransportError::Timeout)
+                }
+            }
+        }
+        fn open_never(_: &ScaleConfig) -> Option<Box<dyn Transport + Send>> {
+            panic!("a silent balance on a working port is not reopened")
+        }
+
+        let mut e = Engine::new(Pump::new(SimPump::new(1), 1), Store::open_in_memory().unwrap(), "test");
+        e.attach_scale(Some(Box::new(Balance)), ScaleConfig { path: "COM-off".into(), ..Default::default() });
+        e.set_scale_opener_for_test(open_never);
+        let run = RunConfig { control_var: ControlVar::MlMin, gravimetric_trim: true, ..cadence_run() };
+        let id = e.start_run(run, Timestamp::now()).unwrap();
+        let (events, _rx) = broadcast::channel(64);
+        let grace = Duration::from_secs(300);
+        let mut next_retry = None;
+        let retry_now = |next: &mut Option<(Instant, Duration)>| {
+            if let Some((_, d)) = *next {
+                *next = Some((Instant::now() - Duration::from_millis(1), d));
+            }
+        };
+
+        for _ in 0..REOPEN_AFTER_WRITE_FAILS {
+            e.scale_tick(Timestamp::now());
+        }
+        let mut delays = vec![];
+        for _ in 0..6 {
+            maybe_recover_scale(&mut e, &events, grace, &mut next_retry);
+            delays.push(next_retry.expect("the outage is still followed").1);
+            e.scale_tick(Timestamp::now());
+            retry_now(&mut next_retry);
+        }
+        assert_eq!(delays.last(), Some(&SERIAL_RETRY_MAX), "backoff grows: {delays:?}");
+        assert_eq!(e.status().scale_connected, Some(false));
+
+        ON.store(true, Ordering::SeqCst);
+        maybe_recover_scale(&mut e, &events, grace, &mut next_retry);
+        assert!(next_retry.is_none(), "a weight ends the outage");
+        assert_eq!(e.status().scale_connected, Some(true));
+
+        let kinds: Vec<String> = e.store().events(Some(id), 200).unwrap().into_iter().map(|ev| ev.kind).collect();
+        let count = |k: &str| kinds.iter().filter(|x| *x == k).count();
+        assert_eq!(count("scale_lost"), 1, "{kinds:?}");
+        assert_eq!(count("scale_recovered"), 1, "{kinds:?}");
     }
 
     /// A calibration burst lasts what was asked, to the millisecond, not

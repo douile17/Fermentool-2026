@@ -97,6 +97,22 @@
   run (`alarm_ack`, avec qui l'a fait). Bouton « Test alarm » dans Settings
   (toutes les minutes, 5 fois au plus).
 
+### Robustesse
+
+- Balance éteinte ou pompe muette : les pages History et Calibration ne
+  rament plus. L'historique, les calibrations et le suivi sont lus sur une
+  connexion à part, sans attendre le fil qui pilote la pompe et la balance.
+- La balance est lue par son propre fil : une balance qui ne répond pas ne
+  retient plus jamais le pilotage de la pompe (chaque lecture ratée le
+  bloquait 1,5 s).
+- Balance éteinte : plus de « balance lost » / « balance answering again »
+  toutes les 20 s dans le journal. Une seule perte par panne, le retour est
+  annoncé au premier poids lu, pas à la simple réouverture du port COM. Le
+  port d'une balance seulement éteinte est gardé, il n'est rouvert que s'il
+  est vraiment cassé (adaptateur USB débranché).
+- Pompe perdue au repos : plus de sonde chaque seconde en plus des tentatives
+  de reconnexion.
+
 ### Calibration des tuyaux
 
 - Archiver une calibration (elle disparaît de Nouveau run, reste dans
