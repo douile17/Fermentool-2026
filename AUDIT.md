@@ -74,7 +74,7 @@ critique, documentation).
 ## Suivi des corrections (2026-10-07)
 
 Les 60 points ont été traités en 8 lots. Chaque lot a été compilé et testé
-seul avant son commit : 345 tests au total, dont 37 nouveaux qui
+seul avant son commit : 345 tests au total, dont 29 nouveaux qui
 reproduisent les bugs corrigés.
 
 | Lot | Commit | Points |
