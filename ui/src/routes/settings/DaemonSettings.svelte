@@ -53,7 +53,7 @@
 
 <SettingsCard {group} title="Daemon" {err} {msg} loading={!loaded}>
   <div class="grid">
-    <label class="field"><span>API port (restart to apply)</span>
+    <label class="field"><span>API port (restart to apply; the desktop app expects 8730)</span>
       <input type="number" bind:value={port} />
     </label>
 

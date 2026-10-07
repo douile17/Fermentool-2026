@@ -10,13 +10,30 @@ use tauri::{AppHandle, Manager};
 
 const BASE: &str = "http://127.0.0.1:8730";
 
-/// `true` iff the daemon answers `GET /api/status` with 200 inside 500 ms.
+/// `true` iff the daemon answers `GET /api/health` with 200. That route is
+/// answered by its HTTP server alone: `/api/status` goes through the control
+/// thread, which can take longer than a short timeout while it waits on a
+/// device, and a busy daemon then looked absent and got a second one started.
+/// (A daemon from before `/api/health` answers it with its UI page, still 200.)
 pub fn is_up() -> bool {
-    ureq::get(&format!("{BASE}/api/status"))
-        .timeout(Duration::from_millis(500))
+    ureq::get(&format!("{BASE}/api/health"))
+        .timeout(Duration::from_millis(1500))
         .call()
         .map(|r| r.status() == 200)
         .unwrap_or(false)
+}
+
+/// The name of the run in progress, if the daemon answers and one is.
+pub fn active_run() -> Option<String> {
+    let body = ureq::get(&format!("{BASE}/api/status"))
+        .timeout(Duration::from_secs(3))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    let status: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let active = status.get("active").filter(|a| !a.is_null())?;
+    Some(active.get("name").and_then(|n| n.as_str()).unwrap_or("run").to_string())
 }
 
 /// Poll [`is_up`] every 200 ms until it succeeds or `timeout` elapses.

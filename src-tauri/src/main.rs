@@ -16,8 +16,6 @@ fn main() {
                 let _ = w.set_focus();
             }
         }))
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             tray::build(&app.handle().clone())?;
 

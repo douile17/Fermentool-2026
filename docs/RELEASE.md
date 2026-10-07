@@ -13,7 +13,8 @@ l'utilisateur courant, dans `%LOCALAPPDATA%\Fermentool` :
 - `fermentool.exe` : la fenêtre (Tauri) avec l'interface intégrée ;
 - `fermentool-core.exe` : le daemon qui pilote la pompe et lit la balance ;
 - une tâche planifiée `Fermentool` qui lance le daemon à l'ouverture de
-  session et le relance s'il plante.
+  session et le relance s'il plante (sans droits administrateur : un port
+  COM n'en demande pas).
 
 Aucune dépendance externe :
 
@@ -27,7 +28,26 @@ Aucune dépendance externe :
 
 Mise à jour d'une installation existante : l'installateur arrête proprement
 le daemon avant de copier les fichiers, et **refuse de s'installer si un run
-est en cours** (message « A run is in progress »). Arrêter le run d'abord.
+est en cours** (message « A run is in progress »). Arrêter le run d'abord. Il
+refuse aussi si le daemon ne s'arrête pas ou ne répond pas, plutôt que de
+laisser l'ancienne version en place. La désinstallation applique les mêmes
+règles.
+
+## Limites à connaître
+
+- **Le daemon démarre à l'ouverture de session**, pas au démarrage du PC. Après
+  un redémarrage (mise à jour Windows la nuit, coupure de courant), la reprise
+  du run n'a lieu qu'une fois quelqu'un connecté sur ce PC. Pendant ce temps la
+  pompe, si elle est restée alimentée, garde sa dernière consigne. Sur le PC
+  de manip : régler les heures d'activité de Windows Update pour qu'il ne
+  redémarre pas pendant un run, et, pour une reprise sans clic, décocher
+  « Ask before resuming » (Settings, Crash resume).
+- **Le port 8730 est fixe** pour la fenêtre Fermentool et l'installateur. Le
+  changer dans Settings, Daemon ne sert qu'à un usage dans le navigateur.
+- Un adaptateur USB-série débranché en pleine transaction peut bloquer le
+  pilote Windows indéfiniment. Le daemon abandonne alors ce fil d'exécution et
+  rouvre le port sur un neuf, ce qui coûte un fil par débranchement de ce
+  type, jusqu'au redémarrage du daemon.
 
 ## Produire l'installateur
 
