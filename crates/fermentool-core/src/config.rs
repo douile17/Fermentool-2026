@@ -557,6 +557,15 @@ mod tests {
         assert!(Config::default().validate().is_ok());
     }
 
+    /// The documented example must stay a file the daemon takes as it is.
+    #[test]
+    fn the_example_config_parses_and_validates() {
+        let cfg = Config::from_toml(include_str!("../../../config.example.toml")).unwrap();
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let mut fixed = cfg.clone();
+        assert!(fixed.sanitize().is_empty());
+    }
+
     #[test]
     fn grace_is_minutes_to_duration() {
         let mut cfg = Config::default();

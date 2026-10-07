@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned: two exports of the same commit must come out of the same compiler.
+# Move it on purpose, with a full test run.
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]

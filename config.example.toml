@@ -1,35 +1,52 @@
-# Copy to `config.toml` (git-ignored) and edit for this machine.
-# Consumed from milestone 7 onward, see docs/IMPLEMENTATION_PLAN.md §4.9.
+# Copy to `config.toml` and edit for this machine. The daemon writes its own
+# copy at first start, in %APPDATA%\Fermentool (Windows) or
+# ~/.local/share/Fermentool, and most of it is set from the UI (connection bar
+# and Settings). A value out of range is put back to its default at start, and
+# a file that does not parse is kept aside as config.toml.bad while the
+# defaults are used: both are shown in the UI's status bar.
 
-port = 8730                     # local web UI / API (bound to 127.0.0.1 only)
+port = 8730                     # local web UI / API, bound to 127.0.0.1 only.
+                                # The desktop app and its installer expect 8730.
 
 [serial]
 path = "sim"                    # "sim" = built-in pump simulator (no hardware).
-                               # Real port, Windows: "COM4" · Linux: "/dev/ttyUSB0" · macOS: "/dev/tty.usbserial-XXXX"
-                               # If a real port fails to open, the daemon falls back to the simulator with a loud warning.
-baud = 9600                    # 1200 | 2400 | 4800 | 9600
-# Frame is fixed at 8E1 (8 data bits, even parity, 1 stop) as required by the LabQ pump.
+                                # Real port, Windows: "COM4" | Linux: "/dev/ttyUSB0"
+baud = 9600                     # 1200 | 2400 | 4800 | 9600. Frame fixed at 8E1 (LabQ).
+allow_simulator = false         # allow runs on the simulator (bench testing only)
 
 [pump]
 address = 1                     # MODBUS slave address, 1..247
-# Fermentool never writes the pump's head-type / tubing-size registers: control
-# is by rpm, with a Fermentool-side calibration on top of it.
+# Fermentool never writes the pump's head-type / tubing-size registers: it
+# drives rpm or ml/min, with its own tubing calibration on top.
 
 [resume]
-prompt = true                   # ask before resuming an interrupted run
-grace_minutes = 5               # still "resumable" this long past the planned end
+prompt = true                   # true: an interrupted run waits for Resume / Finish / Abort.
+                                # false: a dosing run resumes by itself once the pump answers.
+grace_minutes = 5               # a calibration burst can still be resumed this long past its end
+                                # (a dosing run resumes at any time, into its hold phase)
 
 [storage]
 dir = ""                        # empty = OS default data dir
 
 [log]
 dir = ""                        # empty = <storage>/logs
-level = "info"                  # error | warn | info | debug | trace
-retain_days = 30
+level = "info"                  # error | warn | info | debug | trace (or a RUST_LOG filter)
+retain_days = 30                # rolled log files older than this are deleted; 0 keeps them all
 
 [scale]
-path = ""                     # empty = no scale; e.g. Windows: "COM5"
-baud = 9600                    # match the balance's own Communications menu
-density_g_per_ml = 1.0         # feed density; water ~1.0, 500 g/L glucose ~1.18
-# MT-SICS only for now (send "S"/"SI", parse "S <status> <value> g"). A
-# balance without SICS needs its own small driver alongside SicsScale.
+path = ""                       # balance serial port; empty = no balance (no gravimetric trim)
+baud = 9600                     # as set in the balance's own Communications menu
+density_g_per_ml = 1.0          # feed density: water ~1.00, 500 g/L glucose ~1.18
+position = "feed"               # "feed": under the feed bottle (weight falls)
+                                # "receiver": under the receiving vessel (weight rises)
+trim_limit_pct = 25.0           # how far the trim may push the pump, +/- %, 5..100
+# MT-SICS balances only (send "SI", parse "S <status> <value> g"), 8-N-1.
+
+[notify]
+ntfy_server = "https://ntfy.sh" # or a lab-hosted ntfy (https only)
+# One block per person who runs experiments; a run's alerts go to its
+# responsible only. Set up from Settings, Notifications (Generate, QR, Test).
+# [[notify.people]]
+# name = "Drew"
+# ntfy_topic = "fermentool-drew-x7k2q9mz"   # secret: anyone who knows it reads the alerts
+# webhook = ""                              # optional Teams Workflow webhook (https)
