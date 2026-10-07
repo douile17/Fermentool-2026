@@ -17,6 +17,19 @@
   // Each solid glyph needs its own mask id (two can be on screen at once).
   const maskId = `ph-hole-${Math.random().toString(36).slice(2, 9)}`;
 
+  // At menu size the body's edges fall mid-pixel (18 px: 2.5 and 15.5), so
+  // they render as a lighter half-covered fringe around the flat glyph. Snap
+  // them outward to whole device pixels.
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const body = $derived.by(() => {
+    const u = 100 / (size * dpr);
+    const lo = (v) => Math.floor(v / u) * u;
+    const hi = (v) => Math.ceil(v / u) * u;
+    const x = lo(12);
+    const y = lo(14);
+    return { x, y, w: hi(88) - x, h: hi(86) - y };
+  });
+
   let angle = $state(0);
 
   const reduced =
@@ -59,7 +72,7 @@
           <circle cx="50" cy="50" r="31" fill="black" />
         </mask>
       </defs>
-      <rect class="solid-body" x="12" y="14" width="76" height="72" rx="13" mask="url(#{maskId})" />
+      <rect class="solid-body" x={body.x} y={body.y} width={body.w} height={body.h} rx="13" mask="url(#{maskId})" />
     {:else}
       <!-- housing -->
       <rect class="wall" x="12" y="14" width="76" height="72" rx="13" />

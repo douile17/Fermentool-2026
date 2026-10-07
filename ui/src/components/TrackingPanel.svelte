@@ -7,6 +7,13 @@
   import { app } from '../lib/state.svelte.js';
   import { bottleWeights } from '../lib/balance.js';
   import Chart from './Chart.svelte';
+  import Icon from './Icon.svelte';
+
+  const INFO =
+    'Cumulative volumes: a linear flow curve draws a parabola here, an exponential one stays exponential.\n\n' +
+    'With the balance on, the pump is sent the curve times a correction factor c, measured from the weight, ' +
+    "to make up for the pump's real output. While c is being measured (the first ~15 min) the setpoint can " +
+    'step a few % off the curve, then it settles. What counts is that delivered follows requested.';
 
   let { runId, durationS, live = false } = $props();
   let report = $state(null);
@@ -100,7 +107,12 @@
 
 {#if report}
   <div class="track">
-    <div class="eyebrow">Feed delivered vs requested (weighed)</div>
+    <div class="eyebrow">
+      Feed delivered vs requested (weighed)
+      <span class="info" title={INFO}>
+        <Icon name="info" size={14} />
+      </span>
+    </div>
     {#if wrongSide}
       <p class="warn">
         The balance weight moved the wrong way for where Settings says it is (feed bottle or
@@ -185,7 +197,9 @@
     padding-top: var(--s-5);
     border-top: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
   }
-  .track .eyebrow { margin-bottom: var(--s-3); color: var(--ink); }
+  .track .eyebrow { margin-bottom: var(--s-3); color: var(--ink); display: flex; align-items: center; gap: 6px; }
+  .info { display: inline-flex; color: var(--muted); cursor: help; }
+  .info:hover { color: var(--ink); }
   .headline { font-size: 14px; margin: 0 0 var(--s-3); }
   .held { font-size: 12px; color: var(--muted); margin: var(--s-2) 0 0; }
   .legend { display: flex; gap: var(--s-4); font-size: 12px; color: var(--muted); margin-bottom: var(--s-2); }
