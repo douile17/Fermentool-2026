@@ -35,6 +35,14 @@ export function hm(seconds) {
   return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}`;
 }
 
+/** "73:05:12", a clock reading of a duration: compact enough for a 100 h
+ *  run, two-digit minutes and seconds so it keeps its width as it counts. */
+export function clock(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const p = (n) => String(n).padStart(2, '0');
+  return `${Math.floor(s / 3600)}:${p(Math.floor(s / 60) % 60)}:${p(s % 60)}`;
+}
+
 /** A moment as people say it: "22:30" today, "Thu 04:10" on another day,
  *  "Thu 8 Oct, 13:12" with `withDate`. */
 export function when(ms, nowMs = Date.now(), withDate = false) {

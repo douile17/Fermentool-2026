@@ -4,7 +4,7 @@
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
   import { bottleWeights } from '../lib/balance.js';
-  import { valueAt, hm, when, bottleEmptyInS, runState, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
+  import { valueAt, hm, clock, when, bottleEmptyInS, runState, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
   import PumpHead from '../components/PumpHead.svelte';
@@ -497,12 +497,25 @@
               <span class="fill" style="width:{pct}%"></span>
               <span class="tick" style="left:{pct}%"></span>
             </div>
+            <!-- Each reading under the end of the bar it measures: elapsed under
+                 the filled part, remaining under the rest. -->
             <div class="tl-caps">
-              <span>Started {when(startedAtMs, now, true)}</span>
-              <span class="strong">
-                {#if inHold}curve done, holding for {hm(holdS)}{:else}{hm(elapsed)} done, {hm(run.duration_s - elapsed)} to go{/if}
-              </span>
-              <span>Ends {when(endMs, now, true)}</span>
+              <div>
+                <div class="k">Elapsed</div>
+                <div class="tl-v mono-num">{clock(elapsed)}</div>
+                <div class="k">since {when(startedAtMs, now, true)}</div>
+              </div>
+              <div class="tl-end">
+                {#if inHold}
+                  <div class="k">Holding past the end</div>
+                  <div class="tl-v mono-num">{clock(holdS)}</div>
+                  <div class="k">curve ended {when(endMs, now, true)}</div>
+                {:else}
+                  <div class="k">Remaining</div>
+                  <div class="tl-v mono-num">{clock(run.duration_s - elapsed)}</div>
+                  <div class="k">ends {when(endMs, now, true)}</div>
+                {/if}
+              </div>
             </div>
           </div>
 
@@ -822,8 +835,9 @@
      now-marker. */
   .track .fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--teal-700); }
   .track .tick { position: absolute; top: -5px; width: 3px; height: 18px; margin-left: -1px; border-radius: 2px; background: var(--ink); }
-  .tl-caps { display: flex; justify-content: space-between; gap: var(--s-3); flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
-  .tl-caps .strong { color: var(--ink); font-weight: 500; }
+  .tl-caps { display: flex; justify-content: space-between; gap: var(--s-3); }
+  .tl-end { text-align: right; }
+  .tl-v { font-size: 18px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.3; color: var(--ink); }
 
   .mid-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--s-2); }
   .mid { white-space: nowrap; font-size: 30px; font-weight: 500; letter-spacing: -0.02em; line-height: 1.1; }
