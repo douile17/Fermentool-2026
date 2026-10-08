@@ -87,11 +87,18 @@
     <g class="rotor" bind:this={rotor}>
       <!-- symmetric bbox so fill-box rotation stays centred on the ring -->
       <circle cx="50" cy="50" r="26" fill="none" stroke="none" />
-      <circle class="hub" cx="50" cy="50" r="8" />
-      <circle class="roller" cx="35.5" cy="36.5" r="4.6" />
-      <circle class="roller" cx="64.5" cy="36.5" r="4.6" />
-      <circle class="roller" cx="35.5" cy="63.5" r="4.6" />
-      <circle class="roller" cx="64.5" cy="63.5" r="4.6" />
+      <!-- The menu glyph is 18 px: rollers of r 4.6 came out under a pixel and
+           rendered as pale smudges of another colour. Larger there, so they
+           cover whole pixels in the same flat colour as the body. -->
+      <circle class="hub" cx="50" cy="50" r={solid ? 10 : 8} />
+      {#each [[-1, -1], [1, -1], [-1, 1], [1, 1]] as [sx, sy]}
+        <circle
+          class="roller"
+          cx={50 + sx * (solid ? 15 : 14.5)}
+          cy={50 + sy * (solid ? 15 : 13.5)}
+          r={solid ? 6.5 : 4.6}
+        />
+      {/each}
     </g>
   </svg>
 </div>

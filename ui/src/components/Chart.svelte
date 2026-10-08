@@ -35,7 +35,10 @@
   // needs its own gradient id.
   const fillId = `ftfill-${Math.random().toString(36).slice(2, 9)}`;
 
-  const W = 960;
+  // Drawn at the width it is shown at, so its labels stay at their CSS size
+  // in a narrow card as in a wide one (a fixed 960 viewBox shrank them).
+  let boxW = $state(960);
+  const W = $derived(Math.max(240, Math.round(boxW)));
   const H = 240;
   // No horizontal inset: the plot spans the full width so it lines up edge to
   // edge with the progress bar above it.
@@ -165,7 +168,7 @@
   });
 </script>
 
-<div class="chart-wrap">
+<div class="chart-wrap" bind:clientWidth={boxW}>
   <svg viewBox="0 0 {W} {H}" preserveAspectRatio="xMidYMid meet" role="img"
        aria-label="Planned {unit} curve over {Math.round(durationS / 3600)} hours">
     <defs>
@@ -226,9 +229,9 @@
 
 <style>
   .chart-wrap { overflow-x: hidden; }
-  /* Box matches the viewBox aspect so it fills the full width with no
-     letterboxing, lines up edge to edge with the progress bar. */
-  svg { width: 100%; aspect-ratio: 960 / 240; height: auto; display: block; }
+  /* The viewBox is the box's own width: full width, edge to edge with the
+     progress bar, and labels at their real size. */
+  svg { width: 100%; height: auto; display: block; }
   .axl { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
   .now-vol { fill: var(--ink); font-weight: 600; }
   .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }

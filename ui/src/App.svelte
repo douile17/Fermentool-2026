@@ -391,7 +391,7 @@
     width: 28px; height: 28px; flex: none;
     background: center / contain no-repeat url("/favicon.svg");
   }
-  .word { font-weight: 640; letter-spacing: -0.01em; }
+  .word { font-weight: 600; letter-spacing: -0.01em; }
 
   nav { display: flex; flex-direction: column; gap: 1px; }
   .nav-item {
@@ -413,12 +413,9 @@
     --ph-body: currentColor;
     --ph-detail: currentColor;
   }
-  /* A live run: the glyph goes green (semantic) and spins, so the pump's
-     state is visible from any section. Text keeps its normal colour. */
-  .nav-item.running .pump-ic {
-    opacity: 1;
-    --ph-detail: var(--green-500);
-  }
+  /* A live run: the glyph spins, one flat colour like the Settings gear (a
+     green hub and rollers on a teal body read as a mismatched outline). */
+  .nav-item.running .pump-ic { opacity: 1; }
   .nav-item .gear-ic {
     width: 18px; height: 18px;
     display: inline-flex; align-items: center; justify-content: center;
