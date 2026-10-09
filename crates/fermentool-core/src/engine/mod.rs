@@ -337,6 +337,9 @@ pub struct EngineStatus {
     /// nothing has been read yet.
     pub scale_weight_g: Option<f64>,
     pub scale_stable: Option<bool>,
+    /// The balance's step in grams (from the decimals it sends; 0.1 until a
+    /// first reading). `None` when no scale is configured.
+    pub scale_resolution_g: Option<f64>,
     /// `None` when no scale is configured.
     pub scale_state: Option<trim::ScaleState>,
     /// `None` when no scale is configured.
@@ -1225,6 +1228,7 @@ impl<T: Transport> Engine<T> {
             scale_connected: scale_shown.then(|| self.scale_link_up()),
             scale_weight_g: self.live_weight.filter(|_| self.scale_link_up()).map(|(w, _)| w),
             scale_stable: self.live_weight.filter(|_| self.scale_link_up()).map(|(_, s)| s),
+            scale_resolution_g: scale_shown.then_some(self.scale_resolution_g),
             scale_state: scale_shown.then_some(self.scale_state),
             trim_c: scale_shown.then_some(self.trim_c),
             rate_g_per_min: scale_shown.then_some(self.last_rate_g_per_min).flatten(),

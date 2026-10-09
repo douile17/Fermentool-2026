@@ -152,6 +152,8 @@ pub struct DaemonStatus {
     /// Live balance reading, grams. `None` when unknown.
     pub scale_weight_g: Option<f64>,
     pub scale_stable: Option<bool>,
+    /// The balance's step in grams. `None` when no scale is configured.
+    pub scale_resolution_g: Option<f64>,
     pub scale_state: Option<crate::trim::ScaleState>,
     /// `None` when no scale is configured.
     pub trim_c: Option<f64>,
@@ -230,6 +232,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         scale_connected: st.scale_connected,
         scale_weight_g: st.scale_weight_g,
         scale_stable: st.scale_stable,
+        scale_resolution_g: st.scale_resolution_g,
         scale_state: st.scale_state,
         trim_c: st.trim_c,
         rate_g_per_min: st.rate_g_per_min,
