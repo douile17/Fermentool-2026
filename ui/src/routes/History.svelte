@@ -40,7 +40,9 @@
   const shown = $derived.by(() => {
     const needle = q.trim().toLowerCase();
     const kept = runs.filter((r) => r.kind !== 'calibration');
-    return needle ? kept.filter((r) => (r.name ?? '').toLowerCase().includes(needle)) : kept;
+    // by run name or by the person it was for
+    const hit = (r) => (r.name ?? '').toLowerCase().includes(needle) || (r.responsible ?? '').toLowerCase().includes(needle);
+    return needle ? kept.filter(hit) : kept;
   });
 
   // Several runs ticked in the list, deleted together. A running run can't
@@ -296,9 +298,9 @@
       <input
         class="search"
         type="search"
-        placeholder="Search by name…"
+        placeholder="Search by run or person…"
         bind:value={q}
-        aria-label="Search runs by name"
+        aria-label="Search runs by name or person"
       />
       {#if pickedShown.length}
         <button class="btn-danger" onclick={() => { bulkErr = null; confirmBulk = true; }}>
@@ -338,7 +340,7 @@
           onclick={() => pick(r)}
           title={r.status === 'running' ? 'View live in Overview' : 'Open details'}
         >
-          <span class="nm">{r.name}</span>
+          <span class="nm">{r.name}{#if r.responsible}<small class="who">{r.responsible}</small>{/if}</span>
           <span><span class="pill {r.status}">{r.status}</span></span>
           <span class="mono">{r.curve.params.kind}</span>
           <span class="mono">{dur(r.duration_s)}</span>
@@ -523,6 +525,7 @@
   .tr:not(.th):hover { background: var(--surface-sunken); }
   .tr.sel { background: color-mix(in srgb, var(--teal-700) 9%, var(--surface)); }
   .tr .nm { font-weight: 600; }
+  .tr .who { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
   .tr span { font-size: 13px; }
   .muted { color: var(--muted); padding: var(--s-3) var(--s-2); }
 
