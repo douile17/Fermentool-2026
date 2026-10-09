@@ -25,17 +25,15 @@
     }
   }
 
-  function onKey(e) {
-    if (e.key === 'Escape') ondismiss();
-  }
 </script>
 
-<svelte:window on:keydown={onKey} />
-
-<button class="backdrop" aria-label="Dismiss" onclick={ondismiss}></button>
+<!-- A choice, not a notice: a click beside it or Escape used to close it for
+     good (once per run and tab), so someone busy on another page lost it
+     without ever reading it. Only the two buttons close it. -->
+<div class="backdrop" aria-hidden="true"></div>
 
 <div class="layer">
-  <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="ft-done">
+  <div class="modal card" role="alertdialog" aria-modal="true" aria-labelledby="ft-done">
     <div class="mark" aria-hidden="true">
       <svg viewBox="0 0 52 52">
         <circle class="ring" cx="26" cy="26" r="24" />
