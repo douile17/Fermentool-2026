@@ -69,6 +69,9 @@
   // The trim came from a run or a file, not from the default: worth saying
   // so when this PC has no balance to do it.
   let trimFromSeed = $state(false);
+  // A tube chosen here, or brought by a run or a file: the last run's tube
+  // is then not put in its place. Declared before the seed below sets it.
+  let tubeTouched = false;
 
   // The last person who started a run on this PC, as a starting choice.
   const LAST_RESPONSIBLE = 'ft-last-responsible';
@@ -298,7 +301,6 @@
   // pump, so it is picked to start with, until a choice is made here (or a
   // run or a file brings its own).
   let lastUsedCal = $state(null);
-  let tubeTouched = false;
   $effect(() => {
     if (!app.connected) return;
     get('/api/runs?limit=50')
