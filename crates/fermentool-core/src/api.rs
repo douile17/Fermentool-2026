@@ -1605,6 +1605,8 @@ mod tests {
     fn calibration_body(run_ids: [i64; 3], weights: [f64; 3]) -> serde_json::Value {
         json!({
             "tubing_lot_id": "LOT-42",
+            "product_ref": "06409-14",
+            "brand": "Masterflex",
             "inner_diameter_mm": 1.6, "outer_diameter_mm": 4.8,
             "control_var": "ml_min", "setpoint": 10.0, "density_g_per_ml": 1.0,
             "run_ids": run_ids, "weights_g": weights,

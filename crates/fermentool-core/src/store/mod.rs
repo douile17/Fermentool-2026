@@ -51,6 +51,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         sql: include_str!("migrations/0008_calibration_product_ref.sql"),
     },
+    Migration {
+        version: 9,
+        sql: include_str!("migrations/0009_calibration_brand.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -229,9 +233,14 @@ pub struct RunRow {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct NewCalibration {
     pub tubing_lot_id: String,
-    /// The maker's product reference (catalogue number), optional.
+    /// The maker's product reference (catalogue number). Required for a new
+    /// calibration; an `Option` only so a body without it gets the clear
+    /// "required" refusal rather than a parse error.
     #[serde(default)]
     pub product_ref: Option<String>,
+    /// The tube's brand (Watson-Marlow, VWR...), required like the reference.
+    #[serde(default)]
+    pub brand: Option<String>,
     /// The lab's own reference for this tube, optional.
     #[serde(default)]
     pub internal_ref: Option<String>,
@@ -252,6 +261,7 @@ pub struct CalibrationRow {
     pub id: i64,
     pub created_at: Timestamp,
     pub tubing_lot_id: String,
+    pub brand: Option<String>,
     pub product_ref: Option<String>,
     pub internal_ref: Option<String>,
     pub inner_diameter_mm: f64,
@@ -337,7 +347,7 @@ const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, cont
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
      measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
-     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref, archived_at, product_ref";
+     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref, archived_at, product_ref, brand";
 
 const TICK_COLS: &str =
     "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note, weight_g, delivered_g";
@@ -564,6 +574,12 @@ impl Store {
         if c.tubing_lot_id.trim().is_empty() {
             return Err(invalid("the tubing lot is required".into()));
         }
+        if c.product_ref.as_deref().is_none_or(|r| r.trim().is_empty()) {
+            return Err(invalid("the tube's reference is required".into()));
+        }
+        if c.brand.as_deref().is_none_or(|b| b.trim().is_empty()) {
+            return Err(invalid("the tube's brand is required".into()));
+        }
         if [c.inner_diameter_mm, c.outer_diameter_mm].iter().any(|v| !(v.is_finite() && *v > 0.0)) {
             return Err(invalid("inner and outer diameters must be positive (mm)".into()));
         }
@@ -628,9 +644,9 @@ impl Store {
                 weight_1_g, weight_2_g, weight_3_g,
                 measured_1_ml_min, measured_2_ml_min, measured_3_ml_min,
                 mean_measured_ml_min, cv_pct, c0, operator, note,
-                inner_diameter_mm, outer_diameter_mm, internal_ref, product_ref)
+                inner_diameter_mm, outer_diameter_mm, internal_ref, product_ref, brand)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 Timestamp::now().to_string(),
                 c.tubing_lot_id.trim(),
@@ -655,6 +671,7 @@ impl Store {
                 c.outer_diameter_mm,
                 c.internal_ref.as_deref().map(str::trim).filter(|r| !r.is_empty()),
                 c.product_ref.as_deref().map(str::trim).filter(|r| !r.is_empty()),
+                c.brand.as_deref().map(str::trim).filter(|b| !b.is_empty()),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -976,6 +993,7 @@ fn row_to_calibration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalibrationRo
         tubing_lot_id: row.get("tubing_lot_id")?,
         internal_ref: row.get("internal_ref")?,
         product_ref: row.get("product_ref")?,
+        brand: row.get("brand")?,
         inner_diameter_mm: row.get("inner_diameter_mm")?,
         outer_diameter_mm: row.get("outer_diameter_mm")?,
         control_var: parse_token(row.get("control_var")?, ControlVar::from_token, "control var")?,
@@ -1069,7 +1087,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8);
+        assert_eq!(v, 9);
     }
 
     #[test]
@@ -1081,7 +1099,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8);
+        assert_eq!(v, 9);
     }
 
     #[test]
@@ -1269,6 +1287,7 @@ mod tests {
         NewCalibration {
             tubing_lot_id: "LOT-42".into(),
             product_ref: Some("06409-14".into()),
+            brand: Some("Masterflex".into()),
             internal_ref: Some("TUB-007".into()),
             inner_diameter_mm: 1.6,
             outer_diameter_mm: 4.8,
@@ -1425,6 +1444,7 @@ mod tests {
         assert_eq!(c.tubing_lot_id, "LOT-42");
         assert_eq!(c.internal_ref.as_deref(), Some("TUB-007"));
         assert_eq!(c.product_ref.as_deref(), Some("06409-14"));
+        assert_eq!(c.brand.as_deref(), Some("Masterflex"));
         assert_eq!(c.inner_diameter_mm, 1.6);
         assert_eq!(c.outer_diameter_mm, 4.8);
         assert_eq!(c.control_var, ControlVar::MlMin);
@@ -1461,11 +1481,22 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         for given in [None, Some("   ".to_string())] {
             let runs = three_bursts(&s);
-            let c = NewCalibration { internal_ref: given.clone(), product_ref: given, ..new_calibration(runs, [50.0; 3]) };
+            let c = NewCalibration { internal_ref: given, ..new_calibration(runs, [50.0; 3]) };
             let id = s.insert_calibration(&c).unwrap();
-            let row = s.calibration(id).unwrap().unwrap();
-            assert_eq!(row.internal_ref, None);
-            assert_eq!(row.product_ref, None);
+            assert_eq!(s.calibration(id).unwrap().unwrap().internal_ref, None);
+        }
+    }
+
+    #[test]
+    fn a_calibration_without_its_reference_or_brand_is_refused() {
+        let s = Store::open_in_memory().unwrap();
+        for given in [None, Some("   ".to_string())] {
+            let runs = three_bursts(&s);
+            let c = NewCalibration { product_ref: given.clone(), ..new_calibration(runs, [50.0; 3]) };
+            assert!(matches!(s.insert_calibration(&c), Err(StoreError::Invalid(_))));
+            let runs = three_bursts(&s);
+            let c = NewCalibration { brand: given, ..new_calibration(runs, [50.0; 3]) };
+            assert!(matches!(s.insert_calibration(&c), Err(StoreError::Invalid(_))));
         }
     }
 
