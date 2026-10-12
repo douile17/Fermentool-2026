@@ -12,7 +12,7 @@
 </script>
 
 {#if show}
-  <div class="connbar">
+  <div class="connbar" id="connbar">
     <ConnectControl compact controls={link.connectable} />
   </div>
 {/if}

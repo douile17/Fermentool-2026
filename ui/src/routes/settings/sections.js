@@ -3,6 +3,7 @@ import BalanceSettings from './BalanceSettings.svelte';
 import RunSettings from './RunSettings.svelte';
 import NotificationSettings from './NotificationSettings.svelte';
 import DaemonSettings from './DaemonSettings.svelte';
+import DisplaySettings from './DisplaySettings.svelte';
 
 // The Settings side menu, in display order. A new section is one component
 // (built on SettingsCard, saving only its own fields through patchConfig)
@@ -13,6 +14,7 @@ export const SECTIONS = [
   { id: 'balance', label: 'Balance', group: 'Hardware', icon: 'weight', component: BalanceSettings },
   { id: 'runs', label: 'Crash resume', group: 'Runs', icon: 'power', component: RunSettings },
   { id: 'notifications', label: 'Notifications', group: 'Alerts', icon: 'bell', component: NotificationSettings },
+  { id: 'display', label: 'Display', group: 'System', icon: 'ruler', component: DisplaySettings },
   { id: 'daemon', label: 'Daemon', group: 'System', icon: 'server', component: DaemonSettings },
 ];
 

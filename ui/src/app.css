@@ -157,12 +157,31 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   border-radius: var(--radius-ctl);
   overflow: hidden;
 }
+/* Stretched to a field's width (a grid cell), the buttons share it equally
+   instead of leaving blank space after the last one. */
 .seg button {
+  flex: 1 1 0;
+  white-space: nowrap;
   border: none;
   border-radius: 0;
   background: var(--surface);
   color: var(--muted);
   padding: var(--s-2) var(--s-4);
+}
+/* a thin rule between two choices (cw | ccw), so they read as two buttons */
+.seg button + button { border-left: 1px solid var(--line); }
+.seg.need button + button { border-left-color: color-mix(in srgb, var(--measured) 45%, var(--surface)); }
+.seg.need {
+  border: 2px solid var(--measured);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--measured) 18%, transparent);
+}
+.seg.need button { color: var(--ink); font-weight: 500; }
+.seg.need button:hover { background: color-mix(in srgb, var(--measured) 12%, var(--surface)); }
+/* "choose" badge on a field label: a choice no default makes for you. */
+.choose {
+  margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  background: color-mix(in srgb, var(--measured) 16%, var(--surface)); color: color-mix(in srgb, var(--measured) 75%, var(--ink));
 }
 .seg button.on { background: color-mix(in srgb, var(--teal-700) 12%, var(--surface)); color: var(--teal-700); font-weight: 600; }
 
@@ -220,3 +239,56 @@ pre {
   to { opacity: 1; transform: none; }
 }
 @media (prefers-reduced-motion: reduce) { .page-enter { animation: none; } }
+
+/* A field reached from a checklist item: a ring that fades, so the eye
+   lands on it. */
+.flash-target { border-radius: var(--radius-ctl); animation: flash-target 1.6s ease-out; }
+@keyframes flash-target {
+  0%, 35% { box-shadow: 0 0 0 3px var(--surface), 0 0 0 6px var(--teal-400); background: color-mix(in srgb, var(--teal-400) 12%, transparent); }
+  100% { box-shadow: 0 0 0 3px transparent, 0 0 0 6px transparent; background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .flash-target { animation: none; outline: 2px solid var(--teal-400); outline-offset: 4px; } }
+
+/* Tube bores, one pastel each (lib/tubesize.js picks the class): a soft fill,
+   a stronger line, an ink that reads on the fill. A component colours its
+   parts with --c-bg / --c-line / --c-ink, set by the .bore-cN class. */
+:root {
+  --b0-bg: #e3f1fb; --b0-line: #6aa6d6; --b0-ink: #1f5a86;
+  --b1-bg: #e4f5ea; --b1-line: #62b383; --b1-ink: #1d6a3f;
+  --b2-bg: #fdeee0; --b2-line: #e0a066; --b2-ink: #8a4b12;
+  --b3-bg: #f1e8fb; --b3-line: #a585d6; --b3-ink: #5a3a8e;
+  --b4-bg: #fde7ee; --b4-line: #e08aa6; --b4-ink: #8c2f50;
+  --b5-bg: #e2f4f3; --b5-line: #5cb2ab; --b5-ink: #1c6762;
+  --b6-bg: #fbf5d9; --b6-line: #cdb24f; --b6-ink: #6d5a0c;
+  --b7-bg: #ece9f8; --b7-line: #8b8fd8; --b7-ink: #3b3f8c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --b0-bg: #20374a; --b0-line: #7fb6e2; --b0-ink: #cfe6f8;
+    --b1-bg: #1f3a2b; --b1-line: #7cc79a; --b1-ink: #d3f0de;
+    --b2-bg: #45321f; --b2-line: #e6ae7a; --b2-ink: #f8e2cc;
+    --b3-bg: #33284a; --b3-line: #b89be2; --b3-ink: #e8dcf8;
+    --b4-bg: #462733; --b4-line: #e79db6; --b4-ink: #f8d9e4;
+    --b5-bg: #1c3a39; --b5-line: #77c4be; --b5-ink: #cfeeec;
+    --b6-bg: #3f3a1c; --b6-line: #d8c06a; --b6-ink: #f3ebc6;
+    --b7-bg: #2a2c48; --b7-line: #a2a6e6; --b7-ink: #dcdef8;
+  }
+}
+:root[data-theme="dark"] {
+  --b0-bg: #20374a; --b0-line: #7fb6e2; --b0-ink: #cfe6f8;
+  --b1-bg: #1f3a2b; --b1-line: #7cc79a; --b1-ink: #d3f0de;
+  --b2-bg: #45321f; --b2-line: #e6ae7a; --b2-ink: #f8e2cc;
+  --b3-bg: #33284a; --b3-line: #b89be2; --b3-ink: #e8dcf8;
+  --b4-bg: #462733; --b4-line: #e79db6; --b4-ink: #f8d9e4;
+  --b5-bg: #1c3a39; --b5-line: #77c4be; --b5-ink: #cfeeec;
+  --b6-bg: #3f3a1c; --b6-line: #d8c06a; --b6-ink: #f3ebc6;
+  --b7-bg: #2a2c48; --b7-line: #a2a6e6; --b7-ink: #dcdef8;
+}
+.bore-c0 { --c-bg: var(--b0-bg); --c-line: var(--b0-line); --c-ink: var(--b0-ink); }
+.bore-c1 { --c-bg: var(--b1-bg); --c-line: var(--b1-line); --c-ink: var(--b1-ink); }
+.bore-c2 { --c-bg: var(--b2-bg); --c-line: var(--b2-line); --c-ink: var(--b2-ink); }
+.bore-c3 { --c-bg: var(--b3-bg); --c-line: var(--b3-line); --c-ink: var(--b3-ink); }
+.bore-c4 { --c-bg: var(--b4-bg); --c-line: var(--b4-line); --c-ink: var(--b4-ink); }
+.bore-c5 { --c-bg: var(--b5-bg); --c-line: var(--b5-line); --c-ink: var(--b5-ink); }
+.bore-c6 { --c-bg: var(--b6-bg); --c-line: var(--b6-line); --c-ink: var(--b6-ink); }
+.bore-c7 { --c-bg: var(--b7-bg); --c-line: var(--b7-line); --c-ink: var(--b7-ink); }

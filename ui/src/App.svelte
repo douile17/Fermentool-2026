@@ -6,6 +6,7 @@
   import History from './routes/History.svelte';
   import Settings from './routes/Settings.svelte';
   import TubingCalibration from './routes/TubingCalibration.svelte';
+  import LeaveConfirm from './components/LeaveConfirm.svelte';
   import PumpHead from './components/PumpHead.svelte';
   import Icon from './components/Icon.svelte';
   import ConnBar from './components/ConnBar.svelte';
@@ -153,6 +154,23 @@
     };
   });
 
+  // Leaving a page that holds work asks first (app.leaveGuard): the move
+  // waits in `pendingGo` until Stay or Leave and clear.
+  let pendingGo = $state(null);
+  function go(move) {
+    if (app.leaveGuard?.active()) pendingGo = move;
+    else move();
+  }
+
+  // Display settings (config.toml [display]), read again each time the
+  // daemon comes back: a page opened while it restarted would keep defaults.
+  $effect(() => {
+    if (!app.connected) return;
+    get('/api/config')
+      .then((c) => (app.tubeSizes = c.display?.tube_sizes === 'in' ? 'in' : 'mm'))
+      .catch(() => {});
+  });
+
   // "run complete" pop-up: shows once per completed run per browser session.
   const readFinishAck = () => {
     try {
@@ -254,7 +272,7 @@
         class="nav-item"
         class:active={app.route === 'pump'}
         class:running
-        onclick={() => (app.route = 'pump')}
+        onclick={() => go(() => (app.route = 'pump'))}
       >
         <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} solid /></span>Pump control
       </button>
@@ -263,7 +281,7 @@
     <button
       class="nav-item nav-settings"
       class:active={app.route === 'settings'}
-      onclick={() => (app.route = 'settings')}
+      onclick={() => go(() => (app.route = 'settings'))}
     >
       <span class="ic gear-ic" aria-hidden="true">
         <!-- same drawing as the pump glyph: one flat colour, ring cut out -->
@@ -337,7 +355,7 @@
               class:on={app.tab === id}
               role="tab"
               aria-selected={app.tab === id}
-              onclick={() => (app.tab = id)}
+              onclick={() => go(() => (app.tab = id))}
             ><Icon name={icon} size={15} />{label}</button>
           {/each}
         </div>
@@ -362,6 +380,11 @@
 
 {#if recovery}
   <ResumeModal info={recovery} ondone={() => (recovery = null)} />
+{/if}
+
+{#if pendingGo && app.leaveGuard}
+  <LeaveConfirm guard={app.leaveGuard} onstay={() => (pendingGo = null)}
+    ongo={() => { const move = pendingGo; pendingGo = null; move(); }} />
 {/if}
 
 {#if showFinish}

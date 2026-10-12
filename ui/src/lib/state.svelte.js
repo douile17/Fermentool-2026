@@ -12,4 +12,9 @@ export const app = $state({
   settingsSection: 'pump',
   /** Form seed for NewRun, set by "Run again" in History. Consumed once. */
   prefill: null,
+  /** Settings, Display: tube sizes led by 'mm' or 'in' (config.toml [display]). */
+  tubeSizes: 'mm',
+  /** A page holding work asks before it is left: { active(), title, lines,
+   *  leave() } set by the page (TubingCalibration), read by App's navigation. */
+  leaveGuard: null,
 });

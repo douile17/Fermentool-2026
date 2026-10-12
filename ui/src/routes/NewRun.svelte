@@ -1,16 +1,22 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
-  import { num, dur, stamp, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
+  import { num, dur, vol, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { canStartRun } from '../lib/link.js';
+  import { radioKeys, rovingTab } from '../lib/radio.js';
   import Chart from '../components/Chart.svelte';
   import ErrorText from '../components/ErrorText.svelte';
+  import Steps from '../components/Steps.svelte';
+  import TubePicker from '../components/TubePicker.svelte';
+  import { sizeParts, tubeLabel } from '../lib/tubesize.js';
   import { downloadSettings, readSettings } from '../lib/runfile.js';
 
   let f = $state({
     name: '',
     control_var: 'ml_min',
-    direction: 'cw',
+    // No default: the tube is often mounted the other way round, and a run
+    // started in the wrong direction has to be redone. Chosen every time.
+    direction: null,
     duration_h: '0',
     duration_m: '0',
     duration_s: '0',
@@ -28,12 +34,41 @@
     fb_sf: null,
     fb_ms: null, // maintenance coefficient, optional
     fb_vmax: null,
-    gravimetric_trim: false,
+    // The balance trim by default: with no balance set up, the run simply
+    // goes pump only (see `trimOn`).
+    gravimetric_trim: true,
     // tubing calibration picked for the gravimetric trim
     tubing_calibration_id: null,
     // who the run belongs to: its Teams alerts go to them only
     responsible: '',
   });
+
+  // The steps, in the order the bench is set up. Every step can be opened at
+  // any time: the steps guide, they do not lock.
+  let step = $state(1);
+  // A step turns green the moment its fields are right. None is right on
+  // its defaults alone (the name and the direction are always to enter, the
+  // duration starts at zero), so green always means something was entered.
+  function goTo(n) {
+    step = n;
+  }
+  // From "Still to set": to the field's step, then to the field, lit up.
+  function jumpTo(it) {
+    it.go?.();
+    requestAnimationFrame(() => {
+      const el = document.getElementById(it.target);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      (el.querySelector('input:not(:disabled), select:not(:disabled)') ?? el.querySelector('button:not(:disabled)'))?.focus({ preventScroll: true });
+      el.classList.remove('flash-target');
+      void el.offsetWidth;
+      el.classList.add('flash-target');
+      setTimeout(() => el.classList.remove('flash-target'), 1700);
+    });
+  }
+  // The trim came from a run or a file, not from the default: worth saying
+  // so when this PC has no balance to do it.
+  let trimFromSeed = $state(false);
 
   // The last person who started a run on this PC, as a starting choice.
   const LAST_RESPONSIBLE = 'ft-last-responsible';
@@ -44,9 +79,15 @@
   }
 
   // "Run again" from History drops a seed here; apply it once, then clear.
+  // A run already set up opens on its check: only the direction is left.
   if (app.prefill) {
     Object.assign(f, app.prefill);
     app.prefill = null;
+    // The mounting may have changed since that run: chosen again, never copied.
+    f.direction = null;
+    trimFromSeed = !!f.gravimetric_trim;
+    tubeTouched = true;
+    step = 4;
   }
 
   // Settings file: export the form as it stands, or fill it from a file
@@ -66,8 +107,14 @@
       if (got.responsible != null && !people.some((n) => n.toLowerCase() === got.responsible.trim().toLowerCase())) {
         got.responsible = '';
       }
+      // As for "Run again": the direction is chosen on the bench, not in a file.
+      delete got.direction;
       Object.assign(f, got);
+      f.direction = null;
+      trimFromSeed = !!f.gravimetric_trim;
+      tubeTouched = true;
       importMsg = `Settings loaded from ${file.name}`;
+      step = 4;
     } catch (err) {
       importErr = `${file.name}: ${err.message}`;
     }
@@ -75,12 +122,17 @@
 
   let pumpAddr = $state(1);
   let scaleConfigured = $state(false);
+  let scaleDensity = $state(1);
+  let scaleOnFeed = $state(true);
   let people = $state([]);
   $effect(() => {
+    if (!app.connected) return;
     get('/api/config')
       .then((c) => {
         pumpAddr = c.pump.address;
         scaleConfigured = (c.scale?.path?.length ?? 0) > 0;
+        scaleDensity = c.scale?.density_g_per_ml > 0 ? c.scale.density_g_per_ml : 1;
+        scaleOnFeed = (c.scale?.position ?? 'feed') === 'feed';
         people = (c.notify?.people ?? []).map((p) => p.name);
         // A remembered name no longer in Settings is no choice at all.
         if (!people.some((n) => n.toLowerCase() === f.responsible.trim().toLowerCase())) f.responsible = '';
@@ -206,6 +258,7 @@
   let calibrations = $state([]);
   let calsLoaded = $state(false);
   $effect(() => {
+    if (!app.connected) return;
     get('/api/calibrations')
       .then((rows) => (calibrations = rows ?? []))
       .catch(() => (calibrations = []))
@@ -241,9 +294,51 @@
   const needsCalibration = $derived(
     trimOn && f.control_var === 'rpm' && f.tubing_calibration_id == null,
   );
-  const calLabel = (c) =>
-    `${c.tubing_lot_id}${c.internal_ref ? ` (${c.internal_ref})` : ''} | Ø ${num(c.inner_diameter_mm, 1)}/${num(c.outer_diameter_mm, 1)} mm | ${stamp(c.created_at)} | CV ${num(c.cv_pct, 1)} %` +
-    (c.control_var === 'ml_min' ? ` | c₀ ${num(c.c0, 3)}` : ` | ${num(c.mean_measured_ml_min / c.setpoint, 3)} ml/min per rpm`);
+  // The tube of the last run that named one: most often still the one on the
+  // pump, so it is picked to start with, until a choice is made here (or a
+  // run or a file brings its own).
+  let lastUsedCal = $state(null);
+  let tubeTouched = false;
+  $effect(() => {
+    if (!app.connected) return;
+    get('/api/runs?limit=50')
+      .then((rows) => {
+        lastUsedCal = (rows ?? []).find((r) => r.kind === 'dosing' && r.tubing_calibration_id != null)?.tubing_calibration_id ?? null;
+      })
+      .catch(() => {});
+  });
+  $effect(() => {
+    if (tubeTouched || !calsLoaded || lastUsedCal == null || f.tubing_calibration_id != null) return;
+    if (calMatches.some((c) => c.id === lastUsedCal)) f.tubing_calibration_id = lastUsedCal;
+  });
+  const tubeName = (c) => {
+    const sz = sizeParts(c.inner_diameter_mm, c.outer_diameter_mm, app.tubeSizes);
+    return `${tubeLabel(c)}, Ø ${sz.pri} (${sz.sec})`;
+  };
+
+  // How much feed the curve takes: its flow summed over time (trapezoids on
+  // the preview's 200 points). An rpm curve needs the tube's ml per rpm.
+  const mlPerRpm = $derived(
+    chosenCal?.control_var === 'rpm' && chosenCal.setpoint > 0 ? chosenCal.mean_measured_ml_min / chosenCal.setpoint : null,
+  );
+  const flowOf = (v) => (f.control_var === 'ml_min' ? v : mlPerRpm != null ? v * mlPerRpm : null);
+  const feed = $derived.by(() => {
+    if (previewErr || preview.length < 2) return null;
+    let ml = 0;
+    let emptyAtS = null;
+    // the bottle on the balance, in mL of feed: when the curve has drawn it
+    const onBalanceMl = scaleOnFeed && scaleLive && scaleW > 0 ? scaleW / scaleDensity : null;
+    for (let i = 1; i < preview.length; i++) {
+      const a = flowOf(preview[i - 1][1]);
+      const b = flowOf(preview[i][1]);
+      if (a == null || b == null) return { unknown: true };
+      ml += ((a + b) / 2) * ((preview[i][0] - preview[i - 1][0]) / 60);
+      if (emptyAtS == null && onBalanceMl != null && ml >= onBalanceMl) emptyAtS = preview[i][0];
+    }
+    // past the curve the run holds its end value until Stop
+    const holdMlH = flowOf(preview[preview.length - 1][1]) * 60;
+    return { ml, onBalanceMl, emptyAtS, holdMlH };
+  });
 
   let starting = $state(false);
   let startErr = $state(null);
@@ -253,7 +348,7 @@
     startErr = null;
     try {
       await post('/api/runs', {
-        name: f.name.trim() || 'run',
+        name: f.name.trim(),
         control_var: f.control_var,
         direction: f.direction,
         pump_addr: pumpAddr,
@@ -277,410 +372,455 @@
   const busy = $derived(app.status?.active != null);
   // A run drives the pump, so it needs a live link, single gate in link.js.
   const cannotStart = $derived(!canStartRun(app.status));
+  const curveOk = $derived(!previewErr && durationS > 0 && preview.length > 0);
+
+  // What has to be right before Start comes on. Each item takes you to its
+  // field, on its step. The direction is never set by default (see `f`).
+  const checklist = $derived([
+    // A name to find the run again in History: "run" twenty times reads as nothing.
+    { label: 'Run name', done: !!f.name.trim(), hint: 'To find it in History', target: 'nr-name', go: () => goTo(1) },
+    ...(people.length
+      ? [{ label: 'Responsible', done: !needsResponsible, hint: 'Who gets the alerts', target: 'nr-resp', go: () => goTo(1) }]
+      : []),
+    { label: 'Pump direction', done: f.direction === 'cw' || f.direction === 'ccw', hint: 'Check how the tube is mounted', target: 'pump-direction', go: () => goTo(2) },
+    ...(trimOn ? [{ label: 'Tubing calibration', done: !needsCalibration, hint: 'Needed for the regulation in rpm', target: 'nr-tube', go: () => goTo(2) }] : []),
+    { label: 'Duration', done: durationS > 0, hint: 'Longer than zero', target: 'nr-duration', go: () => goTo(3) },
+    { label: 'Curve', done: curveOk, hint: 'A valid profile', target: 'nr-shape', go: () => goTo(3) },
+    busy
+      ? { label: 'No other run', done: false, hint: 'Stop it from Overview first' }
+      : { label: 'Pump connected', done: !cannotStart, hint: 'Connect the pump', target: 'connbar' },
+  ]);
+  const ready = $derived(checklist.every((i) => i.done));
+
+  const KINDS = [
+    { v: 'linear', label: 'Linear', d: 'M4 26 L56 4' },
+    { v: 'exponential', label: 'Exponential', d: 'M4 26 C30 26 46 22 56 4' },
+    { v: 'sigmoid', label: 'Sigmoid', d: 'M4 26 C26 26 34 4 56 4' },
+    { v: 'constant', label: 'Constant', d: 'M4 15 L56 15' },
+  ];
+  const kindLabel = $derived(KINDS.find((k) => k.v === f.kind)?.label ?? f.kind);
+  const digits = $derived(digitsFor(f.control_var));
+  const startV = $derived(preview.length ? preview[0][1] : null);
+  const endV = $derived(preview.length ? preview[preview.length - 1][1] : null);
+
+  const steps = $derived([
+    { n: 1, label: 'Run', sub: f.name.trim() || (f.responsible ? `for ${f.responsible}` : 'name, responsible'), done: !!f.name.trim() && !needsResponsible },
+    {
+      n: 2,
+      label: 'Pump and tube',
+      sub: `${unit}, ${f.direction ?? 'direction to choose'}, ${trimOn ? 'balance regulation' : 'no regulation'}`,
+      done: !!f.direction && !needsCalibration,
+    },
+    { n: 3, label: 'Feed profile', sub: durationS > 0 ? `${kindLabel}, ${dur(durationS)}` : kindLabel, done: curveOk },
+    { n: 4, label: 'Check and start', sub: `${checklist.filter((i) => i.done).length} of ${checklist.length} ready` },
+  ]);
+  const NEXT = { 1: 'Next: pump and tube', 2: 'Next: feed profile', 3: 'Next: check and start' };
+  const BACK = { 2: 'Run', 3: 'Pump and tube', 4: 'Feed profile' };
 </script>
 
-<section class="card">
-  <div class="card-head">
+<div class="nr">
+  <header class="nr-head">
     <div><div class="eyebrow">Run setup</div><h2>New run</h2></div>
     <div class="file-tools">
       <input type="file" accept=".json,application/json" hidden bind:this={fileInput} onchange={importSettings} />
       <button class="btn-ghost" onclick={() => fileInput.click()} title="Fill the form from a settings file">Import settings</button>
       <button class="btn-ghost" onclick={() => downloadSettings(f)} title="Save the form to a file, to import later">Export settings</button>
     </div>
-  </div>
-  {#if importErr}<div class="err" style="margin-bottom:16px">{importErr}</div>{/if}
-  {#if importMsg}<p class="imported mono">{importMsg}</p>{/if}
-
+  </header>
+  {#if importErr}<div class="err">{importErr}</div>{/if}
+  {#if importMsg}<p class="imported mono">{importMsg}: check it, then choose the pump direction.</p>{/if}
   {#if busy}
-    <div class="err" style="margin-bottom:16px">A run is already active. Stop it from Overview first.</div>
+    <div class="err">A run is already active. Stop it from Overview first.</div>
   {/if}
 
-  {#if cannotStart}
-    <div class="gate" role="alert">
-      Connect the pump using the connection bar at the top of the screen before starting a run.
-    </div>
-  {/if}
+  <Steps label="New run steps" {steps} current={step} onpick={goTo} />
 
-  <div class="group">
-    <div class="eyebrow">Run</div>
-    <div class="grid">
-      <label class="field"><span>Run name</span>
-        <input type="text" bind:value={f.name} placeholder="e.g. ferment-A2" />
-      </label>
-
-      {#if people.length}
-        <label class="field"><span>Responsible</span>
-          <select bind:value={f.responsible} class:missing={needsResponsible}>
-            <option value="" disabled>Who is this run for?</option>
-            {#each people as n}<option value={n}>{n}</option>{/each}
-          </select>
+  <section class="card panel">
+    {#if step === 1}
+      <h3>Run</h3>
+      <div class="row">
+        <label class="field grow" id="nr-name"><span>Run name{#if !f.name.trim()}<span class="choose">required</span>{/if}</span>
+          <input type="text" bind:value={f.name} placeholder="e.g. ferment-A2" class:missing={!f.name.trim()} />
         </label>
+        {#if people.length}
+          <label class="field resp" id="nr-resp"><span>Responsible{#if needsResponsible}<span class="choose">choose</span>{/if}</span>
+            <select bind:value={f.responsible} class:missing={needsResponsible}>
+              <option value="" disabled>Who gets the alerts?</option>
+              {#each people as n}<option value={n}>{n}</option>{/each}
+            </select>
+          </label>
+        {/if}
+      </div>
+      <p class="k">
+        {people.length
+          ? "The run's alerts (alarms, link lost, end of curve) go to this person only."
+          : 'No one is set up for alerts on this PC (Settings, Notifications).'}
+      </p>
+    {:else if step === 2}
+      <h3>Pump and tube</h3>
+      <div class="row">
+        <div class="field"><span>Set the pump in</span>
+          <div class="seg" role="radiogroup" aria-label="Pump unit" tabindex="-1" onkeydown={radioKeys}>
+            <button role="radio" aria-checked={f.control_var === 'ml_min'} tabindex={rovingTab(f.control_var === 'ml_min', false)}
+              class:on={f.control_var === 'ml_min'} onclick={() => (f.control_var = 'ml_min')}>ml/min</button>
+            <button role="radio" aria-checked={f.control_var === 'rpm'} tabindex={rovingTab(f.control_var === 'rpm', false)}
+              class:on={f.control_var === 'rpm'} onclick={() => (f.control_var = 'rpm')}>rpm</button>
+          </div>
+        </div>
+        <div class="field"><span>Pump direction{#if !f.direction}<span class="choose">choose</span>{/if}</span>
+          <div class="seg" class:need={!f.direction} id="pump-direction" role="radiogroup" aria-label="Pump direction" tabindex="-1" onkeydown={radioKeys}>
+            <button role="radio" aria-checked={f.direction === 'cw'} tabindex={rovingTab(f.direction === 'cw', !f.direction)}
+              class:on={f.direction === 'cw'} title="Clockwise" onclick={() => (f.direction = 'cw')}>↻ cw</button>
+            <button role="radio" aria-checked={f.direction === 'ccw'} tabindex={rovingTab(f.direction === 'ccw', false)}
+              class:on={f.direction === 'ccw'} title="Counter-clockwise" onclick={() => (f.direction = 'ccw')}>↺ ccw</button>
+          </div>
+        </div>
+        <div class="field"><span>Regulation</span>
+          <div class="seg" role="radiogroup" aria-label="Regulation" tabindex="-1" onkeydown={radioKeys}>
+            <button role="radio" aria-checked={trimOn} tabindex={rovingTab(trimOn, false)} class:on={trimOn}
+              disabled={!scaleConfigured} title={scaleConfigured ? 'The balance corrects the pump' : 'No balance set up'}
+              onclick={() => (f.gravimetric_trim = true)}>Balance regulation</button>
+            <button role="radio" aria-checked={!trimOn} tabindex={rovingTab(!trimOn, false)} class:on={!trimOn}
+              title="The pump runs on its own" onclick={() => (f.gravimetric_trim = false)}>No regulation</button>
+          </div>
+        </div>
+      </div>
+      {#if !scaleConfigured}
+        <p class="k">
+          {trimFromSeed && f.gravimetric_trim ? 'This run used the balance regulation, but no balance is set up here.' : 'The regulation needs a balance.'}
+          <button class="linkish" type="button" onclick={openBalanceSettings}>Set up a balance</button>
+        </p>
+      {:else if trimOn && !scaleLive}
+        <p class="k bad">The balance is not responding: the regulation cannot correct anything until it is back.</p>
       {/if}
 
-      <div class="field dur-field"><span>Duration</span>
-        <div class="dur">
-          <label><input type="text" inputmode="numeric" autocomplete="off"
-            bind:value={f.duration_h}
-            onfocus={() => durFocus('duration_h')}
-            onblur={() => durBlur('duration_h')}
-            oninput={(e) => (f.duration_h = e.target.value.replace(/[^0-9]/g, ''))} /><span>h</span></label>
-          <label><input type="text" inputmode="numeric" autocomplete="off"
-            bind:value={f.duration_m}
-            onfocus={() => durFocus('duration_m')}
-            onblur={() => durBlur('duration_m')}
-            oninput={(e) => (f.duration_m = e.target.value.replace(/[^0-9]/g, ''))} /><span>min</span></label>
-          <label><input type="text" inputmode="numeric" autocomplete="off"
-            bind:value={f.duration_s}
-            onfocus={() => durFocus('duration_s')}
-            onblur={() => durBlur('duration_s')}
-            oninput={(e) => (f.duration_s = e.target.value.replace(/[^0-9]/g, ''))} /><span>s</span></label>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="group row">
-    <div class="pane pane-pump">
-      <div class="eyebrow">Pump output</div>
-      <div class="pump-fields">
-        <div class="field"><span>Control</span>
-          <div class="seg">
-            <button class:on={f.control_var === 'ml_min'} onclick={() => (f.control_var = 'ml_min')}>ml/min</button>
-            <button class:on={f.control_var === 'rpm'} onclick={() => (f.control_var = 'rpm')}>rpm</button>
-          </div>
-        </div>
-
-        <div class="field"><span>Direction</span>
-          <div class="seg">
-            <button class:on={f.direction === 'cw'} onclick={() => (f.direction = 'cw')}>clockwise</button>
-            <button class:on={f.direction === 'ccw'} onclick={() => (f.direction = 'ccw')}>counter</button>
-          </div>
-        </div>
-
-        <div class="field"><span>Regulation</span>
-          <div class="seg" role="radiogroup" aria-label="Regulation">
-            <button role="radio" aria-checked={!trimOn} class:on={!trimOn}
-              onclick={() => (f.gravimetric_trim = false)}>pump only</button>
-            <button role="radio" aria-checked={trimOn} class:on={trimOn} disabled={!scaleConfigured}
-              title={scaleConfigured ? '' : 'No balance set up'}
-              onclick={() => (f.gravimetric_trim = true)}>balance trim</button>
-          </div>
-        </div>
-      </div>
-      <p class="cal-note reg-note" class:bad={trimOn && !scaleLive}>
-        {#if !scaleConfigured}
-          {f.gravimetric_trim ? 'This run used the balance trim, but no' : 'No'} balance is set up, the pump runs open loop.
-          <button class="linkish" type="button" onclick={openBalanceSettings}>Set up a balance</button>
-        {:else if trimOn && !scaleLive}
-          The balance is not responding: the trim cannot correct anything until it is back.
-        {:else if trimOn}
-          The balance{scaleW != null ? ` (${num(scaleW, 1)} g now)` : ''} corrects the flow so the delivered volume follows the curve.
-        {:else}
-          Open loop: the pump runs its own flow, the balance only records.
-        {/if}
-      </p>
       {#if showCal}
-        <div class="cal">
-          {#if calMatches.length}
-            <label class="field"><span>Tubing calibration</span>
-              <select bind:value={f.tubing_calibration_id}>
-                <option value={null}>
-                  {f.control_var === 'rpm'
-                    ? 'Choose a calibration'
-                    : trimOn
-                      ? "None: the pump's own ml/min, trim from 1.0"
-                      : "None: the pump's own ml/min"}
-                </option>
-                {#if f.control_var === 'ml_min'}
-                  {#if calMatches.some((c) => c.control_var === 'rpm')}
-                    <optgroup label="Drive in rpm from the tube's calibration">
-                      {#each calMatches.filter((c) => c.control_var === 'rpm') as c (c.id)}
-                        <option value={c.id}>{calLabel(c)}</option>
-                      {/each}
-                    </optgroup>
-                  {/if}
-                  {#if calMatches.some((c) => c.control_var === 'ml_min')}
-                    <optgroup label="Pump's own ml/min, trim seeded with c₀">
-                      {#each calMatches.filter((c) => c.control_var === 'ml_min') as c (c.id)}
-                        <option value={c.id}>{calLabel(c)}</option>
-                      {/each}
-                    </optgroup>
-                  {/if}
-                {:else}
-                  {#each calMatches as c (c.id)}
-                    <option value={c.id}>{calLabel(c)}</option>
-                  {/each}
-                {/if}
-              </select>
-            </label>
-          {/if}
-          {#if drivePerRpm != null}
-            <p class="cal-note">
-              Driven in rpm: {num(drivePerRpm, 3)} ml/min per rpm, so up to
-              {num(drivePerRpm * RPM_LIMITS.max, 1)} ml/min at {RPM_LIMITS.max} rpm. The curve stays in
-              ml/min; the pump's own head/tubing table is not used.
+        <div class="field" id="nr-tube"><span>Tube on the pump</span>
+          <TubePicker cals={calMatches} value={f.tubing_calibration_id} lastUsed={lastUsedCal}
+            onchange={(id) => { f.tubing_calibration_id = id; tubeTouched = true; }}
+            allowNone={f.control_var === 'ml_min'}
+            noneText={trimOn ? "The pump's own ml/min, the regulation starts at ×1.00" : "The pump's own ml/min"}
+            oncalibrate={() => (app.tab = 'calibration')} />
+          {#if chosenCal && Date.now() - Date.parse(chosenCal.created_at) > 30 * 86_400_000}
+            <p class="k warn-t">
+              Calibrated over 30 days ago: tubing wears and its flow drifts. Recalibrate it before a long run.
+              <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
             </p>
           {/if}
           {#if needsCalibration}
-            <p class="cal-note bad">
-              {calMatches.length ? 'Choose the calibration of the tube you installed:' : `No ${unit} calibration recorded yet:`}
-              the trim cannot start in rpm without one.
+            <p class="k bad">
+              {calMatches.length ? 'Pick the tube you installed:' : `No ${unit} calibration recorded yet:`}
+              the regulation cannot start in rpm without one.
               <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
             </p>
           {:else if trimOn && f.control_var === 'ml_min' && f.tubing_calibration_id == null}
-            <p class="cal-note">
-              Starting without a calibration: the trim starts at 1.0 and corrects from there.
+            <p class="k">
+              Without a calibration the regulation starts at ×1.00 and corrects from there.
               <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
             </p>
           {/if}
         </div>
       {/if}
-    </div>
+    {:else if step === 3}
+      <h3>Feed profile</h3>
+      <div class="profile">
+        <div class="profile-form">
+          <div class="field"><span>Shape</span>
+            <div class="shapes" id="nr-shape" role="radiogroup" aria-label="Curve shape" tabindex="-1" onkeydown={radioKeys}>
+              {#each KINDS as k (k.v)}
+                <button class="shape" role="radio" aria-checked={f.kind === k.v} tabindex={rovingTab(f.kind === k.v, false)}
+                  class:on={f.kind === k.v} onclick={() => (f.kind = k.v)}>
+                  <svg viewBox="0 0 60 30" aria-hidden="true"><path d={k.d} /></svg>
+                  <span>{k.label}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
 
-    <div class="pane pane-profile">
-      <div class="eyebrow">Profile</div>
-      <div class="grid">
-      <label class="field"><span>Curve</span>
-        <select bind:value={f.kind}>
-          <option value="linear">Linear</option>
-          <option value="exponential">Exponential</option>
-          <option value="sigmoid">Sigmoid</option>
-          <option value="constant">Constant</option>
-        </select>
-      </label>
+          <div class="row">
+            {#if f.kind === 'constant'}
+              <label class="field num-f"><span>Speed, {unit}</span>
+                <input type="number" step="0.1" bind:value={f.value} />
+              </label>
+            {:else}
+              <label class="field num-f"><span>Start, {unit}</span>
+                <input type="number" step="0.1" bind:value={f.start} />
+              </label>
+              {#if !(f.kind === 'exponential' && f.mode === 'physio')}
+                <label class="field num-f"><span>End, {unit}</span>
+                  <input type="number" step="0.1" bind:value={f.end} />
+                </label>
+              {/if}
+            {/if}
+            {#if f.kind === 'exponential'}
+              <div class="field"><span>Set by</span>
+                <div class="seg" role="radiogroup" aria-label="Exponential set by" tabindex="-1" onkeydown={radioKeys}>
+                  <button role="radio" aria-checked={f.mode === 'endpoints'} tabindex={rovingTab(f.mode === 'endpoints', false)}
+                    class:on={f.mode === 'endpoints'} onclick={() => (f.mode = 'endpoints')}>start → end</button>
+                  <button role="radio" aria-checked={f.mode === 'physio'} tabindex={rovingTab(f.mode === 'physio', false)}
+                    class:on={f.mode === 'physio'} onclick={() => (f.mode = 'physio')}>rate µ</button>
+                </div>
+              </div>
+              {#if f.mode === 'physio'}
+                <label class="field num-f"><span>µ, per hour</span>
+                  <input type="number" step="0.01" bind:value={f.mu_per_hour} />
+                </label>
+              {/if}
+            {/if}
+            {#if f.kind === 'sigmoid'}
+              <label class="field num-f"><span>Steepness</span>
+                <input type="number" step="1" min="1" bind:value={f.steepness} />
+              </label>
+            {/if}
+          </div>
 
-      {#if f.kind === 'constant'}
-        <label class="field"><span>Speed ({unit})</span>
-          <input type="number" step="0.1" bind:value={f.value} />
-        </label>
-      {:else}
-        <label class="field"><span>Start ({unit})</span>
-          <input type="number" step="0.1" bind:value={f.start} />
-        </label>
-        {#if !(f.kind === 'exponential' && f.mode === 'physio')}
-          <label class="field"><span>End ({unit})</span>
-            <input type="number" step="0.1" bind:value={f.end} />
-          </label>
-        {/if}
-      {/if}
-
-      {#if f.kind === 'exponential'}
-        <div class="field"><span>Exponential mode</span>
-          <div class="seg">
-            <button class:on={f.mode === 'endpoints'} onclick={() => (f.mode = 'endpoints')}>start → end</button>
-            <button class:on={f.mode === 'physio'} onclick={() => (f.mode = 'physio')}>rate µ</button>
+          <div class="field" id="nr-duration"><span>Duration</span>
+            <div class="dur">
+              <label><input type="text" inputmode="numeric" autocomplete="off" aria-label="Hours"
+                bind:value={f.duration_h}
+                onfocus={() => durFocus('duration_h')}
+                onblur={() => durBlur('duration_h')}
+                oninput={(e) => (f.duration_h = e.target.value.replace(/[^0-9]/g, ''))} /><span>h</span></label>
+              <label><input type="text" inputmode="numeric" autocomplete="off" aria-label="Minutes"
+                bind:value={f.duration_m}
+                onfocus={() => durFocus('duration_m')}
+                onblur={() => durBlur('duration_m')}
+                oninput={(e) => (f.duration_m = e.target.value.replace(/[^0-9]/g, ''))} /><span>min</span></label>
+              <label><input type="text" inputmode="numeric" autocomplete="off" aria-label="Seconds"
+                bind:value={f.duration_s}
+                onfocus={() => durFocus('duration_s')}
+                onblur={() => durBlur('duration_s')}
+                oninput={(e) => (f.duration_s = e.target.value.replace(/[^0-9]/g, ''))} /><span>s</span></label>
+            </div>
           </div>
         </div>
-        {#if f.mode === 'physio'}
-          <label class="field"><span>µ (per hour)</span>
-            <input type="number" step="0.01" bind:value={f.mu_per_hour} />
-          </label>
+
+        <div class="preview">
+          {#if previewErr}
+            <div class="err">{previewErr}</div>
+          {:else if preview.length && durationS > 0}
+            <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} {digits} />
+            <div class="pv-cap mono">
+              <span>start <b>{num(startV, digits)}</b></span>
+              <span>end <b>{num(endV, digits)}</b> {unit}</span>
+              <span><b>{dur(durationS)}</b></span>
+            </div>
+            {@render feedNote()}
+          {:else}
+            <p class="k">Give the curve a duration to see it.</p>
+          {/if}
+        </div>
+      </div>
+
+      {#if f.kind === 'exponential' && f.mode === 'physio'}
+        <details class="fb">
+          <summary>Fed-batch F₀ from strain parameters</summary>
+          <p class="fb-eq mono">F₀ = (µ / Y<sub>x/s</sub> + m<sub>s</sub>) · X₀ · V₀ / S<sub>f</sub></p>
+          <p class="fb-note">
+            Assumes µ and Y<sub>x/s</sub> constant and the culture substrate-limiting (S ≈ 0).
+            Leave m<sub>s</sub> blank for the growth-only form.
+          </p>
+          <div class="grid">
+            <label class="field"><span>X₀ | biomass at feed start (g/L)</span>
+              <input type="number" step="0.1" bind:value={f.fb_x0} placeholder="e.g. 2" />
+            </label>
+            <label class="field"><span>V₀ | culture volume (L)</span>
+              <input type="number" step="0.1" bind:value={f.fb_v0} placeholder="e.g. 1.0" />
+            </label>
+            <label class="field"><span>Y<sub>x/s</sub> | yield (g/g)</span>
+              <input type="number" step="0.01" bind:value={f.fb_yxs} placeholder="E. coli/glucose ≈ 0.45" />
+            </label>
+            <label class="field"><span>S<sub>f</sub> | substrate in feed bottle (g/L)</span>
+              <input type="number" step="1" bind:value={f.fb_sf} placeholder="e.g. 500" />
+            </label>
+            <label class="field"><span>m<sub>s</sub> | maintenance (g/g·h, optional)</span>
+              <input type="number" step="0.001" bind:value={f.fb_ms} placeholder="E. coli ≈ 0.025" />
+            </label>
+            <label class="field"><span>V<sub>max</sub> | reactor limit (L, optional)</span>
+              <input type="number" step="0.1" bind:value={f.fb_vmax} placeholder="for the t_max hint" />
+            </label>
+          </div>
+
+          {#if fb}
+            <div class="fb-out mono">
+              F₀ = <b>{fb.f0_mlmin.toFixed(3)} ml/min</b>
+              <span class="dim">({fb.f0_Lh.toFixed(4)} L/h | µ = {f.mu_per_hour} h⁻¹{fb.ms ? ` | m_s = ${fb.ms}` : ''})</span>
+              {#if fb.tmax}<br />reaches V<sub>max</sub> in ≈ <b>{fb.tmax.toFixed(1)} h</b>{/if}
+            </div>
+            <button class="btn-ghost" type="button" onclick={useF0}>
+              Use → Control ml/min, Start {fb.f0_mlmin.toFixed(2)}{fb.tmax ? `, Duration ${dur(fb.tmax * 3600)}` : ''}
+            </button>
+          {:else}
+            <p class="k">Fill µ, X₀, V₀, Y<sub>x/s</sub> and S<sub>f</sub> (all &gt; 0).</p>
+          {/if}
+        </details>
+      {/if}
+    {:else}
+      <h3>Check and start</h3>
+      <div class="review">
+        <dl class="recap">
+          <dt>Run</dt>
+          <dd>{#if f.name.trim()}{f.name.trim()}{:else}<b class="todo">name to enter</b>{/if}{f.responsible ? `, alerts to ${f.responsible}` : ''}</dd>
+          <dd class="edit"><button class="linkish" onclick={() => goTo(1)}>Change</button></dd>
+
+          <dt>Pump</dt>
+          <dd>
+            {unit},
+            {#if f.direction}{f.direction === 'cw' ? '↻ cw' : '↺ ccw'}{:else}<b class="todo">direction to choose</b>{/if},
+            {trimOn ? 'balance regulation' : 'no regulation'}
+          </dd>
+          <dd class="edit"><button class="linkish" onclick={() => goTo(2)}>Change</button></dd>
+
+          <dt>Tube</dt>
+          <dd>{chosenCal ? tubeName(chosenCal) : needsCalibration ? '' : 'no calibration'}{#if needsCalibration}<b class="todo">calibration to choose</b>{/if}</dd>
+          <dd class="edit"><button class="linkish" onclick={() => goTo(2)}>Change</button></dd>
+
+          <dt>Curve</dt>
+          <dd>
+            {#if curveOk}{kindLabel}, {num(startV, digits)} to {num(endV, digits)} {unit}, {dur(durationS)}
+            {:else}<b class="todo">{previewErr ? 'not valid' : 'no duration yet'}</b>{/if}
+          </dd>
+          <dd class="edit"><button class="linkish" onclick={() => goTo(3)}>Change</button></dd>
+
+          <dt>Feed</dt>
+          <dd>{feed && !feed.unknown ? vol(feed.ml) : '–'}</dd>
+          <dd class="edit"></dd>
+        </dl>
+        <div class="go">
+          <!-- the curve the pump will follow, the last thing seen before Start -->
+          {#if curveOk}
+            <div class="preview">
+              <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} {digits} />
+              <div class="pv-cap mono">
+                <span>start <b>{num(startV, digits)}</b></span>
+                <span>end <b>{num(endV, digits)}</b> {unit}</span>
+                <span><b>{dur(durationS)}</b></span>
+              </div>
+            </div>
+          {/if}
+          {#if startErr}
+            <ErrorText message={startErr.message} hint={startErr.hint} />
+          {/if}
+          <button class="btn-primary start" disabled={starting || !ready} onclick={start}>
+            {starting ? 'Starting…' : 'Start run'}
+          </button>
+          {#if !ready}
+            <!-- what is missing, each a way to its field -->
+            <p class="k center">
+              Still to set:
+              {#each checklist.filter((i) => !i.done) as it, i (it.label)}{i ? ', ' : ''}{#if it.target}<button
+                    class="linkish" type="button" onclick={() => jumpTo(it)}>{it.label.toLowerCase()}</button
+                  >{:else}{it.label.toLowerCase()}{/if}{/each}.
+            </p>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
+    <div class="nav-row">
+      {#if BACK[step]}
+        <button class="btn-ghost" onclick={() => goTo(step - 1)}>← {BACK[step]}</button>
+      {:else}
+        <span></span>
+      {/if}
+      {#if NEXT[step]}
+        <button class="btn-primary" onclick={() => goTo(step + 1)}>{NEXT[step]} →</button>
+      {/if}
+    </div>
+  </section>
+</div>
+
+{#snippet feedNote()}
+  {#if feed?.unknown}
+    <p class="feed k">Feed needed: pick the tube, its ml per rpm turns the curve into mL.</p>
+  {:else if feed}
+    <div class="feed">
+      <span class="k">Feed needed for the curve</span>
+      <b class="mono">{vol(feed.ml)}</b>
+      {#if feed.onBalanceMl != null}
+        {#if feed.emptyAtS != null}
+          <span class="k warn-t">More than the {num(scaleW, 0)} g on the balance: refill around {dur(feed.emptyAtS)} in.</span>
+        {:else}
+          <span class="k">{num(scaleW, 0)} g on the balance, about {vol(feed.onBalanceMl - feed.ml)} to spare.</span>
         {/if}
       {/if}
-
-      {#if f.kind === 'sigmoid'}
-        <label class="field"><span>Steepness</span>
-          <input type="number" step="1" min="1" bind:value={f.steepness} />
-        </label>
-      {/if}
-      </div>
-    </div>
-  </div>
-
-  {#if f.kind === 'exponential' && f.mode === 'physio'}
-    <details class="fb">
-      <summary>Fed-batch F₀ from strain parameters</summary>
-      <p class="fb-eq mono">F₀ = (µ / Y<sub>x/s</sub> + m<sub>s</sub>) · X₀ · V₀ / S<sub>f</sub></p>
-      <p class="fb-note">
-        Assumes µ and Y<sub>x/s</sub> constant and the culture substrate-limiting (S ≈ 0).
-        Leave m<sub>s</sub> blank for the growth-only form.
-      </p>
-      <div class="grid">
-        <label class="field"><span>X₀ | biomass at feed start (g/L)</span>
-          <input type="number" step="0.1" bind:value={f.fb_x0} placeholder="e.g. 2" />
-        </label>
-        <label class="field"><span>V₀ | culture volume (L)</span>
-          <input type="number" step="0.1" bind:value={f.fb_v0} placeholder="e.g. 1.0" />
-        </label>
-        <label class="field"><span>Y<sub>x/s</sub> | yield (g/g)</span>
-          <input type="number" step="0.01" bind:value={f.fb_yxs} placeholder="E. coli/glucose ≈ 0.45" />
-        </label>
-        <label class="field"><span>S<sub>f</sub> | substrate in feed bottle (g/L)</span>
-          <input type="number" step="1" bind:value={f.fb_sf} placeholder="e.g. 500" />
-        </label>
-        <label class="field"><span>m<sub>s</sub> | maintenance (g/g·h, optional)</span>
-          <input type="number" step="0.001" bind:value={f.fb_ms} placeholder="E. coli ≈ 0.025" />
-        </label>
-        <label class="field"><span>V<sub>max</sub> | reactor limit (L, optional)</span>
-          <input type="number" step="0.1" bind:value={f.fb_vmax} placeholder="for the t_max hint" />
-        </label>
-      </div>
-
-      {#if fb}
-        <div class="fb-out mono">
-          F₀ = <b>{fb.f0_mlmin.toFixed(3)} ml/min</b>
-          <span class="dim">({fb.f0_Lh.toFixed(4)} L/h | µ = {f.mu_per_hour} h⁻¹{fb.ms ? ` | m_s = ${fb.ms}` : ''})</span>
-          {#if fb.tmax}<br />reaches V<sub>max</sub> in ≈ <b>{fb.tmax.toFixed(1)} h</b>{/if}
-        </div>
-        <button class="btn-ghost" type="button" onclick={useF0}>
-          Use → Control ml/min, Start {fb.f0_mlmin.toFixed(2)}{fb.tmax ? `, Duration ${dur(fb.tmax * 3600)}` : ''}
-        </button>
-      {:else}
-        <p class="muted">Fill µ, X₀, V₀, Y<sub>x/s</sub> and S<sub>f</sub> (all &gt; 0).</p>
-      {/if}
-    </details>
-  {/if}
-
-  <div class="preview">
-    <div class="eyebrow" style="margin-bottom:8px">Preview</div>
-    {#if previewErr}
-      <div class="err">{previewErr}</div>
-    {:else if preview.length}
-      <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} digits={digitsFor(f.control_var)} />
-      <div class="pv-cap mono">
-        start {num(preview[0][1], digitsFor(f.control_var))} {unit} | end {num(preview[preview.length - 1][1], digitsFor(f.control_var))} {unit} | {dur(durationS)}
-      </div>
-    {:else}
-      <p class="muted">Adjust the fields to see the curve.</p>
-    {/if}
-  </div>
-
-  {#if startErr}
-    <div style="margin-top:16px">
-      <ErrorText message={startErr.message} hint={startErr.hint} />
+      <span class="k">Then {vol(feed.holdMlH)} an hour while it holds its end value, until you stop it.</span>
     </div>
   {/if}
-
-  <div class="foot">
-    {#if needsResponsible}
-      <span class="need">Choose who is responsible: the run's alerts go to them.</span>
-    {/if}
-    <button class="btn-primary" disabled={starting || busy || cannotStart || needsCalibration || needsResponsible || !!previewErr || durationS <= 0} onclick={start}>
-      {starting ? 'Starting…' : 'Start run'}
-    </button>
-  </div>
-</section>
+{/snippet}
 
 <style>
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: var(--s-4);
-  }
-  .group + .group {
-    margin-top: var(--s-5);
-    padding-top: var(--s-5);
-    border-top: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
-  }
-  .group .eyebrow { margin-bottom: var(--s-3); color: var(--ink); }
+  .nr { display: flex; flex-direction: column; gap: var(--s-4); }
+  .nr-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: var(--s-3); }
+  .nr-head h2 { font-size: 22px; }
+  .file-tools { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+  .imported { margin: 0; font-size: 12px; color: var(--muted); }
 
-  .group.row {
-    display: flex;
-    gap: var(--s-5);
-    align-items: stretch;
-    flex-wrap: wrap;
-    /* the panes carry the vertical padding so the divider spans hairline to hairline */
-    padding-top: 0;
-    padding-bottom: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
-  }
-  .group.row > .pane { padding-block: var(--s-5); }
-  .group.row + .preview {
-    margin-top: 0;
-    padding-top: var(--s-6);
-    border-top: none;
-  }
-  .pane-pump {
-    flex: 0 0 auto;
-    padding-right: var(--s-5);
-    border-right: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
-  }
-  @media (max-width: 720px) {
-    .pane-pump { padding-right: 0; border-right: none; }
-    .group.row > .pane { padding-block: var(--s-3); }
-  }
-  .pane-profile { flex: 1 1 320px; }
-  .cal { margin-top: var(--s-4); display: grid; gap: var(--s-3); max-width: 420px; }
-  .cal-note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
-  .cal-note.bad { color: var(--danger); }
+  .panel { display: flex; flex-direction: column; gap: var(--s-5); }
+  .panel h3 { margin: 0; font-size: 17px; }
+  .row { display: flex; flex-wrap: wrap; gap: var(--s-4); align-items: flex-start; }
+  .grow { flex: 1 1 260px; }
+  .resp { flex: 0 1 240px; }
+  .k { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
+  .k.bad, .live.bad { color: var(--danger); }
+  .center { text-align: center; }
   .linkish {
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    color: var(--teal-700);
-    text-decoration: underline;
-    cursor: pointer;
+    background: none; border: none; padding: 0; font: inherit;
+    color: var(--teal-700); text-decoration: underline; cursor: pointer;
   }
-  .pane-profile .grid { display: flex; flex-wrap: wrap; gap: var(--s-4); }
-  .pane-profile .field { flex: 0 1 140px; }
-  .pane-profile .field .seg { align-self: flex-start; }
-  .pump-fields { display: flex; flex-wrap: wrap; gap: var(--s-4); }
-  .reg-note { margin-top: var(--s-2); max-width: 420px; }
-  .pump-fields .seg button { padding: var(--s-2) var(--s-3); }
-  .dur-field { grid-column: span 2; }
+  select.missing, input.missing { border-color: var(--measured); }
+
+  /* feed profile */
+  .profile { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 380px); gap: var(--s-5); align-items: start; }
+  @media (max-width: 900px) { .profile { grid-template-columns: 1fr; } }
+  .profile-form { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
+  .shapes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--s-2); max-width: 520px; }
+  @media (max-width: 520px) { .shapes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .shape {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: var(--s-2) var(--s-2) 6px; border: 1px solid var(--line); border-radius: var(--radius-ctl);
+    background: var(--surface); color: var(--muted); cursor: pointer;
+  }
+  .shape svg { width: 100%; height: 32px; }
+  .shape path { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+  .shape span { font-size: 12.5px; color: var(--ink); }
+  .shape.on { border-color: var(--teal-700); box-shadow: inset 0 0 0 1px var(--teal-700); color: var(--teal-700); }
+  .shape.on span { font-weight: 600; }
+  .num-f input { width: 120px; font-family: var(--mono); }
   .dur { display: flex; gap: var(--s-3); }
-  .dur label {
-    display: flex;
-    align-items: baseline;
-    gap: var(--s-2);
-    flex: 1;
-    min-width: 0;
-  }
-  .dur input {
-    width: 100%;
-    min-width: 0;
-    text-align: right;
-    -moz-appearance: textfield;
-    appearance: textfield;
-  }
-  .dur input::-webkit-outer-spin-button,
-  .dur input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
+  .dur label { display: flex; align-items: baseline; gap: var(--s-2); }
+  .dur input { width: 70px; text-align: right; font-family: var(--mono); }
   .dur label > span { font-size: 12px; color: var(--muted); }
+  .preview { background: var(--surface-sunken); border-radius: var(--radius-ctl); padding: var(--s-3) var(--s-4); min-width: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+  .pv-cap { display: flex; flex-wrap: wrap; gap: 4px var(--s-4); font-size: 12px; color: var(--muted); }
+  .pv-cap b { color: var(--ink); font-weight: 500; }
+  .feed { display: flex; flex-direction: column; gap: 2px; padding-top: var(--s-2); border-top: 1px solid var(--line); }
+  .feed b { font-size: 15px; font-weight: 600; }
+  .feed .k { font-size: 12.5px; }
+  .warn-t { color: color-mix(in srgb, var(--measured) 80%, var(--ink)); font-weight: 600; }
 
-  .gate {
-    margin-bottom: var(--s-5);
-    padding: var(--s-3) var(--s-4);
-    border-radius: var(--radius-ctl);
-    font-size: 13px;
-    background: var(--danger-bg);
-    color: var(--danger);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
-  }
-
-  .preview {
-    margin-top: var(--s-6);
-    padding-top: var(--s-5);
-    border-top: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
-  }
-  .pv-cap { font-size: 12px; color: var(--muted); margin-top: var(--s-2); }
-  .muted { color: var(--muted); }
-  .foot { margin-top: var(--s-6); display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap; }
-  .need { font-size: 13px; color: var(--danger); }
-  select.missing { border-color: var(--danger); }
-
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--s-4); }
   .fb {
-    margin-top: var(--s-5);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-ctl);
-    padding: var(--s-3) var(--s-4);
-    background: var(--surface-sunken);
+    border: 1px solid var(--line); border-radius: var(--radius-ctl);
+    padding: var(--s-3) var(--s-4); background: var(--surface-sunken);
   }
   .fb summary { cursor: pointer; font-weight: 600; font-size: 13px; }
   .fb[open] summary { margin-bottom: var(--s-4); }
   .fb-eq { font-size: 12px; color: var(--muted); margin: 0 0 var(--s-2); }
   .fb-note { font-size: 11px; color: var(--muted); margin: 0 0 var(--s-4); line-height: 1.4; }
-  .fb-out {
-    font-size: 13px;
-    margin: var(--s-4) 0;
-    padding: var(--s-3);
-    background: var(--surface);
-    border-radius: var(--radius-ctl);
-  }
+  .fb-out { font-size: 13px; margin: var(--s-4) 0; padding: var(--s-3); background: var(--surface); border-radius: var(--radius-ctl); }
   .fb-out .dim { color: var(--muted); }
-  .file-tools { display: flex; gap: var(--s-2); flex-wrap: wrap; }
-  .imported { margin: 0 0 var(--s-3); font-size: 12px; color: var(--muted); }
+
+  /* check and start */
+  .review { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 420px); gap: var(--s-6); align-items: start; }
+  @media (max-width: 900px) { .review { grid-template-columns: 1fr; } }
+  .recap { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--s-3) var(--s-4); font-size: 14px; align-items: baseline; }
+  .recap dt { color: var(--muted); font-size: 13px; }
+  .recap dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .recap .edit { font-size: 13px; }
+  .todo { color: color-mix(in srgb, var(--measured) 80%, var(--ink)); }
+  .go { display: flex; flex-direction: column; gap: var(--s-3); }
+  .start { padding: var(--s-3) var(--s-4); font-size: 15px; }
+
+  .nav-row { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding-top: var(--s-4); border-top: 1px solid var(--line-soft); }
 </style>
