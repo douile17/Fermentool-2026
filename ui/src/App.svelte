@@ -84,7 +84,8 @@
           : 'stable'
         : (SCALE_STATES[s.scale_state] ?? s.scale_state);
     return {
-      tone: 'ok',
+      // orange while the weight moves: a reading to wait for, not a fault
+      tone: state === 'moving' ? 'warn' : 'ok',
       label: `Balance: ${w}${state}${c}`,
       title: trimOn
         ? `Gravimetric trim active: the pump setpoint is multiplied by ${s.trim_c?.toFixed(3)}.`
