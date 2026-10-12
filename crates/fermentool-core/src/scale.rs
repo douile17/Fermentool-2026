@@ -286,6 +286,16 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_negative_weight() {
+        // A balance tared with the full feed bottle on it reads below zero
+        // as the feed leaves: a weight like any other, with its resolution.
+        let r = parse_sics_weight(b"S S       -8.2 g\r\n").unwrap();
+        assert_eq!(r.weight_g, -8.2);
+        assert!(r.stable);
+        assert_eq!(r.resolution_g, 0.1);
+    }
+
+    #[test]
     fn rejects_a_malformed_reply() {
         assert!(parse_sics_weight(b"garbage\r\n").is_err());
         assert!(parse_sics_weight(b"").is_err());
