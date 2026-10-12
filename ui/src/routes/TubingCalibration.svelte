@@ -1361,9 +1361,9 @@
               {:else}
                 {#if autoElsewhere}
                   <button class="btn-ghost" onclick={() => setAuto(true)}>Take over here</button>
-                  <button class="btn-ghost" onclick={() => setAuto(false)}>Stop automatic</button>
+                  <button class="btn-danger" onclick={() => setAuto(false)}>Stop automatic</button>
                 {:else if d.auto}
-                  <button class="btn-ghost" onclick={() => setAuto(false)}>Stop automatic</button>
+                  <button class="btn-danger" onclick={() => setAuto(false)}>Stop automatic</button>
                 {:else if burstRunning}
                   <button class="btn-danger" disabled={working} onclick={restartBurst}
                     title="Stops the pump and pumps this burst again from the start: a part burst is never weighed">↻ Restart this burst</button>

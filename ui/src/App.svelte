@@ -72,14 +72,20 @@
     }
     const trimOn = !!s.active?.gravimetric_trim;
     const c = trimOn && s.trim_c != null ? ` | ×${s.trim_c.toFixed(3)}` : '';
-    // Live reading; "~" while the balance itself says it is still moving.
-    const w =
-      s.scale_weight_g != null
-        ? `${s.scale_weight_g.toFixed(1)} g${s.scale_stable === false ? ' ~' : ''} | `
-        : '';
+    // Live reading, then in words what the balance says of it ("stable" /
+    // "moving"), or what the regulation is doing when that matters more (a
+    // refill, a disturbance). "normal" used to read "stable" beside a "~"
+    // for a moving weight: "669.5 g ~ | stable" said both at once.
+    const w = s.scale_weight_g != null ? `${s.scale_weight_g.toFixed(1)} g | ` : '';
+    const state =
+      s.scale_state === 'normal' || !s.scale_state
+        ? s.scale_stable === false
+          ? 'moving'
+          : 'stable'
+        : (SCALE_STATES[s.scale_state] ?? s.scale_state);
     return {
       tone: 'ok',
-      label: `Balance: ${w}${SCALE_STATES[s.scale_state] ?? s.scale_state}${c}`,
+      label: `Balance: ${w}${state}${c}`,
       title: trimOn
         ? `Gravimetric trim active: the pump setpoint is multiplied by ${s.trim_c?.toFixed(3)}.`
         : 'Balance connected. The trim applies only to runs started with it enabled.',
