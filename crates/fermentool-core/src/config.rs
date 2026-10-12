@@ -52,7 +52,27 @@ pub struct Config {
     pub log: LogConfig,
     pub scale: ScaleConfig,
     pub notify: NotifyConfig,
+    pub display: DisplayConfig,
 }
+
+/// How the UI shows things, the same for everyone on this PC (the browser
+/// and the desktop window read it from here, not from their own storage).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisplayConfig {
+    /// Tube sizes: `"mm"` (the inches beside them, in grey) or `"in"` (the
+    /// other way round). The calibration's diameter entry starts in it too.
+    pub tube_sizes: String,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self { tube_sizes: "mm".into() }
+    }
+}
+
+/// The values `display.tube_sizes` takes.
+pub const TUBE_SIZE_UNITS: [&str; 2] = ["mm", "in"];
 
 /// Notifications: who can run experiments, each with their own channel, so a
 /// run's alerts reach the person who started it only. The usual channel is
@@ -244,6 +264,7 @@ impl Default for Config {
             log: LogConfig::default(),
             scale: ScaleConfig::default(),
             notify: NotifyConfig::default(),
+            display: DisplayConfig::default(),
         }
     }
 }
@@ -404,6 +425,9 @@ impl Config {
         if tracing_subscriber::EnvFilter::try_new(&self.log.level).is_err() {
             return Err(format!("\"{}\" is not a log level", self.log.level));
         }
+        if !TUBE_SIZE_UNITS.contains(&self.display.tube_sizes.as_str()) {
+            return Err(format!("tube sizes must be one of {TUBE_SIZE_UNITS:?}"));
+        }
         self.notify.validate()
     }
 
@@ -443,6 +467,10 @@ impl Config {
             self.log.level = d.log.level.clone();
             note("log.level");
         }
+        if !TUBE_SIZE_UNITS.contains(&self.display.tube_sizes.as_str()) {
+            self.display.tube_sizes = d.display.tube_sizes.clone();
+            note("display.tube_sizes");
+        }
         fixed
     }
 
@@ -467,6 +495,18 @@ mod tests {
         assert_eq!(a.port, b.port);
         assert_eq!(a.serial.path, b.serial.path);
         assert_eq!(a.resume.grace_minutes, b.resume.grace_minutes);
+    }
+
+    #[test]
+    fn tube_sizes_default_to_mm_and_refuse_other_units() {
+        let mut c = Config::from_toml("").unwrap();
+        assert_eq!(c.display.tube_sizes, "mm", "an older config.toml has no [display]");
+        c.display.tube_sizes = "in".into();
+        assert!(c.validate().is_ok());
+        c.display.tube_sizes = "cm".into();
+        assert!(c.validate().is_err());
+        assert_eq!(c.sanitize(), vec!["config.toml: display.tube_sizes out of range, default used".to_string()]);
+        assert_eq!(c.display.tube_sizes, "mm");
     }
 
     #[test]

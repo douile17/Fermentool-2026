@@ -3903,6 +3903,7 @@ mod tests {
         store
             .insert_calibration(&crate::store::NewCalibration {
                 tubing_lot_id: "LOT".into(),
+                product_ref: None,
                 internal_ref: None,
                 inner_diameter_mm: 1.6,
                 outer_diameter_mm: 4.8,

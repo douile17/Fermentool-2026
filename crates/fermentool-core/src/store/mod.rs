@@ -47,6 +47,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 7,
         sql: include_str!("migrations/0007_run_density.sql"),
     },
+    Migration {
+        version: 8,
+        sql: include_str!("migrations/0008_calibration_product_ref.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -225,6 +229,9 @@ pub struct RunRow {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct NewCalibration {
     pub tubing_lot_id: String,
+    /// The maker's product reference (catalogue number), optional.
+    #[serde(default)]
+    pub product_ref: Option<String>,
     /// The lab's own reference for this tube, optional.
     #[serde(default)]
     pub internal_ref: Option<String>,
@@ -245,6 +252,7 @@ pub struct CalibrationRow {
     pub id: i64,
     pub created_at: Timestamp,
     pub tubing_lot_id: String,
+    pub product_ref: Option<String>,
     pub internal_ref: Option<String>,
     pub inner_diameter_mm: f64,
     pub outer_diameter_mm: f64,
@@ -329,7 +337,7 @@ const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, cont
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
      measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
-     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref, archived_at";
+     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref, archived_at, product_ref";
 
 const TICK_COLS: &str =
     "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note, weight_g, delivered_g";
@@ -620,9 +628,9 @@ impl Store {
                 weight_1_g, weight_2_g, weight_3_g,
                 measured_1_ml_min, measured_2_ml_min, measured_3_ml_min,
                 mean_measured_ml_min, cv_pct, c0, operator, note,
-                inner_diameter_mm, outer_diameter_mm, internal_ref)
+                inner_diameter_mm, outer_diameter_mm, internal_ref, product_ref)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 Timestamp::now().to_string(),
                 c.tubing_lot_id.trim(),
@@ -646,6 +654,7 @@ impl Store {
                 c.inner_diameter_mm,
                 c.outer_diameter_mm,
                 c.internal_ref.as_deref().map(str::trim).filter(|r| !r.is_empty()),
+                c.product_ref.as_deref().map(str::trim).filter(|r| !r.is_empty()),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -966,6 +975,7 @@ fn row_to_calibration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalibrationRo
         created_at: parse_ts(row.get("created_at")?)?,
         tubing_lot_id: row.get("tubing_lot_id")?,
         internal_ref: row.get("internal_ref")?,
+        product_ref: row.get("product_ref")?,
         inner_diameter_mm: row.get("inner_diameter_mm")?,
         outer_diameter_mm: row.get("outer_diameter_mm")?,
         control_var: parse_token(row.get("control_var")?, ControlVar::from_token, "control var")?,
@@ -1059,7 +1069,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
     }
 
     #[test]
@@ -1071,7 +1081,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
     }
 
     #[test]
@@ -1258,6 +1268,7 @@ mod tests {
     fn new_calibration(run_ids: [i64; 3], weights_g: [f64; 3]) -> NewCalibration {
         NewCalibration {
             tubing_lot_id: "LOT-42".into(),
+            product_ref: Some("06409-14".into()),
             internal_ref: Some("TUB-007".into()),
             inner_diameter_mm: 1.6,
             outer_diameter_mm: 4.8,
@@ -1413,6 +1424,7 @@ mod tests {
         assert_eq!(c.id, id);
         assert_eq!(c.tubing_lot_id, "LOT-42");
         assert_eq!(c.internal_ref.as_deref(), Some("TUB-007"));
+        assert_eq!(c.product_ref.as_deref(), Some("06409-14"));
         assert_eq!(c.inner_diameter_mm, 1.6);
         assert_eq!(c.outer_diameter_mm, 4.8);
         assert_eq!(c.control_var, ControlVar::MlMin);
@@ -1449,9 +1461,11 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         for given in [None, Some("   ".to_string())] {
             let runs = three_bursts(&s);
-            let c = NewCalibration { internal_ref: given, ..new_calibration(runs, [50.0; 3]) };
+            let c = NewCalibration { internal_ref: given.clone(), product_ref: given, ..new_calibration(runs, [50.0; 3]) };
             let id = s.insert_calibration(&c).unwrap();
-            assert_eq!(s.calibration(id).unwrap().unwrap().internal_ref, None);
+            let row = s.calibration(id).unwrap().unwrap();
+            assert_eq!(row.internal_ref, None);
+            assert_eq!(row.product_ref, None);
         }
     }
 

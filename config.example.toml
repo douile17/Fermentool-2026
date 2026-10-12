@@ -42,6 +42,9 @@ position = "feed"               # "feed": under the feed bottle (weight falls)
 trim_limit_pct = 25.0           # how far the trim may push the pump, +/- %, 5..100
 # MT-SICS balances only (send "SI", parse "S <status> <value> g"), 8-N-1.
 
+[display]
+tube_sizes = "mm"               # "mm": tube sizes in mm, inches beside them in grey; "in": the reverse
+
 [notify]
 ntfy_server = "https://ntfy.sh" # or a lab-hosted ntfy (https only)
 # One block per person who runs experiments; a run's alerts go to its
