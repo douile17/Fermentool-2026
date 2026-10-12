@@ -71,9 +71,10 @@
   let boreOnly = $state(null); // a bore key, from the chips
   let active = $state(0);
   let root;
-  let search;
-  let list;
-  let pop;
+  // inside {#if open}: bound once the list is drawn, so they must be state
+  let search = $state();
+  let list = $state();
+  let pop = $state();
 
   const matches = (c) => {
     const s = q.trim();

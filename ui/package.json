@@ -7,12 +7,20 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check": "eslint src && svelte-check --tsconfig ./jsconfig.check.json --threshold warning",
+    "test": "vitest run",
+    "smoke": "node tests/smoke.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-svelte": "^3.23.1",
+    "globals": "^17.13.0",
     "svelte": "^5.57.0",
-    "vite": "^8.2.2"
+    "svelte-check": "^4.7.6",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.4"
   },
   "engines": {
     "node": ">=20.19"

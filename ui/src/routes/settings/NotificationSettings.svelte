@@ -212,6 +212,7 @@
         {/if}
         {#if qrFor === i}
           <div class="qr">
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -- an SVG drawn here by the qrcode library, no outside text in it -->
             <div class="qr-img" role="img" aria-label="QR code to subscribe to {p.ntfy_topic}">{@html qrSvg}</div>
             <div class="qr-help">
               <p><b>Android:</b> scan with the phone camera (ntfy installed): the app opens and subscribes by itself.</p>

@@ -52,9 +52,9 @@ export function stallCheckAtS({ mlMin, densityGPerMl, resG, burstS }) {
  *   head, liquid running back, bottle lifted);
  * - 'slow': it moves the right way but far slower than the tube should give
  *   (line off the pump head and siphoning by gravity, a kinked or loose
- *   line): under half the expected flow when that flow is known from a real
- *   calibration or an ml/min setpoint (`trusted`), under a quarter when it is
- *   only the bore's rough figure;
+ *   line): under 40 % of the expected flow when that flow is known from a
+ *   real calibration or an ml/min setpoint (`trusted`), under a quarter when
+ *   it is only the bore's rough figure;
  * `null` when all is well, or too early to say.
  * The direction is whatever the weight did first: down under the feed
  * bottle, up under the collecting beaker.
@@ -84,7 +84,9 @@ export function burstTrouble({ samples, checkAtS, resG, mlMin = null, densityGPe
   if (progress < moved) return 'stopped';
   if (mlMin > 0 && densityGPerMl > 0) {
     const expectedG = ((mlMin * densityGPerMl) / 60) * (last.t - then.t);
-    if (progress < (trusted ? 0.5 : 0.25) * expectedG) return 'slow';
+    // 40 %, not 50: a line right at half its flow sat on the line and the
+    // balance's noise tipped it over (stall.test.js).
+    if (progress < (trusted ? 0.4 : 0.25) * expectedG) return 'slow';
   }
   return null;
 }

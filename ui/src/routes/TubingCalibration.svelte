@@ -176,6 +176,9 @@
       Number(d.density_g_per_ml) > 0 &&
       Number(d.target_min) > 0,
   );
+  // The burst with an alarm (CHECK on its card), if any: nothing goes on
+  // until it is pumped again, or its alarm waved off with "Keep going".
+  const alarmed = $derived(d.bursts.find((b) => b.alarm) ?? null);
   const canStartBurst = $derived(
     loaded &&
       formOk &&
@@ -186,9 +189,6 @@
       (current == null || current.weight_g != null) &&
       !alarmed,
   );
-  // The burst with an alarm (CHECK on its card), if any: nothing goes on
-  // until it is pumped again, or its alarm waved off with "Keep going".
-  const alarmed = $derived(d.bursts.find((b) => b.alarm) ?? null);
 
   // Countdown for the burst in progress, from the run's own start and length.
   let now = $state(Date.now());
@@ -683,6 +683,9 @@
     if (burstRunning && step !== 3) step = 3;
   });
   const busy = $derived(burstRunning || d.auto);
+  const tubeOk = $derived(
+    d.tubing_lot_id.trim() !== '' && (d.product_ref ?? '').trim() !== '' && (d.brand ?? '').trim() !== '' && Number(d.inner_diameter_mm) > 0 && Number(d.outer_diameter_mm) > Number(d.inner_diameter_mm),
+  );
   const stepDefs = $derived([
     {
       n: 1,
@@ -755,9 +758,6 @@
     return { ro, ri: Math.max(2, Math.min(ro - 2, (52 * i) / big)), wall: o > i && i > 0 ? (o - i) / 2 : null };
   });
   // Lot and coherent diameters: enough to go on to the settings.
-  const tubeOk = $derived(
-    d.tubing_lot_id.trim() !== '' && (d.product_ref ?? '').trim() !== '' && (d.brand ?? '').trim() !== '' && Number(d.inner_diameter_mm) > 0 && Number(d.outer_diameter_mm) > Number(d.inner_diameter_mm),
-  );
   // Brand and reference name the tube; both are asked before any burst.
   const namesOk = $derived((d.brand ?? '').trim() !== '' && (d.product_ref ?? '').trim() !== '');
   // Brands to pick from: the ones this PC used, then the usual makers.

@@ -23,6 +23,23 @@ UI (`ui/`): `npm run dev` (proxies `/api` to :8730). **After any change under
 `ui/src/`, run `npm run build` from `ui/`, the daemon embeds `ui/dist/`.** Do
 this without being asked.
 
+**A UI change is not done until these pass, run from `ui/`, without being
+asked:**
+- `npm run check`: ESLint (a variable read before its declaration ran, an
+  undefined name) and svelte-check (Svelte errors and warnings, without the
+  JS type noise: `jsconfig.check.json`). Zero errors, zero warnings.
+- `npm test`: vitest on the pure logic (`src/lib/*.test.js`: the burst
+  balance checks, tube sizes).
+- `npm run smoke`, once deployed: `tests/smoke.mjs` walks the app in
+  headless Edge (New run steps, the tube list, Run again, Settings, the
+  calibration) and changes nothing (no run, no burst, no draft, no setting).
+
+**A bug fixed is a test added** that fails without the fix: a unit test
+when the logic is in `src/lib/`, a smoke check when it is a path through the
+app. Keep logic that can be tested (rules, conversions) in `src/lib/` as
+plain functions rather than inside a component. Screenshots are for the
+look; a check that asserts is what proves a path works.
+
 ## Windows packaging
 
 **Exporting the installer: follow `docs/RELEASE.md`.** Every exported
