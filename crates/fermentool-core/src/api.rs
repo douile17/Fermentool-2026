@@ -55,6 +55,28 @@ pub struct AppState {
     /// `_rev`, and a `PUT` carrying an older one is refused, so a page that
     /// read the settings before a Connect cannot write the old port back.
     pub config_rev: Arc<AtomicU64>,
+    /// Where this daemon keeps its files and when it started, for Settings > About.
+    pub about: Arc<About>,
+}
+
+/// What `GET /api/about` reports besides the build's own constants.
+#[derive(Debug, Clone)]
+pub struct About {
+    pub data_dir: PathBuf,
+    pub db: PathBuf,
+    pub log_dir: PathBuf,
+    pub started_at: std::time::SystemTime,
+}
+
+impl Default for About {
+    fn default() -> Self {
+        Self {
+            data_dir: PathBuf::new(),
+            db: PathBuf::new(),
+            log_dir: PathBuf::new(),
+            started_at: std::time::SystemTime::now(),
+        }
+    }
 }
 
 /// The API's connection to the journal, separate from the control thread's.
@@ -82,6 +104,7 @@ impl ApiDb {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/about", get(about))
         .route("/api/status", get(status))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/preview", post(preview))
@@ -250,6 +273,28 @@ type ApiResult<T> = Result<T, ApiError>;
 /// while the control thread waits on a device).
 async fn health() -> Response {
     Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })).into_response()
+}
+
+/// Version, author and file locations, for Settings > About.
+async fn about(State(s): State<AppState>) -> Response {
+    let a = &s.about;
+    let started_ms = a
+        .started_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "authors": env!("CARGO_PKG_AUTHORS").split(':').collect::<Vec<_>>(),
+        "license": env!("CARGO_PKG_LICENSE"),
+        "homepage": env!("CARGO_PKG_HOMEPAGE"),
+        "started_at_ms": started_ms,
+        "data_dir": a.data_dir.display().to_string(),
+        "config": s.config_path.display().to_string(),
+        "db": a.db.display().to_string(),
+        "log_dir": a.log_dir.display().to_string(),
+    }))
+    .into_response()
 }
 
 async fn status(State(s): State<AppState>) -> ApiResult<Response> {
@@ -1010,6 +1055,7 @@ mod tests {
             pages: Default::default(),
             db: Arc::new(ApiDb::new(Store::open(db).unwrap())),
             config_rev: Default::default(),
+            about: Default::default(),
         }
     }
 
@@ -1128,6 +1174,20 @@ mod tests {
         let v = body_json(res).await;
         assert!(v["active"].is_null());
         assert_eq!(v["has_pending_recovery"], false);
+    }
+
+    #[tokio::test]
+    async fn about_reports_version_author_and_paths() {
+        let app = router(test_state());
+        let res = app.oneshot(get("/api/about")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert!(v["authors"][0].as_str().unwrap().contains("Andrew Zicler"));
+        assert_eq!(v["license"], "MIT");
+        assert_eq!(v["homepage"], "https://www.delvigne-lab.com");
+        assert!(v["config"].as_str().unwrap().ends_with("ft-api-test.toml"));
+        assert!(v["started_at_ms"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]

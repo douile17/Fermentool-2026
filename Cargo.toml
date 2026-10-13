@@ -6,8 +6,9 @@ members = ["crates/*", "src-tauri"]
 version = "0.1.5"
 edition = "2021"
 license = "MIT"
-authors = ["Andrew Zicler <andrew.zicler@googlemail.com>"]
+authors = ["Andrew Zicler <andrew.zicler@uliege.be>"]
 repository = ""
+homepage = "https://www.delvigne-lab.com"
 
 # Shared dependency versions are added here as later milestones introduce them
 # (tokio, axum, tokio-serial, tokio-modbus, rusqlite, tracing, jiff, ...).

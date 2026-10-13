@@ -271,6 +271,12 @@ async fn main() -> anyhow::Result<()> {
         pages: notify::Pages::default(),
         db,
         config_rev: Default::default(),
+        about: Arc::new(api::About {
+            data_dir: paths.data_dir.clone(),
+            db: paths.db.clone(),
+            log_dir: log_dir.clone(),
+            started_at: std::time::SystemTime::now(),
+        }),
     };
     // Notifications follow the journal on their own thread, reading the
     // people/channels from the live config (Settings edits apply at once).
