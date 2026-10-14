@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use fermentool_modbus::Transport;
 
-use crate::config::{ScaleConfig, SerialConfig};
+use crate::config::{RefillConfig, ScaleConfig, SerialConfig};
 use crate::engine::{
     ActiveStatus, Engine, ErrDetail, HoldingStatus, RecoveryInfo, RunConfig, TickOutcome,
     REOPEN_AFTER_WRITE_FAILS, TICK_INTERVAL,
@@ -116,6 +116,10 @@ pub enum Command {
     /// `[resume] prompt = false`: resume an interrupted dosing run without
     /// asking, once the pump answers. Sent at boot and on each config save.
     SetAutoResume(bool, oneshot::Sender<()>),
+    /// Apply a `[refill]` section saved from Settings to the live engine.
+    SetRefill(RefillConfig, oneshot::Sender<()>),
+    /// Settings' Test: run the refill pump 3 s, then stop it.
+    RefillTest(oneshot::Sender<Result<(), String>>),
     Shutdown,
 }
 
@@ -166,6 +170,8 @@ pub struct DaemonStatus {
     pub stop_pending: bool,
     /// What the start found wrong (config.toml, journal check).
     pub warnings: Vec<String>,
+    /// The refill pump, `None` while it is turned off.
+    pub refill: Option<crate::engine::RefillStatus>,
 }
 
 /// Sending / receiving on the control channel failed, the thread is gone.
@@ -239,6 +245,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         tracking: st.tracking,
         stop_pending: st.stop_pending,
         warnings: st.warnings,
+        refill: st.refill,
     }
 }
 
@@ -338,6 +345,19 @@ fn control_loop<T: Transport + SwapTransport>(
                     }
                     Some(_) => {}
                     None => run_epoch = None,
+                }
+
+                // The refill pump: its Stop is the first frame on the line at
+                // boot, then one every 10 s, and the end of a Test.
+                if engine.refill_next_due().is_some_and(|due| Instant::now() >= due) {
+                    let changed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        engine.refill_service(Instant::now())
+                    }))
+                    .unwrap_or(false);
+                    if changed {
+                        let _ = events.send(current_status(engine, grace));
+                    }
+                    return Step::Next;
                 }
 
                 // Scale auto-recovery runs on its own backoff whenever the engine
@@ -526,7 +546,7 @@ fn control_loop<T: Transport + SwapTransport>(
                         end.map_or(j, |e| e.min(j)).min(w).saturating_duration_since(Instant::now())
                     }
                     // Idle: wake for the link probe if one is scheduled, else just poll.
-                    _ => [next_probe, next_scale_probe]
+                    _ => [next_probe, next_scale_probe, engine.refill_next_due()]
                         .into_iter()
                         .flatten()
                         .min()
@@ -534,7 +554,12 @@ fn control_loop<T: Transport + SwapTransport>(
                         .unwrap_or(IDLE_POLL),
                 };
                 match rx.recv_timeout(wait) {
-                    Ok(Command::Shutdown) => return Step::Stop,
+                    Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            engine.refill_shutdown()
+                        }));
+                        return Step::Stop;
+                    }
                     Ok(Command::SetAutoResume(on, reply)) => {
                         if on != *auto_resume {
                             tracing::info!(on, "automatic resume of an interrupted run");
@@ -561,7 +586,6 @@ fn control_loop<T: Transport + SwapTransport>(
                     Err(RecvTimeoutError::Timeout) => {
                         maybe_recover_serial(engine, events, grace, &mut next_serial_retry);
                     }
-                    Err(RecvTimeoutError::Disconnected) => return Step::Stop,
                 }
             Step::Next
         }));
@@ -941,6 +965,15 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let _ = reply.send(());
             true
         }
+        Command::SetRefill(cfg, reply) => {
+            engine.set_refill(cfg, Instant::now());
+            let _ = reply.send(());
+            true
+        }
+        Command::RefillTest(reply) => {
+            let _ = reply.send(engine.refill_test(Instant::now()));
+            true
+        }
         // Handled by the loop itself, which owns the flag.
         Command::SetAutoResume(_, reply) => {
             let _ = reply.send(());
@@ -970,6 +1003,7 @@ mod tests {
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
             responsible: None,
+            auto_refill: false,
         }
     }
 
@@ -1124,6 +1158,7 @@ mod tests {
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
             responsible: None,
+            auto_refill: false,
         };
         handle
             .call(|reply| Command::StartRun(cfg, reply))
@@ -1204,6 +1239,7 @@ mod tests {
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
             responsible: None,
+            auto_refill: false,
         };
         let id = handle
             .call(|reply| Command::StartRun(cfg, reply))

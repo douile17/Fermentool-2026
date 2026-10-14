@@ -38,6 +38,12 @@ use crate::trim;
 /// bus stays quiet on gentle curves.
 pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
+mod refill;
+pub use refill::{RefillStatus, TEST_RUN as REFILL_TEST_RUN};
+
+/// [`REFILL_TEST_RUN`] in seconds, for the API's reply.
+pub const REFILL_TEST_S: u64 = REFILL_TEST_RUN.as_secs();
+
 #[derive(Debug)]
 pub enum EngineError {
     Pump(PumpError),
@@ -70,6 +76,8 @@ pub enum EngineError {
     /// A gravimetric-trim run in rpm without a tubing calibration: nothing
     /// turns its rpm curve into the volume the mass balance needs.
     GravimetricTrimNeedsCalibration,
+    /// The run drives the refill pump, and it did not answer a Stop.
+    RefillPumpSilent { address: u8 },
 }
 
 /// Structured error for the HTTP API: a one-line `message` (the [`Display`] of
@@ -100,6 +108,10 @@ impl std::fmt::Display for EngineError {
             EngineError::GravimetricTrimNeedsCalibration => write!(
                 f,
                 "gravimetric trim in rpm needs a tubing calibration"
+            ),
+            EngineError::RefillPumpSilent { address } => write!(
+                f,
+                "the refill pump (address {address}) does not answer"
             ),
             EngineError::SerialDown => write!(
                 f,
@@ -142,6 +154,7 @@ impl EngineError {
             EngineError::PumpRejectedSetpoint { .. } => "pump_setpoint_rejected",
             EngineError::ScaleUnavailable => "scale_unavailable",
             EngineError::GravimetricTrimNeedsCalibration => "trim_needs_calibration",
+            EngineError::RefillPumpSilent { .. } => "refill_pump_silent",
         }
     }
 
@@ -183,6 +196,9 @@ impl EngineError {
                 "The engine is on the in-process simulator, so a run would move nothing real. \
                  Connect a pump and select its port, or tick \"Allow runs on the pump simulator\" \
                  in Settings for bench testing."
+            }
+            EngineError::RefillPumpSilent { .. } => {
+                "This run drives the refill pump, a second LabQ on the feed pump's cable. It must                  answer before the run starts, or the bottle would run dry with no refill. Check                  its power, its RS-485 wiring and the MODBUS address in its own menu against                  Settings, Refill pump (Test there), or start the run without automatic refill."
             }
             _ => return None,
         };
@@ -251,6 +267,10 @@ pub struct RunConfig {
     /// them only. Required by the API for a dosing run once people exist.
     #[serde(default)]
     pub responsible: Option<String>,
+    /// The run drives the refill pump (`[refill]`). Needs the balance
+    /// regulation, with the balance under the feed bottle.
+    #[serde(default)]
+    pub auto_refill: bool,
 }
 
 /// What [`Engine::pending_recovery`] found: a run that was `running` when the
@@ -355,6 +375,8 @@ pub struct EngineStatus {
     /// What the start found wrong: a damaged `config.toml` (defaults used),
     /// values put back in range, a journal that fails its check.
     pub warnings: Vec<String>,
+    /// The refill pump, `None` while it is turned off.
+    pub refill: Option<RefillStatus>,
 }
 
 /// A completed run whose final setpoint the pump is still holding.
@@ -400,6 +422,8 @@ pub struct ActiveStatus {
     pub curve_done: bool,
     /// Who the run's alerts go to (Settings warns before removing them).
     pub responsible: Option<String>,
+    /// The run drives the refill pump.
+    pub auto_refill: bool,
 }
 
 struct ActiveRun {
@@ -443,6 +467,8 @@ struct ActiveRun {
     /// applied because `scale_tick` gates on this flag.
     gravimetric_trim: bool,
     kind: RunKind,
+    /// The run drives the refill pump.
+    auto_refill: bool,
 }
 
 /// The `refill` event's detail. [`parse_refill`] reads it back for the
@@ -591,6 +617,8 @@ pub struct Engine<T: Transport> {
     stop_pending: Option<Option<i64>>,
     /// See [`EngineStatus::warnings`].
     warnings: Vec<String>,
+    /// The refill pump on the same line (`[refill]`).
+    refill: refill::RefillLink,
 }
 
 /// Cap on `weight_buffer`'s length: a gravimetric run with no refill appends
@@ -836,6 +864,7 @@ impl<T: Transport> Engine<T> {
             drive_paused: false,
             stop_pending,
             warnings: Vec::new(),
+            refill: refill::RefillLink::default(),
         }
     }
 
@@ -1248,6 +1277,7 @@ impl<T: Transport> Engine<T> {
             }),
             stop_pending: self.stop_pending.is_some(),
             warnings: self.warnings.clone(),
+            refill: self.refill_status(),
         }
     }
 
@@ -1268,6 +1298,7 @@ impl<T: Transport> Engine<T> {
             name: a.name.clone(),
             curve_done: a.curve_done,
             responsible: a.responsible.clone(),
+            auto_refill: a.auto_refill,
         })
     }
 
@@ -1283,6 +1314,7 @@ impl<T: Transport> Engine<T> {
         if self.active.is_some() {
             return Err(EngineError::Busy);
         }
+        self.refill_end_test(std::time::Instant::now());
         // Refuse to start against a dead link: a real port is configured but the
         // engine is on the no-op simulator fallback, so every pump write would
         // "succeed" while the pump does nothing.
@@ -1294,6 +1326,21 @@ impl<T: Transport> Engine<T> {
         // nothing just because `config.toml` still has the shipped `path = "sim"`.
         if self.on_simulator() && !self.allow_simulator {
             return Err(EngineError::SimulatorNotAllowed);
+        }
+        if cfg.auto_refill {
+            if !cfg.gravimetric_trim || cfg.kind != RunKind::Dosing {
+                return Err(EngineError::Config(
+                    "automatic refill needs a feeding run with the balance regulation".into(),
+                ));
+            }
+            if self.scale_cfg.position != crate::config::ScalePosition::Feed {
+                return Err(EngineError::Config(
+                    "automatic refill needs the balance under the feed bottle".into(),
+                ));
+            }
+            // Before the feed pump moves: a refill pump that does not answer
+            // refuses the run.
+            self.refill_before_run(cfg.pump_addr, std::time::Instant::now())?;
         }
 
         // The chosen tubing calibration, checked before anything changes.
@@ -1410,6 +1457,7 @@ impl<T: Transport> Engine<T> {
             tubing_calibration_id: cfg.tubing_calibration_id,
             responsible: cfg.responsible.clone(),
             density_g_per_ml: cfg.gravimetric_trim.then_some(self.scale_density_g_per_ml),
+            auto_refill: cfg.auto_refill,
         }) {
             Ok(id) => id,
             Err(e) => {
@@ -1479,7 +1527,11 @@ impl<T: Transport> Engine<T> {
             volume_added_ml: (cfg.control_var == ControlVar::MlMin).then_some(0.0),
             gravimetric_trim: cfg.gravimetric_trim,
             kind: cfg.kind,
+            auto_refill: cfg.auto_refill,
         });
+        if cfg.auto_refill {
+            self.refill_run_started(std::time::Instant::now());
+        }
         Ok(id)
     }
 
@@ -2665,6 +2717,7 @@ impl<T: Transport> Engine<T> {
         let Some(active) = self.active.take() else {
             return Err(EngineError::Idle);
         };
+        self.refill_run_ended(std::time::Instant::now());
         self.set_holding(None);
         // Recorded as the operator asked, stopped or not: a Stop that did not
         // get through stays pending, retried and shown.
@@ -2724,6 +2777,7 @@ impl<T: Transport> Engine<T> {
         if self.active.is_some() {
             return Err(EngineError::Busy);
         }
+        self.refill_end_test(std::time::Instant::now());
         if self.serial_lost {
             return Err(EngineError::SerialDown);
         }
@@ -2733,6 +2787,9 @@ impl<T: Transport> Engine<T> {
         let Some(run) = self.store.running_run()? else {
             return Err(EngineError::Idle);
         };
+        if run.auto_refill {
+            self.refill_resume(std::time::Instant::now());
+        }
         self.set_holding(None);
         let elapsed_s = now.duration_since(run.started_at).as_secs_f64().max(0.0);
         // A dosing run past its curve resumes into its hold phase, like it
@@ -2841,7 +2898,11 @@ impl<T: Transport> Engine<T> {
             volume_added_ml,
             gravimetric_trim: run.gravimetric_trim,
             kind: run.kind,
+            auto_refill: run.auto_refill,
         });
+        if run.auto_refill {
+            self.refill_run_resumed(std::time::Instant::now());
+        }
         Ok(run.id)
     }
 
@@ -2925,6 +2986,7 @@ impl<T: Transport> Engine<T> {
         let elapsed_s = now.duration_since(run.started_at).as_secs_f64().max(0.0);
         self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
         self.stop_or_keep_pending(Some(run.id), now);
+        self.refill_run_ended(std::time::Instant::now());
         self.store.finish_run(run.id, status, now)?;
         let kind = match status {
             RunStatus::Aborted => "abort",
@@ -3169,7 +3231,7 @@ mod tests {
         )
     }
 
-    fn linear_cfg() -> RunConfig {
+    pub(super) fn linear_cfg() -> RunConfig {
         RunConfig {
             name: "r".into(),
             control_var: ControlVar::Rpm,
@@ -3180,6 +3242,7 @@ mod tests {
             kind: RunKind::Dosing,
             tubing_calibration_id: None,
             responsible: None,
+            auto_refill: false,
         }
     }
 
@@ -3894,6 +3957,7 @@ mod tests {
                     tubing_calibration_id: None,
                     responsible: None,
                     density_g_per_ml: None,
+                    auto_refill: false,
                 })
                 .unwrap();
             store
@@ -5683,10 +5747,10 @@ mod tests {
 
     /// A throwaway on-disk database so a run survives dropping the `Engine`
     /// (an in-memory DB dies with its connection).
-    struct TempDb(std::path::PathBuf);
+    pub(super) struct TempDb(std::path::PathBuf);
 
     impl TempDb {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static CTR: AtomicU64 = AtomicU64::new(0);
             let n = CTR.fetch_add(1, Ordering::Relaxed);
             let p = std::env::temp_dir()
@@ -5694,7 +5758,7 @@ mod tests {
             let _ = std::fs::remove_file(&p);
             TempDb(p)
         }
-        fn store(&self) -> Store {
+        pub(super) fn store(&self) -> Store {
             Store::open(&self.0).unwrap()
         }
     }

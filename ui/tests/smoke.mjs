@@ -113,6 +113,13 @@ try {
     check('Pump and tube stays grey until a direction is chosen', (await greens())[1] === '-');
     await click('#pump-direction button', 'cw');
     await sleep(200);
+    // Bottle refill (balance regulation on the feed bottle): nothing picked
+    // for the operator; chosen here, the form only, nothing is sent.
+    if (await js(`!!document.querySelector('#nr-refill')`)) {
+      check('Bottle refill waits for a choice', (await js(`!!document.querySelector('#nr-refill.need')`)) && (await greens())[1] === '-');
+      await click('#nr-refill button', 'By hand');
+      await sleep(200);
+    }
     const tubeNeeded = await js(`!!document.querySelector('#nr-tube .trigger.need')`);
     if (!tubeNeeded) check('Pump and tube turns green with the direction', (await greens())[1] === 'G', await greens());
 
@@ -161,6 +168,13 @@ try {
   check('Settings opens', await click('button', 'Settings'));
   await sleep(800);
   check('the Display section shows a tube size', (await click('button', 'Display')) && (await sleep(800), await js(`!!document.querySelector('.sample .pri')`)));
+  // Refill pump: looked at only, never saved nor tested (a Test runs a pump).
+  check(
+    'the Refill pump section shows its address and a Test button',
+    (await click('button', 'Refill pump')) &&
+      (await sleep(800),
+      await js(`!!document.querySelector('input[type=number][max="247"]') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Test (3 s)'))`)),
+  );
 
   // --- Tubing calibration last: it is only looked at, its draft untouched
   await click('button', 'Pump control');

@@ -55,6 +55,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 9,
         sql: include_str!("migrations/0009_calibration_brand.sql"),
     },
+    Migration {
+        version: 10,
+        sql: include_str!("migrations/0010_run_auto_refill.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -203,6 +207,8 @@ pub struct NewRun {
     pub responsible: Option<String>,
     /// The feed density a trimmed run counts its volumes with.
     pub density_g_per_ml: Option<f64>,
+    /// The run drives the refill pump.
+    pub auto_refill: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -225,6 +231,7 @@ pub struct RunRow {
     pub tubing_calibration_id: Option<i64>,
     pub responsible: Option<String>,
     pub density_g_per_ml: Option<f64>,
+    pub auto_refill: bool,
 }
 
 /// A tubing calibration to record: three hand-weighed bursts of one tube at
@@ -342,7 +349,7 @@ pub struct Store {
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
      direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
-     gravimetric_trim, kind, tubing_calibration_id, responsible, density_g_per_ml";
+     gravimetric_trim, kind, tubing_calibration_id, responsible, density_g_per_ml, auto_refill";
 
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
@@ -443,9 +450,9 @@ impl Store {
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
                 pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id, responsible,
-                density_g_per_ml)
+                density_g_per_ml, auto_refill)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 r.name,
                 created,
@@ -464,6 +471,7 @@ impl Store {
                 r.tubing_calibration_id,
                 r.responsible.as_deref().map(str::trim).filter(|n| !n.is_empty()),
                 r.density_g_per_ml,
+                r.auto_refill as i64,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -983,6 +991,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         tubing_calibration_id: row.get(15)?,
         responsible: row.get(16)?,
         density_g_per_ml: row.get(17)?,
+        auto_refill: row.get::<_, i64>(18)? != 0,
     })
 }
 
@@ -1067,6 +1076,7 @@ mod tests {
             tubing_calibration_id: None,
             responsible: None,
             density_g_per_ml: None,
+            auto_refill: false,
         }
     }
 
@@ -1087,7 +1097,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
     }
 
     #[test]
@@ -1099,7 +1109,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
     }
 
     #[test]

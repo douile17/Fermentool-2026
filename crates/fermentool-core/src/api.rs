@@ -124,6 +124,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pump/stop", post(pump_stop))
         .route("/api/scale/refill_mode", post(scale_refill_mode))
         .route("/api/scale/refill_done", post(scale_refill_done))
+        .route("/api/refill/test", post(refill_test))
         .route("/api/calibrations", get(list_calibrations).post(create_calibration))
         .route(
             "/api/calibrations/draft",
@@ -360,6 +361,12 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
     let _ = s
         .control
         .call(|reply| Command::SetAutoResume(!new.resume.prompt, reply))
+        .await;
+    // And `[refill]` (Settings, Refill): applied now, a Stop goes to a newly
+    // enabled or moved refill pump at once.
+    let _ = s
+        .control
+        .call(|reply| Command::SetRefill(new.refill.clone(), reply))
         .await;
     Ok(Json(json!({
         "saved": true,
@@ -765,6 +772,17 @@ async fn scale_refill_done(State(s): State<AppState>) -> ApiResult<Response> {
         .await
         .map_err(|_| ApiError::Down)?;
     Ok(Json(json!({ "ok": true })).into_response())
+}
+
+/// Settings' Test of the refill pump: 3 s at its speed and direction, then a
+/// Stop. The reply comes once it started (or did not answer).
+async fn refill_test(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::RefillTest)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "ok": true, "seconds": crate::engine::REFILL_TEST_S })).into_response())
 }
 
 async fn get_recovery(State(s): State<AppState>) -> ApiResult<Response> {
@@ -1322,6 +1340,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_saved_refill_pump_is_applied_live_and_its_test_says_when_it_is_silent() {
+        let mut st = test_state();
+        st.config_path = Arc::new(std::env::temp_dir().join(format!("ft-refill-{}.toml", std::process::id())));
+        let app = router(st);
+        let put = |body: serde_json::Value| {
+            Request::builder()
+                .method("PUT")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let mut cfg = body_json(app.clone().oneshot(get("/api/config")).await.unwrap()).await;
+        cfg["refill"]["pump_address"] = json!(0);
+        assert_eq!(app.clone().oneshot(put(cfg.clone())).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        cfg["refill"]["pump_address"] = json!(3);
+        assert_eq!(app.clone().oneshot(put(cfg)).await.unwrap().status(), StatusCode::OK);
+        let st = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
+        assert!(st["refill"].is_null(), "nothing drives the refill pump outside a run");
+
+        // This engine's line has only the feed pump (address 1) on it.
+        let res = app.oneshot(post_json("/api/refill/test", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = body_json(res).await;
+        assert!(body["error"].as_str().is_some_and(|e| e.contains("address 3")), "{body}");
+    }
+
+    #[tokio::test]
     async fn a_stop_for_another_run_is_refused() {
         let app = router(test_state());
         let start = post_json(
@@ -1613,6 +1659,7 @@ mod tests {
                     tubing_calibration_id: None,
                     responsible: None,
                     density_g_per_ml: None,
+                    auto_refill: false,
                 })
                 .unwrap();
             store

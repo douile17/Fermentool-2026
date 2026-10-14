@@ -18,7 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use fermentool_modbus::serial::SerialTransport;
-use fermentool_modbus::{SimPump, Transport, TransportError};
+use fermentool_modbus::{SimBus, SimPump, Transport, TransportError};
 
 use crate::config::SerialConfig;
 
@@ -63,7 +63,8 @@ impl TransportKind {
     }
 }
 
-/// Open the transport named by `serial`. Never fails: an unopenable port is
+/// Open the transport named by `serial`. The simulator is a [`SimBus`]: the
+/// feed pump and the refill pump each answer at their own address. Never fails: an unopenable port is
 /// logged and the simulator is returned instead, so the daemon always comes up.
 pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>, TransportKind) {
     if serial.use_simulator() {
@@ -71,7 +72,7 @@ pub fn open(serial: &SerialConfig, pump_addr: u8) -> (Box<dyn Transport + Send>,
             "serial.path = \"{}\": using the pump SIMULATOR",
             serial.path
         );
-        return (Box::new(SimPump::new(pump_addr)), TransportKind::Sim);
+        return (Box::new(SimBus::new()), TransportKind::Sim);
     }
     match SerialTransport::open(&serial.path, serial.baud, OPEN_TIMEOUT) {
         Ok(t) => {
@@ -128,7 +129,7 @@ impl SwapTransport for Box<dyn Transport + Send> {
 
     fn swap_strict(&mut self, serial: &SerialConfig, pump_addr: u8) -> Option<TransportKind> {
         if serial.use_simulator() {
-            *self = Box::new(SimPump::new(pump_addr));
+            *self = Box::new(SimBus::new());
             return Some(TransportKind::Sim);
         }
         // release the old handle first (Windows), then try the real port
@@ -340,7 +341,7 @@ impl SwapTransport for WatchdogTransport {
         let kind = self.respawn(Box::new(move || {
             if s.use_simulator() {
                 return (
-                    Box::new(SimPump::new(pump_addr)) as Box<dyn Transport + Send>,
+                    Box::new(SimBus::new()) as Box<dyn Transport + Send>,
                     Some(TransportKind::Sim),
                 );
             }

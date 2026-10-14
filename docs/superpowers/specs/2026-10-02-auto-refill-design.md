@@ -291,7 +291,35 @@ avec au moins deux remplissages (« Reste à faire » n° 6).
    pas le drapeau « stable » de la balance, qui reste faux tant que la pompe
    d'alimentation tire.
 2. Deuxième pompe sur le câble : réglages, `with_address`, test depuis Settings,
-   Stop au démarrage et toutes les 10 s.
+   Stop au démarrage et toutes les 10 s. **Codé le 2026-10-14**, Test validé
+   sur la vraie deuxième LabQ :
+   - `[refill]` (Settings, « Refill pump ») : le matériel seulement,
+     `pump_address`, `speed_rpm`, `direction` (**cw / ccw**, même choix que
+     New run) et **Test (3 s)**, refusé pendant un run. Appliqué dès
+     l'enregistrement.
+   - **Le remplissage automatique se choisit par run, dans New run**
+     (« Bottle refill » : Refill pump / By hand), sous Regulation, proposé
+     seulement avec la régulation par balance et la balance sous la bouteille
+     d'alimentation. Enregistré avec le run (`runs.auto_refill`), repris
+     après plantage et par Run again.
+   - **Hors d'un tel run, rien n'est envoyé à la pompe de remplissage** (sauf
+     le Stop de fin de test). Une adresse muette coûte à chaque Stop le délai
+     de la ligne (1,5 s, deux fois avec la reprise), pendant lequel la
+     consigne d'alimentation attend.
+   - Run avec remplissage : un Stop avant que la pompe d'alimentation
+     démarre, **run refusé si elle ne répond pas** (`refill_pump_silent`) ou
+     si elle a l'adresse de la pompe d'alimentation ; puis un Stop toutes les
+     10 s (60 s tant qu'elle ne répond pas), un dernier à la fin du run et à
+     l'arrêt du daemon.
+   - Plantage : au démarrage du daemon, si le run resté ouvert pilotait la
+     pompe de remplissage, un Stop est la première trame sur la ligne ; à la
+     reprise, Stop avant la pompe d'alimentation (une pompe de remplissage
+     muette ne bloque pas la reprise) ; « Discard » l'arrête aussi.
+   - État du lien dans Settings et dans la barre latérale (« Refill pump:
+     ready / not answering »), journalisé (`refill_pump_lost`,
+     `refill_pump_ok`), sans notification à cette étape.
+   - Simulation : `serial.path = "sim"` est un `SimBus`, chaque adresse y
+     répond avec sa propre pompe.
 3. Cycle automatique, régulation pendant le remplissage, garde-fous, reprise
    après plantage.
 4. Suivi du réservoir, UI, notifications.

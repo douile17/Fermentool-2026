@@ -51,6 +51,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub log: LogConfig,
     pub scale: ScaleConfig,
+    pub refill: RefillConfig,
     pub notify: NotifyConfig,
     pub display: DisplayConfig,
 }
@@ -213,6 +214,40 @@ pub struct ScaleConfig {
     pub trim_limit_pct: f64,
 }
 
+/// The refill pump: a second LabQ on the pump's RS-485 line, at its own
+/// MODBUS address, that tops the weighed feed bottle up from the main
+/// reservoir (`docs/superpowers/specs/2026-10-02-auto-refill-design.md`).
+/// Only its speed, direction and start/stop are ever written, and only for a
+/// run that chose automatic refill in New run (or a Test): otherwise nothing
+/// is sent to `pump_address`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RefillConfig {
+    /// MODBUS slave address, 1..247, not the feed pump's (checked when a run
+    /// or a Test uses it: a config with the default 2 on a feed pump at 2
+    /// must still save).
+    pub pump_address: u8,
+    /// Speed the refill pump runs at, rpm (0.1..350).
+    pub speed_rpm: f64,
+    /// The direction that pumps from the reservoir into the weighed bottle.
+    pub direction: Direction,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    /// Clockwise (the LabQ's direction register at 1).
+    #[default]
+    Cw,
+    Ccw,
+}
+
+impl Direction {
+    pub fn clockwise(self) -> bool {
+        self == Direction::Cw
+    }
+}
+
 /// The bauds the LabQ pump offers.
 pub const SERIAL_BAUDS: [u32; 4] = [1200, 2400, 4800, 9600];
 
@@ -263,6 +298,7 @@ impl Default for Config {
             storage: StorageConfig::default(),
             log: LogConfig::default(),
             scale: ScaleConfig::default(),
+            refill: RefillConfig::default(),
             notify: NotifyConfig::default(),
             display: DisplayConfig::default(),
         }
@@ -301,6 +337,35 @@ impl Default for ScaleConfig {
 impl ScaleConfig {
     pub fn configured(&self) -> bool {
         !self.path.trim().is_empty()
+    }
+}
+
+impl Default for RefillConfig {
+    fn default() -> Self {
+        Self {
+            pump_address: 2,
+            speed_rpm: 350.0,
+            direction: Direction::Cw,
+        }
+    }
+}
+
+/// Bounds of the refill pump's speed, the LabQ's own.
+pub const REFILL_RPM_MIN: f64 = 0.1;
+pub const REFILL_RPM_MAX: f64 = 350.0;
+
+impl RefillConfig {
+    /// What [`Config::validate`] refuses in `[refill]`.
+    fn problem(&self) -> Option<String> {
+        if !(1..=247).contains(&self.pump_address) {
+            return Some("the refill pump's MODBUS address must be 1..=247".into());
+        }
+        if !(self.speed_rpm.is_finite() && (REFILL_RPM_MIN..=REFILL_RPM_MAX).contains(&self.speed_rpm)) {
+            return Some(format!(
+                "the refill pump's speed must be {REFILL_RPM_MIN}..{REFILL_RPM_MAX} rpm"
+            ));
+        }
+        None
     }
 }
 
@@ -428,6 +493,9 @@ impl Config {
         if !TUBE_SIZE_UNITS.contains(&self.display.tube_sizes.as_str()) {
             return Err(format!("tube sizes must be one of {TUBE_SIZE_UNITS:?}"));
         }
+        if let Some(p) = self.refill.problem() {
+            return Err(p);
+        }
         self.notify.validate()
     }
 
@@ -471,6 +539,10 @@ impl Config {
             self.display.tube_sizes = d.display.tube_sizes.clone();
             note("display.tube_sizes");
         }
+        if self.refill.problem().is_some() {
+            self.refill = RefillConfig::default();
+            note("refill");
+        }
         fixed
     }
 
@@ -507,6 +579,34 @@ mod tests {
         assert!(c.validate().is_err());
         assert_eq!(c.sanitize(), vec!["config.toml: display.tube_sizes out of range, default used".to_string()]);
         assert_eq!(c.display.tube_sizes, "mm");
+    }
+
+    #[test]
+    fn the_refill_pump_defaults_to_address_2_and_checks_its_ranges() {
+        let mut c = Config::from_toml("").unwrap();
+        assert_eq!(c.refill.pump_address, 2, "an older config.toml has no [refill]");
+        assert_eq!(c.refill.direction, Direction::Cw);
+        // A feed pump at 2 must not make every other save fail.
+        c.pump.address = 2;
+        assert!(c.validate().is_ok());
+        c.refill.pump_address = 0;
+        assert!(c.validate().is_err());
+        c.refill.pump_address = 3;
+        c.refill.speed_rpm = 400.0;
+        assert!(c.validate().is_err());
+        c.refill.speed_rpm = 200.0;
+        c.refill.direction = Direction::Ccw;
+        assert!(c.validate().is_ok());
+        let back = Config::from_toml(&c.to_toml().unwrap()).unwrap();
+        assert_eq!(back.refill.direction, Direction::Ccw);
+    }
+
+    #[test]
+    fn a_hand_edited_refill_out_of_range_gets_the_defaults() {
+        // `enabled` from the first version of [refill] is ignored.
+        let mut c = Config::from_toml("[refill]\nenabled = true\npump_address = 0\n").unwrap();
+        assert_eq!(c.sanitize().len(), 1);
+        assert_eq!(c.refill.pump_address, 2);
     }
 
     #[test]

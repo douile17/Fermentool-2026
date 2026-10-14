@@ -4,6 +4,8 @@
   import { num, dur, vol, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { canStartRun } from '../lib/link.js';
   import { radioKeys, rovingTab } from '../lib/radio.js';
+  import { refillAsked, refillOn, refillToChoose } from '../lib/refill.js';
+  import Icon from '../components/Icon.svelte';
   import Chart from '../components/Chart.svelte';
   import ErrorText from '../components/ErrorText.svelte';
   import Steps from '../components/Steps.svelte';
@@ -37,6 +39,9 @@
     // The balance trim by default: with no balance set up, the run simply
     // goes pump only (see `trimOn`).
     gravimetric_trim: true,
+    // how the bottle is refilled: true (refill pump, Settings), false (by
+    // hand), null until chosen, like the direction
+    auto_refill: null,
     // tubing calibration picked for the gravimetric trim
     tubing_calibration_id: null,
     // who the run belongs to: its Teams alerts go to them only
@@ -147,6 +152,9 @@
   // The trim only applies with a balance configured; a "Run again" of a
   // trimmed run on a PC without one keeps the wish but shows why it is off.
   const trimOn = $derived(scaleConfigured && f.gravimetric_trim);
+  const autoRefill = $derived(refillOn({ wanted: f.auto_refill, trimOn, scaleOnFeed }));
+  const refillShown = $derived(refillAsked({ trimOn, scaleOnFeed }));
+  const refillNeeded = $derived(refillToChoose({ wanted: f.auto_refill, trimOn, scaleOnFeed }));
   const scaleLive = $derived(app.status?.scale_connected === true);
   const scaleW = $derived(app.status?.scale_weight_g ?? null);
 
@@ -356,6 +364,7 @@
         pump_addr: pumpAddr,
         curve: curveSpec(),
         gravimetric_trim: trimOn,
+        auto_refill: autoRefill,
         tubing_calibration_id: trimOn || drivePerRpm != null ? f.tubing_calibration_id : null,
         responsible: f.responsible || null,
       });
@@ -385,6 +394,9 @@
       ? [{ label: 'Responsible', done: !needsResponsible, hint: 'Who gets the alerts', target: 'nr-resp', go: () => goTo(1) }]
       : []),
     { label: 'Pump direction', done: f.direction === 'cw' || f.direction === 'ccw', hint: 'Check how the tube is mounted', target: 'pump-direction', go: () => goTo(2) },
+    ...(refillShown
+      ? [{ label: 'Bottle refill', done: !refillNeeded, hint: 'Refill pump or by hand', target: 'nr-refill', go: () => goTo(2) }]
+      : []),
     ...(trimOn ? [{ label: 'Tubing calibration', done: !needsCalibration, hint: 'Needed for the regulation in rpm', target: 'nr-tube', go: () => goTo(2) }] : []),
     { label: 'Duration', done: durationS > 0, hint: 'Longer than zero', target: 'nr-duration', go: () => goTo(3) },
     { label: 'Curve', done: curveOk, hint: 'A valid profile', target: 'nr-shape', go: () => goTo(3) },
@@ -410,8 +422,8 @@
     {
       n: 2,
       label: 'Pump and tube',
-      sub: `${unit}, ${f.direction ?? 'direction to choose'}, ${trimOn ? 'balance regulation' : 'no regulation'}`,
-      done: !!f.direction && !needsCalibration,
+      sub: `${unit}, ${f.direction ?? 'direction to choose'}, ${trimOn ? 'balance regulation' : 'no regulation'}${autoRefill ? ', automatic refill' : ''}`,
+      done: !!f.direction && !needsCalibration && !refillNeeded,
     },
     { n: 3, label: 'Feed profile', sub: durationS > 0 ? `${kindLabel}, ${dur(durationS)}` : kindLabel, done: curveOk },
     { n: 4, label: 'Check and start', sub: `${checklist.filter((i) => i.done).length} of ${checklist.length} ready` },
@@ -481,11 +493,22 @@
           <div class="seg" role="radiogroup" aria-label="Regulation" tabindex="-1" onkeydown={radioKeys}>
             <button role="radio" aria-checked={trimOn} tabindex={rovingTab(trimOn, false)} class:on={trimOn}
               disabled={!scaleConfigured} title={scaleConfigured ? 'The balance corrects the pump' : 'No balance set up'}
-              onclick={() => (f.gravimetric_trim = true)}>Balance regulation</button>
+              onclick={() => (f.gravimetric_trim = true)}><span class="opt"><Icon name="weight" size={15} />Balance regulation</span></button>
             <button role="radio" aria-checked={!trimOn} tabindex={rovingTab(!trimOn, false)} class:on={!trimOn}
-              title="The pump runs on its own" onclick={() => (f.gravimetric_trim = false)}>No regulation</button>
+              title="The pump runs on its own" onclick={() => (f.gravimetric_trim = false)}><span class="opt"><Icon name="off" size={15} />No regulation</span></button>
           </div>
         </div>
+        {#if refillShown}
+          {@const byHand = f.auto_refill === false}
+          <div class="field"><span>Bottle refill{#if refillNeeded}<span class="choose">choose</span>{/if}</span>
+            <div class="seg" class:need={refillNeeded} id="nr-refill" role="radiogroup" aria-label="Bottle refill" tabindex="-1" onkeydown={radioKeys}>
+              <button role="radio" aria-checked={autoRefill} tabindex={rovingTab(autoRefill, refillNeeded)} class:on={autoRefill}
+                title="The refill pump tops the weighed bottle up from the reservoir" onclick={() => (f.auto_refill = true)}><span class="opt"><Icon name="droplet" size={15} />Refill pump</span></button>
+              <button role="radio" aria-checked={byHand} tabindex={rovingTab(byHand, false)} class:on={byHand}
+                title="The bottle is refilled by hand" onclick={() => (f.auto_refill = false)}><span class="opt"><Icon name="hand" size={15} />By hand</span></button>
+            </div>
+          </div>
+        {/if}
       </div>
       {#if !scaleConfigured}
         <p class="k">
@@ -669,7 +692,7 @@
           <dd>
             {unit},
             {#if f.direction}{f.direction === 'cw' ? '↻ cw' : '↺ ccw'}{:else}<b class="todo">direction to choose</b>{/if},
-            {trimOn ? 'balance regulation' : 'no regulation'}
+            {trimOn ? 'balance regulation' : 'no regulation'}{autoRefill ? ', automatic refill' : ''}
           </dd>
           <dd class="edit"><button class="linkish" onclick={() => goTo(2)}>Change</button></dd>
 
@@ -752,6 +775,8 @@
 {/snippet}
 
 <style>
+  /* a pictogram before the words of a choice */
+  .opt { display: inline-flex; align-items: center; gap: 6px; }
   .nr { display: flex; flex-direction: column; gap: var(--s-4); }
   .nr-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: var(--s-3); }
   .nr-head h2 { font-size: 22px; }

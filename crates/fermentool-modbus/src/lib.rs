@@ -409,6 +409,16 @@ impl<T: Transport> Pump<T> {
         self.address = address;
     }
 
+    /// Run `f` against another pump on the same bus (the refill pump), then
+    /// address this one again, whatever `f` returned.
+    pub fn with_address<R>(&mut self, address: u8, f: impl FnOnce(&mut Self) -> R) -> R {
+        let own = self.address;
+        self.address = address;
+        let out = f(self);
+        self.address = own;
+        out
+    }
+
     /// One transaction, retried once on any failure.
     ///
     /// The LabQ silently discards a frame that lands inside its inter-frame gap,
@@ -656,6 +666,53 @@ impl Transport for SimPump {
             }
             other => Ok(with_crc(vec![body[0], other | 0x80, 0x01])), // illegal function
         }
+    }
+}
+
+/// Several simulated pumps on one RS-485 line: every address answers with its
+/// own [`SimPump`], created the first time it is addressed, unless it was
+/// unplugged. What the daemon drives on `serial.path = "sim"`, so the refill
+/// pump (a second address) answers as well as the feed pump.
+#[derive(Debug, Clone, Default)]
+pub struct SimBus {
+    pumps: std::collections::BTreeMap<u8, SimPump>,
+    unplugged: std::collections::BTreeSet<u8>,
+}
+
+impl SimBus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The pump at `address`, plugging it in if it was not yet.
+    pub fn pump(&mut self, address: u8) -> &mut SimPump {
+        self.pumps.entry(address).or_insert_with(|| SimPump::new(address))
+    }
+
+    /// The pump at `address`, if it has been addressed.
+    pub fn get(&self, address: u8) -> Option<&SimPump> {
+        self.pumps.get(&address)
+    }
+
+    /// Take the pump at `address` off the line (`false`) or put it back.
+    pub fn set_plugged(&mut self, address: u8, plugged: bool) {
+        if plugged {
+            self.unplugged.remove(&address);
+        } else {
+            self.unplugged.insert(address);
+        }
+    }
+}
+
+impl Transport for SimBus {
+    fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+        let Some(&address) = request.first() else {
+            return Err(TransportError::Timeout);
+        };
+        if self.unplugged.contains(&address) {
+            return Err(TransportError::Timeout);
+        }
+        self.pump(address).transaction(request)
     }
 }
 
@@ -1024,6 +1081,19 @@ mod tests {
         // start/stop and direction still work, only the value registers are refused.
         pump.start().unwrap();
         assert!(pump.transport().running());
+    }
+
+    #[test]
+    fn with_address_drives_another_pump_and_comes_back() {
+        let mut pump = Pump::new(SimBus::new(), 1);
+        pump.with_address(2, |p| p.start()).unwrap();
+        assert_eq!(pump.address(), 1);
+        assert!(pump.transport().get(2).unwrap().running());
+        assert!(pump.transport().get(1).is_none(), "the feed pump was never addressed");
+        // An error inside still puts the address back.
+        pump.transport_mut().set_plugged(3, false);
+        assert!(pump.with_address(3, |p| p.stop()).is_err());
+        assert_eq!(pump.address(), 1);
     }
 
     #[test]

@@ -13,6 +13,7 @@
   import ResumeModal from './components/ResumeModal.svelte';
   import FinishModal from './components/FinishModal.svelte';
   import { linkState } from './lib/link.js';
+  import { refillView } from './lib/refill.js';
 
   const pumpLink = $derived(linkState(app.status, app.connected));
 
@@ -92,6 +93,8 @@
         : 'Balance connected. The trim applies only to runs started with it enabled.',
     };
   });
+
+  const refillLine = $derived(refillView(app.status?.refill));
 
   $effect(() => {
     if (running && app.tab === 'new') app.tab = 'overview';
@@ -317,6 +320,11 @@
       {#if scaleView}
         <span class="pumpstat {scaleView.tone}" title={scaleView.title}>
           <span class="dot" aria-hidden="true"></span>{scaleView.label}
+        </span>
+      {/if}
+      {#if refillLine}
+        <span class="pumpstat {refillLine.tone}" title={refillLine.title}>
+          <span class="dot" aria-hidden="true"></span>{refillLine.label}
         </span>
       {/if}
       <div class="rail-foot-row">

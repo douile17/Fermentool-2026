@@ -741,6 +741,7 @@ mod tests {
                 tubing_calibration_id: None,
                 responsible: Some("Drew".into()),
                 density_g_per_ml: None,
+                auto_refill: false,
             })
             .unwrap();
         s.finish_run(id, status, jiff::Timestamp::now()).ok();
@@ -969,6 +970,7 @@ mod tests {
                 tubing_calibration_id: None,
                 responsible: Some("Drew".into()),
                 density_g_per_ml: None,
+                auto_refill: false,
             })
             .unwrap();
         let mut cfg = Config::default();

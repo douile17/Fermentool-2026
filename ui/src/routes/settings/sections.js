@@ -1,5 +1,6 @@
 import PumpSettings from './PumpSettings.svelte';
 import BalanceSettings from './BalanceSettings.svelte';
+import RefillSettings from './RefillSettings.svelte';
 import RunSettings from './RunSettings.svelte';
 import NotificationSettings from './NotificationSettings.svelte';
 import DaemonSettings from './DaemonSettings.svelte';
@@ -13,6 +14,7 @@ import AboutSettings from './AboutSettings.svelte';
 export const SECTIONS = [
   { id: 'pump', label: 'Pump', group: 'Hardware', icon: 'pump', component: PumpSettings },
   { id: 'balance', label: 'Balance', group: 'Hardware', icon: 'weight', component: BalanceSettings },
+  { id: 'refill', label: 'Refill pump', group: 'Hardware', icon: 'droplet', component: RefillSettings },
   { id: 'runs', label: 'Crash resume', group: 'Runs', icon: 'power', component: RunSettings },
   { id: 'notifications', label: 'Notifications', group: 'Alerts', icon: 'bell', component: NotificationSettings },
   { id: 'display', label: 'Display', group: 'System', icon: 'ruler', component: DisplaySettings },

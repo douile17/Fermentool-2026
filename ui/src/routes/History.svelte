@@ -151,6 +151,7 @@
       mu_per_hour: c.params.mu_per_hour ?? 0.15,
       steepness: c.params.steepness ?? 8,
       gravimetric_trim: !!run.gravimetric_trim,
+      auto_refill: !!run.auto_refill,
       // New run drops it if it no longer fits (an ml/min calibration needs the trim).
       tubing_calibration_id: run.tubing_calibration_id ?? null,
       ...(run.responsible ? { responsible: run.responsible } : {}),
