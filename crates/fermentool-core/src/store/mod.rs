@@ -842,6 +842,29 @@ impl Store {
         Ok(spans)
     }
 
+    /// Delivered mass counted over `[from_s, to_s]`: the last tick at or
+    /// before `to_s` minus the last one before `from_s`. `None` when either
+    /// end has no delivered figure.
+    pub fn delivered_over(&self, run_id: i64, from_s: f64, to_s: f64) -> Result<Option<f64>> {
+        let at = |sql: &str, t: f64| -> Result<Option<f64>> {
+            self.conn
+                .query_row(sql, params![run_id, t], |r| r.get::<_, f64>(0))
+                .optional()
+                .map_err(Into::into)
+        };
+        let before = at(
+            "SELECT delivered_g FROM ticks WHERE run_id = ?1 AND delivered_g IS NOT NULL
+               AND elapsed_s < ?2 ORDER BY seq DESC LIMIT 1",
+            from_s,
+        )?;
+        let end = at(
+            "SELECT delivered_g FROM ticks WHERE run_id = ?1 AND delivered_g IS NOT NULL
+               AND elapsed_s <= ?2 ORDER BY seq DESC LIMIT 1",
+            to_s,
+        )?;
+        Ok(before.zip(end).map(|(b, e)| e - b))
+    }
+
     /// The balance reading at a run's first and last ticks that have one.
     pub fn weight_bounds(&self, run_id: i64) -> Result<(Option<f64>, Option<f64>)> {
         let one = |order: &str| -> Result<Option<f64>> {
@@ -1454,6 +1477,32 @@ mod tests {
         assert_eq!(pts.last(), Some(&(4_999.0, 2_499.5)), "the latest tick is kept");
         assert!(pts[0].0 <= 10.0, "starts near the first delivered tick: {:?}", pts[0]);
         assert!(pts.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn delivered_over_a_stretch_counts_from_the_tick_before_it() {
+        // 0.2 g a second, the stretch 100..=150 s: 50 s and the tick before.
+        let s = Store::open_in_memory().unwrap();
+        let run = s.insert_run(&sample_run()).unwrap();
+        for seq in 0..200 {
+            s.append_tick(&NewTick {
+                run_id: run,
+                seq,
+                wall_time: ts("2026-09-01T09:30:01Z"),
+                elapsed_s: seq as f64,
+                target: 1.0,
+                written_ok: true,
+                readback: None,
+                note: None,
+                weight_g: None,
+                delivered_g: Some(seq as f64 * 0.2),
+                delivered_estimated: (100..=150).contains(&seq),
+            })
+            .unwrap();
+        }
+        let g = s.delivered_over(run, 100.0, 150.0).unwrap().unwrap();
+        assert!((g - 10.2).abs() < 1e-9, "{g}");
+        assert_eq!(s.delivered_over(run, 0.0, 150.0).unwrap(), None, "no tick before the start");
     }
 
     #[test]

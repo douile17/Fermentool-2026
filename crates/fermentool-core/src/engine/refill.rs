@@ -59,6 +59,9 @@ pub(super) struct RefillLink {
     /// The run's refill levels (`refill_cycle`), `None` outside such a run.
     pub(super) plan: Option<super::refill_cycle::Plan>,
     pub(super) phase: super::refill_cycle::Phase,
+    /// A fill was cut by a lost balance read: it goes on to the high level
+    /// once the balance answers, not only under the low level.
+    pub(super) resume_fill: bool,
 }
 
 /// The refill pump's part of the status frame. `None` there while nothing

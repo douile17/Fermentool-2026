@@ -769,6 +769,21 @@ pub struct RefillRecord {
     pub t_s: f64,
     pub before_g: f64,
     pub after_g: f64,
+    /// What the feed drew from the bottle while it was being refilled (the
+    /// estimated stretch the refill closes), g: the balance cannot see it, so
+    /// `after - before` alone undercounts the refill and the weighed-out total.
+    pub drawn_g: f64,
+}
+
+/// The estimated stretch a refill settled at `t_s` closes: it ends within
+/// `REFILL_SPAN_SLACK_S` of the `refill` event, the closest one wins.
+const REFILL_SPAN_SLACK_S: f64 = 30.0;
+fn refill_span(spans: &[[f64; 2]], t_s: f64) -> Option<[f64; 2]> {
+    spans
+        .iter()
+        .filter(|s| (s[1] - t_s).abs() <= REFILL_SPAN_SLACK_S)
+        .min_by(|a, b| (a[1] - t_s).abs().total_cmp(&(b[1] - t_s).abs()))
+        .copied()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1969,18 +1984,23 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
     let events = store.events_of_kinds(run_id, MARKER_KINDS)?;
     let at = |e: &EventRow| e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0);
     let markers = events.iter().map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() }).collect();
-    let mut refills: Vec<RefillRecord> = events
-        .iter()
-        .filter(|e| e.kind == "refill")
-        .filter_map(|e| {
-            let (before_g, after_g) = parse_refill(e.detail.as_deref()?)?;
-            Some(RefillRecord { t_s: at(e), before_g, after_g })
-        })
-        .collect();
+    let estimated = store.estimated_spans(run_id)?;
+    let mut refills: Vec<RefillRecord> = Vec::new();
+    for e in events.iter().filter(|e| e.kind == "refill") {
+        let Some((before_g, after_g)) = e.detail.as_deref().and_then(parse_refill) else {
+            continue;
+        };
+        let t_s = at(e);
+        let drawn_g = match refill_span(&estimated, t_s) {
+            Some([from, to]) => store.delivered_over(run_id, from, to)?.unwrap_or(0.0).max(0.0),
+            None => 0.0,
+        };
+        refills.push(RefillRecord { t_s, before_g, after_g, drawn_g });
+    }
     refills.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
     let (weight_start_g, weight_end_g) = store.weight_bounds(run_id)?;
     Ok(Some(TrackingReport {
-        estimated: store.estimated_spans(run_id)?,
+        estimated,
         markers,
         weight_start_g,
         weight_end_g,
@@ -4279,6 +4299,16 @@ mod tests {
         assert!(r.before_g < 430.0 && r.before_g > 420.0, "{r:?}");
         assert!(report.markers.iter().any(|m| m.kind == "refill"));
         assert_eq!(parse_refill(&refill_detail(413.5, 753.5)), Some((413.5, 753.5)));
+    }
+
+    #[test]
+    fn a_refill_owns_the_estimated_stretch_it_closes() {
+        // Run 182: the refill pump filled 11:41:01 to 11:42:39, the event
+        // came at the end of that stretch; an earlier one is not its own.
+        let spans = [[600.0, 640.0], [1477.6, 1574.6]];
+        assert_eq!(refill_span(&spans, 1575.2), Some([1477.6, 1574.6]));
+        assert_eq!(refill_span(&spans, 1000.0), None, "no stretch ends near it");
+        assert_eq!(refill_span(&[], 1575.2), None);
     }
 
     #[test]

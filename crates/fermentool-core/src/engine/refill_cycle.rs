@@ -173,6 +173,7 @@ impl<T: Transport> Engine<T> {
         plan.run_id = run_id;
         self.refill.plan = Some(plan);
         self.refill.phase = Phase::Idle;
+        self.refill.resume_fill = false;
         self.save_refill_plan();
     }
 
@@ -180,6 +181,7 @@ impl<T: Transport> Engine<T> {
     /// they were saved) the automatic refill stays off, said once.
     pub(super) fn refill_plan_resume(&mut self, run_id: i64, now: Timestamp) {
         self.refill.phase = Phase::Idle;
+        self.refill.resume_fill = false;
         self.refill.plan = self.load_refill_plan(run_id);
         if self.refill.plan.is_none() {
             let _ = self.store.log_event(&NewEvent {
@@ -195,6 +197,7 @@ impl<T: Transport> Engine<T> {
     pub(super) fn refill_plan_end(&mut self) {
         self.refill.plan = None;
         self.refill.phase = Phase::Idle;
+        self.refill.resume_fill = false;
         self.save_refill_plan();
     }
 
@@ -286,6 +289,7 @@ impl<T: Transport> Engine<T> {
             if matches!(self.refill.phase, Phase::Settling { .. }) {
                 self.refill.phase = Phase::Idle;
             }
+            self.refill.resume_fill = true;
             self.refill_event(now, EventLevel::Warn, "refill_interrupted", "no balance reading: refill pump stopped, the refill starts again once the balance answers".into());
         }
     }
@@ -299,7 +303,21 @@ impl<T: Transport> Engine<T> {
         let g_per_s = plan.flow_ml_min * self.scale_density_g_per_ml / 60.0;
         match self.refill.phase {
             Phase::Idle => {
-                if plan.halted || self.scale_state != trim::ScaleState::Normal || self.refill.stop_owed {
+                if plan.halted {
+                    self.refill.resume_fill = false;
+                    return;
+                }
+                if self.scale_state != trim::ScaleState::Normal || self.refill.stop_owed {
+                    return;
+                }
+                if self.refill.resume_fill {
+                    if weight_g >= plan.high_g - OVERSHOOT_S * g_per_s {
+                        self.refill.resume_fill = false;
+                    } else if self.refill_line_up()
+                        && self.refill_start_pump(t, weight_g, now, "resuming the interrupted refill")
+                    {
+                        self.refill.resume_fill = false;
+                    }
                     return;
                 }
                 if weight_g < plan.low_g && self.refill_line_up() {
@@ -637,6 +655,52 @@ mod tests {
         let kinds = b.kinds();
         assert!(kinds.contains(&"alarm_refill_stop_failed".to_string()), "{kinds:?}");
         assert!(kinds.contains(&"alarm_refill_overfill".to_string()), "{kinds:?}");
+    }
+
+    /// A balance read lost on the wire (run 183: "failed to write whole
+    /// buffer" on its port).
+    struct LostRead;
+    impl Transport for LostRead {
+        fn transaction(&mut self, _: &[u8]) -> std::result::Result<Vec<u8>, fermentool_modbus::TransportError> {
+            Err(fermentool_modbus::TransportError::Io("serial I/O error: failed to write whole buffer".into()))
+        }
+    }
+
+    #[test]
+    fn a_fill_cut_by_a_lost_balance_read_goes_on_to_the_high_level() {
+        // Run 183: cut at 4114 g of the 4155 g, then left there.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let mut i = 1;
+        while !b.refill_running() {
+            b.second(i);
+            i += 1;
+            assert!(i < 1200, "no refill started");
+        }
+        // Cut near the top, as in run 183: far over the low level, so only a
+        // resumed fill brings it up, not the next one.
+        while b.w < 1000.0 {
+            b.second(i);
+            i += 1;
+        }
+        let cut_at = b.w;
+        let now = t0() + jiff::SignedDuration::from_secs(i);
+        b.e.attach_scale_for_test(Box::new(LostRead));
+        b.e.scale_tick(now);
+        assert!(!b.refill_running(), "no filling blind");
+        i += 1;
+        let mut high_seen: f64 = 0.0;
+        for _ in 0..120 {
+            b.second(i);
+            i += 1;
+            high_seen = high_seen.max(b.w);
+        }
+        assert!(cut_at < 1050.0, "cut under the high level: {cut_at}");
+        assert!(high_seen > 1100.0 - 15.0, "filled on to the high level: {high_seen}");
+        assert!(high_seen < 1100.0 + 15.0, "{high_seen}");
+        let kinds = b.kinds();
+        assert!(kinds.contains(&"refill_interrupted".to_string()), "{kinds:?}");
+        assert!(!kinds.iter().any(|k| k.starts_with("alarm_")), "{kinds:?}");
     }
 
     #[test]
