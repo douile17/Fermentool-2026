@@ -120,6 +120,10 @@ pub enum Command {
     SetRefill(RefillConfig, oneshot::Sender<()>),
     /// Settings' Test: run the refill pump 3 s, then stop it.
     RefillTest(oneshot::Sender<Result<(), String>>),
+    /// "Refill now": start a refill whatever the level, lift a halt.
+    RefillNow(oneshot::Sender<Result<(), String>>),
+    /// "Stop refill": stop a refill, hold the automatic refill.
+    RefillPause(oneshot::Sender<Result<(), String>>),
     Shutdown,
 }
 
@@ -974,6 +978,14 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             let _ = reply.send(engine.refill_test(Instant::now()));
             true
         }
+        Command::RefillNow(reply) => {
+            let _ = reply.send(engine.refill_now(now));
+            true
+        }
+        Command::RefillPause(reply) => {
+            let _ = reply.send(engine.refill_pause(now));
+            true
+        }
         // Handled by the loop itself, which owns the flag.
         Command::SetAutoResume(_, reply) => {
             let _ = reply.send(());
@@ -1004,6 +1016,7 @@ mod tests {
             tubing_calibration_id: None,
             responsible: None,
             auto_refill: false,
+            refill_draw_g: None,
         }
     }
 
@@ -1159,6 +1172,7 @@ mod tests {
             tubing_calibration_id: None,
             responsible: None,
             auto_refill: false,
+            refill_draw_g: None,
         };
         handle
             .call(|reply| Command::StartRun(cfg, reply))
@@ -1240,6 +1254,7 @@ mod tests {
             tubing_calibration_id: None,
             responsible: None,
             auto_refill: false,
+            refill_draw_g: None,
         };
         let id = handle
             .call(|reply| Command::StartRun(cfg, reply))

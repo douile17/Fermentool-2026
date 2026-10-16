@@ -56,9 +56,66 @@ export function refillView(refill) {
         };
   if (refill.responding == null)
     return { tone: 'idle', label: 'Refill pump: asking…', title: `Fermentool is asking the refill pump (${addr}).` };
+  const c = refill.cycle;
+  if (c?.phase === 'stopping')
+    return { tone: 'bad', label: 'Refill pump: Stop not confirmed', title: `The refill pump (${addr}) did not acknowledge Stop: it may still be filling. Stop it by hand.` };
+  if (c?.halted)
+    return { tone: 'bad', label: `Refill: ${cycleLine(c)}`, title: 'Automatic refill stopped (an alarm, or Stop refill). Overview, Refill now, starts it again.' };
+  if (c?.phase === 'filling')
+    return { tone: 'warn', label: `Refill: ${cycleLine(c)}`, title: 'The refill pump is filling the weighed bottle; the regulation holds its correction meanwhile.' };
+  if (c) return { tone: 'ok', label: `Refill: ${cycleLine(c)}`, title: `The refill pump (${addr}) answers, stopped until the bottle falls under its refill level.` };
   return {
     tone: 'ok',
     label: 'Refill pump: ready',
     title: `The refill pump (${addr}) answers, stopped. Fermentool sends it a Stop every 10 s.`,
   };
+}
+
+/** Whether run time `t` falls in one of the report's estimated stretches
+ *  (`[from_s, to_s]`: a refill, the bottle touched). */
+export const inSpans = (t, spans) => (spans ?? []).some(([a, b]) => t >= a && t <= b);
+
+/** A chart series cut where it enters and leaves the estimated stretches:
+ *  `[{ est, pts }]` in order, each piece sharing its first point with the
+ *  end of the one before, so the drawn line stays unbroken. */
+export function splitEstimated(pts, spans) {
+  const out = [];
+  for (const p of pts) {
+    const est = inSpans(p[0], spans);
+    const cur = out.at(-1);
+    if (cur && cur.est === est) cur.pts.push(p);
+    else out.push({ est, pts: cur ? [cur.pts.at(-1), p] : [p] });
+  }
+  return out;
+}
+
+// --- the automatic refill cycle (mirrors engine/refill_cycle.rs) -----------
+
+/** A run must use at least this much before a refill. */
+export const MIN_SPAN_G = 100;
+
+export const kg = (g) => `${(g / 1000).toFixed(2)} kg`;
+
+/** The levels a run would refill between: once the bottle has given
+ *  `drawG` (New run, "Refill after using"), it is topped back up to the
+ *  weight on the balance at the start, the full bottle. `{ lowG, highG }`
+ *  or `{ error }`. Mirrors `plan_for` (refill_cycle.rs), which has the last
+ *  word. */
+export function refillPlan({ drawG, weightG }) {
+  if (!(drawG > 0)) return { error: 'Enter how much the bottle gives before a refill.' };
+  if (drawG < MIN_SPAN_G) return { error: `Refill after using at least ${MIN_SPAN_G} g.` };
+  if (weightG == null) return { error: 'No balance reading.' };
+  if (weightG <= drawG) return { error: `The balance reads ${kg(weightG)}, less than the ${kg(drawG)} to use before a refill: fill the bottle, or use less.` };
+  return { lowG: weightG - drawG, highG: weightG };
+}
+
+/** The cycle in a few words, for the sidebar and Overview. */
+export function cycleLine(cycle) {
+  if (!cycle) return null;
+  const v = cycle.weight_g != null ? kg(cycle.weight_g) : '?';
+  if (cycle.phase === 'filling') return `filling ${v} → ${kg(cycle.high_g)}`;
+  if (cycle.phase === 'stopping') return 'Stop not confirmed';
+  if (cycle.halted) return `stopped, ${v}`;
+  if (cycle.phase === 'settling') return `${v}, settling`;
+  return `${v}, refills under ${kg(cycle.low_g)}`;
 }

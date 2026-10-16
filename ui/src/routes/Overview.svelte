@@ -9,6 +9,8 @@
   import FigureBand from '../components/FigureBand.svelte';
   import PumpHead from '../components/PumpHead.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
+  import Icon from '../components/Icon.svelte';
+  import { cycleLine } from '../lib/refill.js';
 
   // Overview follows feeding cycles only: a calibration burst is watched
   // from Tubing calibration, here it only reads as "not a cycle".
@@ -206,6 +208,7 @@
   const next = $derived.by(() => {
     if (!run) return null;
     if (inHold) return { what: 'Stop the run when you are done', sub: `curve done ${hm(holdS)} ago, pump still feeding` };
+    if (cycle && !cycle.halted) return { what: 'The refill pump tops the bottle up', sub: cycleLine(cycle) };
     if (dryMs != null && dryMs < endMs)
       return { what: `Refill the feed bottle before ${when(dryMs, now)}`, sub: `in about ${hm(emptyInS)}, ${num(weightG, 1)} g left` };
     if (dryMs != null) return { what: 'Nothing until the run ends', sub: `the bottle lasts past ${when(endMs, now)}` };
@@ -294,6 +297,18 @@
   const refilling = $derived(
     app.status?.scale_state === 'refill_pending' || app.status?.scale_state === 'refill_settling'
   );
+  // A run with automatic refill: the refill pump's cycle (status frame).
+  const cycle = $derived(app.status?.refill?.cycle ?? null);
+  async function refillCycle(action) {
+    refillBusy = true;
+    err = null;
+    try {
+      await post(action === 'now' ? '/api/refill/now' : '/api/refill/stop');
+    } catch (e) {
+      err = e.message;
+    }
+    refillBusy = false;
+  }
   let refillBusy = $state(false);
   async function refill(done) {
     refillBusy = true;
@@ -451,7 +466,17 @@
         </div>
       {/if}
       <div class="band-actions">
-        {#if trimmed}
+        {#if cycle}
+          {#if cycle.phase === 'filling'}
+            <button class="btn-ghost" disabled={refillBusy} onclick={() => refillCycle('stop')}>
+              <span class="opt"><Icon name="droplet" size={15} />Stop refill</span></button>
+          {:else}
+            <button class="btn-ghost" class:attn={cycle.halted} disabled={refillBusy || cycle.phase !== 'idle'}
+              title={cycle.halted ? 'Automatic refill is stopped: this refills now and starts it again' : 'Refill the bottle now, up to its start level'}
+              onclick={() => refillCycle('now')}>
+              <span class="opt"><Icon name="droplet" size={15} />Refill now</span></button>
+          {/if}
+        {:else if trimmed}
           {#if refilling}
             <button class="btn-ghost" disabled={refillBusy} onclick={() => refill(true)}>Refill done</button>
           {:else}
@@ -645,6 +670,7 @@
               weightG,
               askedMl: app.status?.tracking?.required_ml,
               weighedMl: app.status?.tracking?.delivered_ml,
+              estimated: !!app.status?.tracking?.estimated,
             }}
           />
         </section>
@@ -673,6 +699,10 @@
 {/if}
 
 <style>
+  /* a pictogram before the words of a button */
+  .opt { display: inline-flex; align-items: center; gap: 6px; }
+  /* automatic refill stopped: the button that starts it again stands out */
+  .attn { border-color: var(--danger); color: var(--danger); }
   /* Calm persistent glow on the completed-run card: the pump is still
      holding its final speed, so the page keeps a gentle "alive" pulse. */
   .done { animation: done-glow 3.6s ease-in-out infinite alternate; }

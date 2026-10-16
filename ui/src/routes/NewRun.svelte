@@ -2,9 +2,10 @@
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
   import { num, dur, vol, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
+  import { mlPerRpmOf, tubeRange, curveFit } from '../lib/tuberange.js';
   import { canStartRun } from '../lib/link.js';
   import { radioKeys, rovingTab } from '../lib/radio.js';
-  import { refillAsked, refillOn, refillToChoose } from '../lib/refill.js';
+  import { kg, refillAsked, refillOn, refillPlan, refillToChoose } from '../lib/refill.js';
   import Icon from '../components/Icon.svelte';
   import Chart from '../components/Chart.svelte';
   import ErrorText from '../components/ErrorText.svelte';
@@ -42,6 +43,9 @@
     // how the bottle is refilled: true (refill pump, Settings), false (by
     // hand), null until chosen, like the direction
     auto_refill: null,
+    // the automatic refill starts under this balance weight, kg, and fills
+    // back up to the weight at the start
+    refill_draw_kg: null,
     // tubing calibration picked for the gravimetric trim
     tubing_calibration_id: null,
     // who the run belongs to: its Teams alerts go to them only
@@ -133,6 +137,7 @@
   let scaleDensity = $state(1);
   let scaleOnFeed = $state(true);
   let people = $state([]);
+  let trimLimitPct = $state(null);
   $effect(() => {
     if (!app.connected) return;
     get('/api/config')
@@ -142,6 +147,7 @@
         scaleDensity = c.scale?.density_g_per_ml > 0 ? c.scale.density_g_per_ml : 1;
         scaleOnFeed = (c.scale?.position ?? 'feed') === 'feed';
         people = (c.notify?.people ?? []).map((p) => p.name);
+        trimLimitPct = c.scale?.trim_limit_pct ?? 25;
         // A remembered name no longer in Settings is no choice at all.
         if (!people.some((n) => n.toLowerCase() === f.responsible.trim().toLowerCase())) f.responsible = '';
       })
@@ -157,6 +163,13 @@
   const refillNeeded = $derived(refillToChoose({ wanted: f.auto_refill, trimOn, scaleOnFeed }));
   const scaleLive = $derived(app.status?.scale_connected === true);
   const scaleW = $derived(app.status?.scale_weight_g ?? null);
+  // The levels the run would refill between, from the bottle on the balance now.
+  const plan = $derived(
+    autoRefill
+      ? refillPlan({ drawG: f.refill_draw_kg > 0 ? f.refill_draw_kg * 1000 : null, weightG: scaleW })
+      : null,
+  );
+  const levelNeeded = $derived(autoRefill && !(f.refill_draw_kg > 0));
 
   function openBalanceSettings() {
     app.settingsSection = 'balance';
@@ -289,11 +302,7 @@
   );
   const chosenCal = $derived(calMatches.find((c) => c.id === f.tubing_calibration_id) ?? null);
   // ml/min asked, rpm written: the pump's own head/tubing table is not used.
-  const drivePerRpm = $derived(
-    f.control_var === 'ml_min' && chosenCal?.control_var === 'rpm'
-      ? chosenCal.mean_measured_ml_min / chosenCal.setpoint
-      : null,
-  );
+  const drivePerRpm = $derived(f.control_var === 'ml_min' ? mlPerRpmOf(chosenCal) : null);
   const showCal = $derived(trimOn || (f.control_var === 'ml_min' && calMatches.length > 0));
   // Drop a selection that no longer matches the run's unit. Only once the list
   // has loaded: before that, a calibration seeded by "Run again" would look
@@ -328,8 +337,14 @@
 
   // How much feed the curve takes: its flow summed over time (trapezoids on
   // the preview's 200 points). An rpm curve needs the tube's ml per rpm.
-  const mlPerRpm = $derived(
-    chosenCal?.control_var === 'rpm' && chosenCal.setpoint > 0 ? chosenCal.mean_measured_ml_min / chosenCal.setpoint : null,
+  const mlPerRpm = $derived(mlPerRpmOf(chosenCal));
+  // What the tube delivers between 0.1 and 350 rpm, and whether the curve
+  // fits: the daemon refuses a peak past 350 rpm, this says it first.
+  const tubeFlow = $derived(tubeRange(mlPerRpm));
+  const fit = $derived(
+    drivePerRpm != null && !previewErr && preview.length
+      ? curveFit({ peak: Math.max(...preview.map((p) => p[1])), mlPerRpm: drivePerRpm, trimLimitPct: trimOn ? trimLimitPct : null })
+      : null,
   );
   const flowOf = (v) => (f.control_var === 'ml_min' ? v : mlPerRpm != null ? v * mlPerRpm : null);
   const feed = $derived.by(() => {
@@ -365,6 +380,7 @@
         curve: curveSpec(),
         gravimetric_trim: trimOn,
         auto_refill: autoRefill,
+        refill_draw_g: autoRefill && f.refill_draw_kg > 0 ? f.refill_draw_kg * 1000 : null,
         tubing_calibration_id: trimOn || drivePerRpm != null ? f.tubing_calibration_id : null,
         responsible: f.responsible || null,
       });
@@ -397,9 +413,15 @@
     ...(refillShown
       ? [{ label: 'Bottle refill', done: !refillNeeded, hint: 'Refill pump or by hand', target: 'nr-refill', go: () => goTo(2) }]
       : []),
+    ...(autoRefill
+      ? [{ label: 'Refill levels', done: !!plan && !plan.error, hint: plan?.error ?? 'Refill after using', target: 'nr-draw', go: () => goTo(2) }]
+      : []),
     ...(trimOn ? [{ label: 'Tubing calibration', done: !needsCalibration, hint: 'Needed for the regulation in rpm', target: 'nr-tube', go: () => goTo(2) }] : []),
     { label: 'Duration', done: durationS > 0, hint: 'Longer than zero', target: 'nr-duration', go: () => goTo(3) },
     { label: 'Curve', done: curveOk, hint: 'A valid profile', target: 'nr-shape', go: () => goTo(3) },
+    ...(fit?.over
+      ? [{ label: 'Within the tube', done: false, hint: `This tube delivers at most ${num(fit.range.max, 2)} ml/min`, target: 'nr-shape', go: () => goTo(3) }]
+      : []),
     busy
       ? { label: 'No other run', done: false, hint: 'Stop it from Overview first' }
       : { label: 'Pump connected', done: !cannotStart, hint: 'Connect the pump', target: 'connbar' },
@@ -423,7 +445,7 @@
       n: 2,
       label: 'Pump and tube',
       sub: `${unit}, ${f.direction ?? 'direction to choose'}, ${trimOn ? 'balance regulation' : 'no regulation'}${autoRefill ? ', automatic refill' : ''}`,
-      done: !!f.direction && !needsCalibration && !refillNeeded,
+      done: !!f.direction && !needsCalibration && !refillNeeded && !levelNeeded,
     },
     { n: 3, label: 'Feed profile', sub: durationS > 0 ? `${kindLabel}, ${dur(durationS)}` : kindLabel, done: curveOk },
     { n: 4, label: 'Check and start', sub: `${checklist.filter((i) => i.done).length} of ${checklist.length} ready` },
@@ -509,6 +531,11 @@
             </div>
           </div>
         {/if}
+        {#if autoRefill}
+          <label class="field" title="How much the full bottle gives before the refill pump tops it back up"><span>Refill after using (kg){#if levelNeeded}<span class="choose">enter</span>{/if}</span>
+            <input id="nr-draw" type="number" min="0" step="0.1" bind:value={f.refill_draw_kg} placeholder="1" />
+          </label>
+        {/if}
       </div>
       {#if !scaleConfigured}
         <p class="k">
@@ -518,6 +545,14 @@
       {:else if trimOn && !scaleLive}
         <p class="k bad">The balance is not responding: the regulation cannot correct anything until it is back.</p>
       {/if}
+      {#if autoRefill && f.refill_draw_kg > 0 && plan}
+        {#if !plan.error}
+          <p class="k refill-levels"><Icon name="droplet" size={14} />
+            Refills under <b>{kg(plan.lowG)}</b>, back up to <b>{kg(plan.highG)}</b> (the bottle now)</p>
+        {:else}
+          <p class="k bad">{plan.error}</p>
+        {/if}
+      {/if}
 
       {#if showCal}
         <div class="field" id="nr-tube"><span>Tube on the pump</span>
@@ -526,6 +561,15 @@
             allowNone={f.control_var === 'ml_min'}
             noneText={trimOn ? "The pump's own ml/min, the regulation starts at ×1.00" : "The pump's own ml/min"}
             oncalibrate={() => (app.tab = 'calibration')} />
+          {#if tubeFlow}
+            <p class="k">This tube: <b class="mono">{num(tubeFlow.min, 3)} to {num(tubeFlow.max, 2)} ml/min</b>
+              at {RPM_LIMITS.min} to {RPM_LIMITS.max} rpm, from its calibration{#if drivePerRpm != null}, driven in rpm{/if}.</p>
+            {@render fitNote()}
+          {:else if f.control_var === 'ml_min' && !trimOn && f.tubing_calibration_id == null}
+            <p class="k">The pump turns this ml/min into rpm with its own head and tubing setting: the real flow is
+              only right if that setting matches the tube, and the pump refuses a flow past its maximum.
+              Pick a calibrated tube to drive it in rpm from a measured flow.</p>
+          {/if}
           {#if chosenCal && Date.now() - Date.parse(chosenCal.created_at) > 30 * 86_400_000}
             <p class="k warn-t">
               Calibrated over 30 days ago: tubing wears and its flow drifts. Recalibrate it before a long run.
@@ -630,6 +674,7 @@
               <span>end <b>{num(endV, digits)}</b> {unit}</span>
               <span><b>{dur(durationS)}</b></span>
             </div>
+            {@render fitNote()}
             {@render feedNote()}
           {:else}
             <p class="k">Give the curve a duration to see it.</p>
@@ -755,6 +800,16 @@
   </section>
 </div>
 
+{#snippet fitNote()}
+  {#if fit?.over}
+    <p class="k bad">The curve asks up to {num(fit.rpm * drivePerRpm, 2)} ml/min, {num(fit.rpm, 0)} rpm on this tube:
+      it delivers at most {num(fit.range.max, 2)} ml/min at {RPM_LIMITS.max} rpm. Lower the curve or fit a larger tube.</p>
+  {:else if fit?.tight}
+    <p class="k warn-t">Fits, but the regulation can raise the flow up to ×{num(1 + trimLimitPct / 100, 2)}: above
+      {num(fit.safeMax, 2)} ml/min the pump would sit at {RPM_LIMITS.max} rpm and the regulation could not catch up.</p>
+  {/if}
+{/snippet}
+
 {#snippet feedNote()}
   {#if feed?.unknown}
     <p class="feed k">Feed needed: pick the tube, its ml per rpm turns the curve into mL.</p>
@@ -777,6 +832,7 @@
 <style>
   /* a pictogram before the words of a choice */
   .opt { display: inline-flex; align-items: center; gap: 6px; }
+  .refill-levels { display: inline-flex; align-items: center; gap: 6px; }
   .nr { display: flex; flex-direction: column; gap: var(--s-4); }
   .nr-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: var(--s-3); }
   .nr-head h2 { font-size: 22px; }

@@ -141,7 +141,7 @@ Par ordre d'importance pour des runs de 100 h sans surveillance :
    l'interface, sans effet sur l'application).
 10. Optionnel : test de démarrage (pompe ou balance en retard ?), masse
     étalon pour la balance, éditer une calibration déjà enregistrée.
-10. **Accès à distance depuis le téléphone** (reporté le 2026-10-05). Le PC
+11. **Accès à distance depuis le téléphone** (reporté le 2026-10-05). Le PC
     est sur le réseau de l'université : seul le HTTPS sortant (443) passe à
     coup sûr, comme ntfy. Pas d'AnyDesk, pas de tunnel Cloudflare (il
     faudrait passer tout le DNS de delvigne-lab.com chez Cloudflare, et il
@@ -152,3 +152,25 @@ Par ordre d'importance pour des runs de 100 h sans surveillance :
     `responsible`, liste fermée de commandes signées (acquitter, Refill,
     Stop), interrupteur « Remote access » désactivé par défaut. Spec à
     écrire avant de coder ; demander l'avis du service informatique.
+12. **Fiche de fermentation en ligne** (idée du 2026-10-07). Un chercheur
+    remplit une fiche web (souche, milieu, lot, objectif, µ, Y_x/s, X₀, V₀,
+    S_f, profil d'alimentation, date souhaitée, responsable) sur un
+    sous-domaine de delvigne-lab.com ou un serveur interne du labo. La fiche
+    est stockée en base de données, une notification part sur le **canal
+    Teams** des techniciens (webhook Workflows « publier dans un canal »,
+    carte Adaptive Card comme `notify.rs` ; un canal marche avec le modèle
+    tout fait, contrairement aux messages privés), et Fermentool la récupère pour
+    **préparer le run** : New run prérempli, à vérifier et lancer par le
+    technicien, jamais démarré à distance. Pendant le run, la fiche
+    s'enrichit : prélèvements (OD600, DCW, glucose), annotations, puis
+    bilan à la fin (masse délivrée, µ réel, export). Même infrastructure que
+    le point 11 : le daemon va chercher les fiches en HTTPS sortant, rien
+    n'entre sur le PC. Hébergement retenu le 2026-10-07 : le **NAS Synology**
+    du labo sur le réseau de l'université (accès de l'extérieur par le VPN
+    de l'université, données qui restent au labo), plutôt qu'o2switch. À
+    vérifier : modèle du NAS (Container Manager / Docker ou Web Station +
+    MariaDB), que le PC des runs atteint le NAS (VLAN, pare-feu), que le NAS
+    peut sortir en HTTPS vers Teams. Garder des comptes et le pare-feu DSM
+    même derrière le VPN (tout le campus est sur ce réseau), et une
+    sauvegarde Hyper Backup de la base. Spec avant de coder. Détail :
+    `docs/idee-fiche-de-fermentation.md`.

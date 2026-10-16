@@ -37,7 +37,7 @@ pub const TEST_RUN: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Default)]
 pub(super) struct RefillLink {
-    cfg: RefillConfig,
+    pub(super) cfg: RefillConfig,
     /// The active run drives the refill pump.
     run: bool,
     /// A run that drove it ended, or is waiting to be resumed after a crash,
@@ -48,12 +48,17 @@ pub(super) struct RefillLink {
     /// since its address changed).
     responding: Option<bool>,
     /// When the next Stop goes out. `None`: nothing to send.
-    next_stop: Option<Instant>,
+    pub(super) next_stop: Option<Instant>,
     /// A Test is running until then.
     test_until: Option<Instant>,
     /// The pump may be running (a Test, a Start whose answer was lost): a
     /// Stop is due every [`RETRY_OWED`] until one is acknowledged.
-    stop_owed: bool,
+    pub(super) stop_owed: bool,
+    /// Stops not acknowledged in a row.
+    pub(super) stop_fails: u32,
+    /// The run's refill levels (`refill_cycle`), `None` outside such a run.
+    pub(super) plan: Option<super::refill_cycle::Plan>,
+    pub(super) phase: super::refill_cycle::Phase,
 }
 
 /// The refill pump's part of the status frame. `None` there while nothing
@@ -67,6 +72,8 @@ pub struct RefillStatus {
     pub responding: Option<bool>,
     /// A Test is running it now.
     pub testing: bool,
+    /// The run's automatic refill, `None` outside such a run.
+    pub cycle: Option<super::refill_cycle::CycleStatus>,
 }
 
 impl<T: Transport> Engine<T> {
@@ -105,6 +112,7 @@ impl<T: Transport> Engine<T> {
             address: r.cfg.pump_address,
             responding: r.responding,
             testing: r.test_until.is_some(),
+            cycle: self.refill_cycle_status(),
         })
     }
 
@@ -118,7 +126,7 @@ impl<T: Transport> Engine<T> {
 
     /// The refill pump can be talked to: the line is up and it is the real
     /// one (the stand-in left by a port that would not open proves nothing).
-    fn refill_line_up(&self) -> bool {
+    pub(super) fn refill_line_up(&self) -> bool {
         !self.serial_lost && !(self.on_simulator() && self.serial_is_real())
     }
 
@@ -133,13 +141,18 @@ impl<T: Transport> Engine<T> {
             self.refill.next_stop = Some(now + RETRY_OWED);
             return false;
         }
+        if self.refill_filling() && !self.refill.stop_owed {
+            // The cycle runs it on purpose: no reassert until it stops.
+            self.refill.next_stop = Some(now + REASSERT);
+            return false;
+        }
         let before = (self.refill.responding, self.refill.test_until.is_some());
         self.refill_stop(now);
         before != (self.refill.responding, self.refill.test_until.is_some())
     }
 
     /// Stop the refill pump now, and schedule the next Stop.
-    fn refill_stop(&mut self, now: Instant) -> bool {
+    pub(super) fn refill_stop(&mut self, now: Instant) -> bool {
         let addr = self.refill.cfg.pump_address;
         let ok = self.pump.with_address(addr, |p| p.stop()).is_ok();
         // The Test is over either way; a Stop that did not get through is
@@ -148,6 +161,9 @@ impl<T: Transport> Engine<T> {
         if ok {
             self.refill.stop_owed = false;
             self.refill.recovering = false;
+            self.refill.stop_fails = 0;
+        } else {
+            self.refill.stop_fails = self.refill.stop_fails.saturating_add(1);
         }
         self.refill_answered(ok);
         let r = &self.refill;
@@ -242,6 +258,9 @@ impl<T: Transport> Engine<T> {
     /// The run ended (stopped, aborted, or discarded after a crash): a last
     /// Stop; one that does not get through is retried every minute.
     pub(super) fn refill_run_ended(&mut self, now: Instant) {
+        if self.refill.plan.is_some() {
+            self.refill_plan_end();
+        }
         if !(self.refill.run || self.refill.recovering) {
             return;
         }
@@ -347,9 +366,11 @@ mod tests {
     /// the feed bottle.
     fn refill_run(e: &mut Engine<SimBus>) -> RunConfig {
         e.attach_scale_for_test(Box::new(fermentool_modbus::SimPump::new(9)));
+        e.live_weight = Some((1100.0, true));
         RunConfig {
             gravimetric_trim: true,
             auto_refill: true,
+            refill_draw_g: Some(550.0),
             control_var: crate::store::ControlVar::MlMin,
             ..super::super::tests::linear_cfg()
         }

@@ -6,6 +6,7 @@
   import { num, dur } from '../lib/fmt.js';
   import { app } from '../lib/state.svelte.js';
   import { bottleWeights } from '../lib/balance.js';
+  import { splitEstimated } from '../lib/refill.js';
   import Chart from './Chart.svelte';
   import Icon from './Icon.svelte';
 
@@ -72,8 +73,13 @@
   });
   const gx = (t) => (Math.min(t, spanS) / (spanS || 1)) * GW;
   const gy = (v) => gPad + ((gMax - v) / (2 * gMax)) * (GH - 2 * gPad);
-  const gapLine = $derived(
-    gap.map(([t, d], i) => `${i ? 'L' : 'M'}${gx(t).toFixed(1)},${gy(d).toFixed(1)}`).join(' '),
+  // Refills: delivered estimated, not weighed; drawn apart (see RegulationPanel).
+  const estSpans = $derived(report?.estimated ?? []);
+  const gapParts = $derived(
+    splitEstimated(gap, estSpans).map((part) => ({
+      est: part.est,
+      d: part.pts.map(([t, d], i) => `${i ? 'L' : 'M'}${gx(t).toFixed(1)},${gy(d).toFixed(1)}`).join(' '),
+    })),
   );
   const bandPath = $derived.by(() => {
     if (gap.length < 2) return '';
@@ -190,12 +196,17 @@
         {#each markers as m}
           <line x1={gx(m.t)} x2={gx(m.t)} y1="0" y2={GH} class="mark" />
         {/each}
+        {#each estSpans as [a, b]}
+          <rect x={gx(a)} y="0" width={Math.max(2, gx(b) - gx(a))} height={GH} class="est-zone" />
+        {/each}
         <line x1="0" x2={GW} y1={gy(0)} y2={gy(0)} class="zero" />
-        <path d={gapLine} class="gapline" />
+        {#each gapParts as part}
+          <path d={part.d} class="gapline" class:est={part.est} />
+        {/each}
       </svg>
       <div class="gap-axis mono">
         <span>+{num(gMax, 2)} mL ahead</span>
-        <span>shaded: ±{TOL * 100} % of requested | line: on target</span>
+        <span>shaded: ±{TOL * 100} % of requested | line: on target{estSpans.length ? ' | blue dashed: estimated, bottle being refilled' : ''}</span>
         <span>−{num(gMax, 2)} mL behind</span>
       </div>
     {/if}
@@ -292,6 +303,9 @@
     stroke-linejoin: round;
     vector-effect: non-scaling-stroke;
   }
+  /* estimated stretches (refill): another colour, dashed, shaded behind */
+  .gap .gapline.est { stroke: #4f7fd9; stroke-dasharray: 5 3; }
+  .gap .est-zone { fill: color-mix(in srgb, #4f7fd9 12%, transparent); stroke: none; }
   .gap-axis {
     display: flex;
     justify-content: space-between;

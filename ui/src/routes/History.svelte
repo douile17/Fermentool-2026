@@ -152,6 +152,7 @@
       steepness: c.params.steepness ?? 8,
       gravimetric_trim: !!run.gravimetric_trim,
       auto_refill: !!run.auto_refill,
+      refill_draw_kg: run.refill_draw_g != null ? run.refill_draw_g / 1000 : null,
       // New run drops it if it no longer fits (an ml/min calibration needs the trim).
       tubing_calibration_id: run.tubing_calibration_id ?? null,
       ...(run.responsible ? { responsible: run.responsible } : {}),

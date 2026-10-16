@@ -322,6 +322,32 @@ avec au moins deux remplissages (« Reste à faire » n° 6).
      répond avec sa propre pompe.
 3. Cycle automatique, régulation pendant le remplissage, garde-fous, reprise
    après plantage.
+   **Codé le 2026-10-14** (`engine/refill_cycle.rs`), en simulation :
+   - **Niveaux par le poids, décision du 2026-10-14** : la bouteille est
+     toujours posée pleine, son poids à vide et sa contenance ne servent à
+     rien. New run demande seulement « Refill after using (kg) », ce que la
+     bouteille pleine donne avant un remplissage (le 2026-10-15 ; c'était
+     d'abord un poids absolu, « Refill under », pris à tort pour un écart) :
+     sous le poids de départ moins cette quantité, la pompe remplit jusqu'au
+     poids lu au lancement. Run refusé sous 100 g, ou au-delà de ce que la
+     balance porte. Colonne `refill_draw_g` (migration 0013). La marge de 10 min sous la
+     contenance (§1) est abandonnée avec la contenance : un trop-plein vers
+     le réservoir reste la protection contre une pompe qui ne s'arrête pas.
+   - La régulation traverse le remplissage par l'automate existant (tenu en
+     `RefillPending` pendant que la pompe tourne) : c figé, historique du
+     rendement gardé, événement `refill` comme pour un remplissage à la main.
+     Le Stop périodique est suspendu pendant un remplissage.
+   - Garde-fous : `alarm_refill_no_flow`, `_overfill`, `_timeout`,
+     `_stop_failed` (sonnent jusqu'à acquittement, famille `refill`) ; le
+     remplissage auto est alors suspendu jusqu'à « Refill now ». Lecture de
+     balance perdue en cours de remplissage : pompe arrêtée, reprise plus
+     tard. Overview : « Refill now » / « Stop refill ».
+   - Niveaux et débit mesuré persistés (`app_state.refill_plan`), repris
+     après plantage.
+   - **Graphiques** : pendant un remplissage (ou une bouteille touchée) le
+     délivré journalisé est estimé (rendement k × masse commandée), marqué
+     `ticks.delivered_estimated`, et tracé en bleu pointillé sur fond teinté
+     au lieu d'une courbe d'écart qui plonge.
 4. Suivi du réservoir, UI, notifications.
 5. Essais au banc.
 

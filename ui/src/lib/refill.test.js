@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { directionLabel, refillOn, refillProblem, refillToChoose, refillView } from './refill.js';
+import { cycleLine, directionLabel, inSpans, refillOn, refillPlan, refillProblem, refillToChoose, refillView, splitEstimated } from './refill.js';
 
 describe('refillProblem', () => {
   const ok = { address: 2, feedAddress: 1, speedRpm: 350 };
@@ -65,5 +65,50 @@ describe('refillView', () => {
   });
   it('says a Stop owed after a test or a run may have left the pump running', () => {
     expect(refillView({ ...r, in_run: false, responding: false }).label).toMatch(/Stop not confirmed/);
+  });
+});
+
+describe('splitEstimated', () => {
+  const pts = [[0, 0], [1, 0], [2, -1], [3, -2], [4, 0], [5, 0]];
+  it('cuts the line where a refill was estimated, unbroken', () => {
+    const parts = splitEstimated(pts, [[2, 3]]);
+    expect(parts.map((p) => p.est)).toEqual([false, true, false]);
+    expect(parts[1].pts).toEqual([[1, 0], [2, -1], [3, -2]]);
+    expect(parts[2].pts[0]).toEqual([3, -2]);
+  });
+  it('is one measured piece without spans', () => {
+    expect(splitEstimated(pts, [])).toEqual([{ est: false, pts }]);
+    expect(splitEstimated(pts, undefined)).toHaveLength(1);
+  });
+  it('knows a time inside a span', () => {
+    expect(inSpans(2.5, [[2, 3]])).toBe(true);
+    expect(inSpans(4, [[2, 3]])).toBe(false);
+  });
+});
+
+describe('refillPlan', () => {
+  it('refills once the bottle gave what was entered, back up to the full bottle', () => {
+    // 300 g used out of a full 4.98 kg bottle: under 4.68 kg, not under 0.3 kg.
+    expect(refillPlan({ drawG: 300, weightG: 4980 })).toEqual({ lowG: 4680, highG: 4980 });
+    expect(refillPlan({ drawG: 1600, weightG: 9600 })).toEqual({ lowG: 8000, highG: 9600 });
+  });
+  it('says what is missing or wrong', () => {
+    expect(refillPlan({ drawG: null, weightG: 9600 }).error).toMatch(/before a refill/);
+    expect(refillPlan({ drawG: 50, weightG: 9600 }).error).toMatch(/at least 100 g/);
+    expect(refillPlan({ drawG: 1600, weightG: null }).error).toMatch(/No balance/);
+    expect(refillPlan({ drawG: 5000, weightG: 4980 }).error).toMatch(/fill the bottle/);
+  });
+});
+
+describe('cycleLine', () => {
+  const c = { phase: 'idle', halted: false, low_g: 8000, high_g: 9600, weight_g: 9100 };
+  it('reads the cycle in a few words', () => {
+    expect(cycleLine(c)).toBe('9.10 kg, refills under 8.00 kg');
+    expect(cycleLine({ ...c, phase: 'filling', weight_g: 7950 })).toBe('filling 7.95 kg → 9.60 kg');
+    expect(cycleLine({ ...c, halted: true })).toBe('stopped, 9.10 kg');
+  });
+  it('flags a halted refill in the sidebar', () => {
+    const v = refillView({ in_run: true, address: 2, responding: true, testing: false, cycle: { ...c, halted: true } });
+    expect(v.tone).toBe('bad');
   });
 });

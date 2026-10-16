@@ -31,6 +31,7 @@ const FIELDS = {
   fb_vmax: numOrNull,
   gravimetric_trim: (v) => typeof v === 'boolean',
   auto_refill: (v) => v == null || typeof v === 'boolean',
+  refill_draw_kg: numOrNull,
   tubing_calibration_id: (v) => v == null || Number.isInteger(v),
   responsible: (v) => typeof v === 'string',
 };

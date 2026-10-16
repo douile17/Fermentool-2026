@@ -59,6 +59,18 @@ const MIGRATIONS: &[Migration] = &[
         version: 10,
         sql: include_str!("migrations/0010_run_auto_refill.sql"),
     },
+    Migration {
+        version: 11,
+        sql: include_str!("migrations/0011_run_refill_capacity.sql"),
+    },
+    Migration {
+        version: 12,
+        sql: include_str!("migrations/0012_run_refill_low.sql"),
+    },
+    Migration {
+        version: 13,
+        sql: include_str!("migrations/0013_run_refill_draw.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -209,6 +221,8 @@ pub struct NewRun {
     pub density_g_per_ml: Option<f64>,
     /// The run drives the refill pump.
     pub auto_refill: bool,
+    /// The automatic refill: what the bottle gives before a refill, g.
+    pub refill_draw_g: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -232,6 +246,7 @@ pub struct RunRow {
     pub responsible: Option<String>,
     pub density_g_per_ml: Option<f64>,
     pub auto_refill: bool,
+    pub refill_draw_g: Option<f64>,
 }
 
 /// A tubing calibration to record: three hand-weighed bursts of one tube at
@@ -302,6 +317,8 @@ pub struct NewTick {
     pub weight_g: Option<f64>,
     /// Cumulative mass delivered since run start (trimmed runs), grams.
     pub delivered_g: Option<f64>,
+    /// `delivered_g` is estimated, not weighed (a refill, a touch).
+    pub delivered_estimated: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -349,7 +366,7 @@ pub struct Store {
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
      direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
-     gravimetric_trim, kind, tubing_calibration_id, responsible, density_g_per_ml, auto_refill";
+     gravimetric_trim, kind, tubing_calibration_id, responsible, density_g_per_ml, auto_refill, refill_draw_g";
 
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
@@ -450,9 +467,9 @@ impl Store {
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
                 pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id, responsible,
-                density_g_per_ml, auto_refill)
+                density_g_per_ml, auto_refill, refill_draw_g)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 r.name,
                 created,
@@ -472,6 +489,7 @@ impl Store {
                 r.responsible.as_deref().map(str::trim).filter(|n| !n.is_empty()),
                 r.density_g_per_ml,
                 r.auto_refill as i64,
+                r.refill_draw_g,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -737,8 +755,8 @@ impl Store {
     pub fn append_tick(&self, t: &NewTick) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO ticks (run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note,
-                                weight_g, delivered_g)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                weight_g, delivered_g, delivered_estimated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 t.run_id,
                 t.seq,
@@ -750,6 +768,7 @@ impl Store {
                 t.note,
                 t.weight_g,
                 t.delivered_g,
+                t.delivered_estimated as i64,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -800,6 +819,27 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![run_id, stride], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The stretches `[from_s, to_s]` of a run whose delivered mass was
+    /// estimated rather than weighed, from consecutive estimated ticks.
+    pub fn estimated_spans(&self, run_id: i64) -> Result<Vec<[f64; 2]>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT elapsed_s FROM ticks
+             WHERE run_id = ?1 AND delivered_estimated = 1 ORDER BY seq",
+        )?;
+        let ts = stmt
+            .query_map([run_id], |r| r.get::<_, f64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut spans: Vec<[f64; 2]> = Vec::new();
+        for t in ts {
+            match spans.last_mut() {
+                // Ticks a second apart, a missed one or two allowed.
+                Some(s) if t - s[1] <= 3.5 => s[1] = t,
+                _ => spans.push([t, t]),
+            }
+        }
+        Ok(spans)
     }
 
     /// The balance reading at a run's first and last ticks that have one.
@@ -992,6 +1032,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         responsible: row.get(16)?,
         density_g_per_ml: row.get(17)?,
         auto_refill: row.get::<_, i64>(18)? != 0,
+        refill_draw_g: row.get(19)?,
     })
 }
 
@@ -1077,6 +1118,7 @@ mod tests {
             responsible: None,
             density_g_per_ml: None,
             auto_refill: false,
+            refill_draw_g: None,
         }
     }
 
@@ -1097,7 +1139,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 10);
+        assert_eq!(v, 13);
     }
 
     #[test]
@@ -1109,7 +1151,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 10);
+        assert_eq!(v, 13);
     }
 
     #[test]
@@ -1172,6 +1214,7 @@ mod tests {
                 note: None,
                 weight_g: None,
                 delivered_g: None,
+                delivered_estimated: false,
             })
             .unwrap();
         }
@@ -1199,6 +1242,7 @@ mod tests {
             note: None,
             weight_g: None,
             delivered_g: None,
+            delivered_estimated: false,
         };
         s.append_tick(&t).unwrap();
         assert!(s.append_tick(&t).is_err());
@@ -1373,6 +1417,7 @@ mod tests {
             note: None,
             weight_g: Some(742.5),
             delivered_g: Some(0.3),
+            delivered_estimated: false,
         })
         .unwrap();
         let t = s.last_tick(run).unwrap().unwrap();
@@ -1399,6 +1444,7 @@ mod tests {
                 weight_g: None,
                 // the first ticks precede the first balance read
                 delivered_g: (seq >= 3).then_some(seq as f64 * 0.5),
+                delivered_estimated: false,
             })
             .unwrap();
         }
@@ -1426,6 +1472,7 @@ mod tests {
                 note: None,
                 weight_g: None,
                 delivered_g: None,
+                delivered_estimated: false,
             })
             .unwrap();
         }

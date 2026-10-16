@@ -231,6 +231,9 @@ pub struct RefillConfig {
     pub speed_rpm: f64,
     /// The direction that pumps from the reservoir into the weighed bottle.
     pub direction: Direction,
+    /// What the refill pump delivers at `speed_rpm`, mL/min: sizes the
+    /// guards (no flow, too slow, the free margin) until a fill measures it.
+    pub expected_ml_min: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,6 +349,8 @@ impl Default for RefillConfig {
             pump_address: 2,
             speed_rpm: 350.0,
             direction: Direction::Cw,
+            // Measured on the bench: 2 L in 7 min at 350 rpm.
+            expected_ml_min: 285.0,
         }
     }
 }
@@ -359,6 +364,9 @@ impl RefillConfig {
     fn problem(&self) -> Option<String> {
         if !(1..=247).contains(&self.pump_address) {
             return Some("the refill pump's MODBUS address must be 1..=247".into());
+        }
+        if !(self.expected_ml_min.is_finite() && self.expected_ml_min > 0.0) {
+            return Some("the refill pump's expected flow must be a positive number (mL/min)".into());
         }
         if !(self.speed_rpm.is_finite() && (REFILL_RPM_MIN..=REFILL_RPM_MAX).contains(&self.speed_rpm)) {
             return Some(format!(

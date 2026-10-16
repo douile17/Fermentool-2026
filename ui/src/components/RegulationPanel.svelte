@@ -12,6 +12,7 @@
   import { get } from '../lib/api.js';
   import { num, dur } from '../lib/fmt.js';
   import { valueAt, when, toleranceMl } from '../lib/runview.js';
+  import { splitEstimated } from '../lib/refill.js';
 
   let {
     runId,
@@ -26,7 +27,7 @@
     report = null,
     // The latest values from the status frame, every second: appended to the
     // journalled series so the three charts move as the run does.
-    // { c, weightG, askedMl, weighedMl }
+    // { c, weightG, askedMl, weighedMl, estimated }
     live = null,
   } = $props();
 
@@ -139,6 +140,21 @@
     return `${line(top)} ${bot.map(([a, b]) => `L${a.toFixed(1)},${b.toFixed(1)}`).join(' ')} Z`;
   });
   const gNow = $derived(gapPts.at(-1)?.[1] ?? null);
+  // While the bottle is refilled (or touched) the balance cannot weigh the
+  // feed: those stretches are estimated (pump ratio times what it was told),
+  // shaded and drawn dashed instead of a line that dives. The live point
+  // extends the last one while it lasts.
+  const estSpans = $derived.by(() => {
+    const spans = [...(report?.estimated ?? [])];
+    if (live?.estimated) {
+      const last = spans.at(-1);
+      const from = report?.points.at(-1)?.[0] ?? nowS;
+      if (last && from - last[1] <= 5) spans[spans.length - 1] = [last[0], nowS];
+      else spans.push([from, nowS]);
+    }
+    return spans;
+  });
+  const gapParts = $derived(splitEstimated(gapPts, estSpans));
 
   // --- balance weight, from the ticks
   const wPts = $derived(
@@ -218,8 +234,15 @@
       <text class="axl" x={L - 6} y={gy(0) + 4} text-anchor="end">0</text>
       <text class="axl" x={L - 6} y={tops[1] + 10} text-anchor="end">+{num(gMax, gMax < 10 ? 1 : 0)}</text>
       <text class="axl" x={L - 6} y={tops[1] + PH} text-anchor="end">−{num(gMax, gMax < 10 ? 1 : 0)}</text>
+      {#each estSpans as [a, b]}
+        <rect class="est-zone" x={x(a)} y={tops[1]} width={Math.max(2, x(b) - x(a))} height={PH} />
+      {/each}
       {#if gapPts.length > 1}
-        <path class="gap" d={line(gapPts.map(([t, g]) => [x(t), gy(g)]))} />
+        {#each gapParts as part}
+          {#if part.pts.length > 1}
+            <path class="gap" class:est={part.est} d={line(part.pts.map(([t, g]) => [x(t), gy(g)]))} />
+          {/if}
+        {/each}
       {/if}
 
       <!-- balance weight, and where it runs dry -->
@@ -263,8 +286,11 @@
       {/if}
     </svg>
 
-    {#if marks.length || emptyAt != null}
+    {#if marks.length || emptyAt != null || estSpans.length}
       <ol class="key">
+        {#if estSpans.length}
+          <li class="est"><i></i>estimated, bottle being refilled</li>
+        {/if}
         {#each marks as m, i}
           <li><i>{i + 1}</i>{m.label}<span class="mono">{when(startedAtMs + m.t * 1000)}</span></li>
         {/each}
@@ -291,6 +317,11 @@
   .zone { fill: color-mix(in srgb, var(--teal-400) 13%, transparent); stroke: none; }
   .c { fill: none; stroke: var(--teal-700); stroke-width: 2; }
   .gap { fill: none; stroke: var(--measured); stroke-width: 1.6; }
+  /* estimated stretches (refill): another colour, dashed, shaded behind */
+  .gap.est { stroke: var(--est); stroke-dasharray: 5 3; }
+  .est-zone { fill: color-mix(in srgb, var(--est) 12%, transparent); }
+  .reg { --est: #4f7fd9; }
+  .key .est i { border: none; width: 14px; height: 0; border-top: 2px dashed var(--est); border-radius: 0; }
   .w { fill: none; stroke: var(--ink); stroke-width: 1.6; opacity: 0.75; }
   .w.proj { stroke-dasharray: 4 4; opacity: 0.4; }
   .empty { fill: var(--measured); }

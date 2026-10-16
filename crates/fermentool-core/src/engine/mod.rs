@@ -39,6 +39,8 @@ use crate::trim;
 pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 mod refill;
+mod refill_cycle;
+pub use refill_cycle::{CycleStatus, RefillAlarm};
 pub use refill::{RefillStatus, TEST_RUN as REFILL_TEST_RUN};
 
 /// [`REFILL_TEST_RUN`] in seconds, for the API's reply.
@@ -271,6 +273,11 @@ pub struct RunConfig {
     /// regulation, with the balance under the feed bottle.
     #[serde(default)]
     pub auto_refill: bool,
+    /// The automatic refill starts once the bottle has given this much, g
+    /// (under the weight at the start less this), and fills back up to the
+    /// weight at the start: the full bottle.
+    #[serde(default)]
+    pub refill_draw_g: Option<f64>,
 }
 
 /// What [`Engine::pending_recovery`] found: a run that was `running` when the
@@ -733,6 +740,9 @@ const WRONG_SIDE_FRACTION: f64 = 0.25;
 pub struct TrackingReport {
     /// `[t_s, required_ml, delivered_ml]`, cumulative, at most 2000 points.
     pub points: Vec<[f64; 3]>,
+    /// `[from_s, to_s]` stretches where delivered is estimated (pump ratio
+    /// times commanded), not weighed: refills, the bottle touched.
+    pub estimated: Vec<[f64; 2]>,
     /// Of delivered against required.
     pub r_squared: Option<f64>,
     /// Required minus delivered at the last point, positive = behind.
@@ -784,6 +794,8 @@ pub struct TrackingStatus {
     pub alarm: Option<tracking::TrimAlarm>,
     /// Feed missed during past alarms, in the totals but not paid back, mL.
     pub missed_ml: f64,
+    /// `delivered_ml` is estimated right now (a refill, the bottle touched).
+    pub estimated: bool,
 }
 
 impl<T: Transport> Engine<T> {
@@ -1264,11 +1276,13 @@ impl<T: Transport> Engine<T> {
             tracking: self.active.as_ref().filter(|a| a.gravimetric_trim).map(|_| {
                 let tr = &self.tracker;
                 let ml = |g: f64| g / self.scale_density_g_per_ml;
+                let (delivered_g, estimated) = self.delivered_for_journal();
                 TrackingStatus {
                     required_ml: ml(tr.required_g),
-                    delivered_ml: ml(tr.delivered_g),
+                    delivered_ml: ml(delivered_g),
+                    estimated,
                     deficit_pct: (tr.required_g > 0.0)
-                        .then(|| 100.0 * (tr.required_g - tr.delivered_g) / tr.required_g),
+                        .then(|| 100.0 * (tr.required_g - delivered_g) / tr.required_g),
                     delivery_ratio: tr.k,
                     wrong_side: tr.wrong_side,
                     alarm: tr.alarm,
@@ -1327,7 +1341,7 @@ impl<T: Transport> Engine<T> {
         if self.on_simulator() && !self.allow_simulator {
             return Err(EngineError::SimulatorNotAllowed);
         }
-        if cfg.auto_refill {
+        let refill_plan = if cfg.auto_refill {
             if !cfg.gravimetric_trim || cfg.kind != RunKind::Dosing {
                 return Err(EngineError::Config(
                     "automatic refill needs a feeding run with the balance regulation".into(),
@@ -1338,10 +1352,14 @@ impl<T: Transport> Engine<T> {
                     "automatic refill needs the balance under the feed bottle".into(),
                 ));
             }
+            let plan = self.refill_plan_check(cfg.refill_draw_g)?;
             // Before the feed pump moves: a refill pump that does not answer
             // refuses the run.
             self.refill_before_run(cfg.pump_addr, std::time::Instant::now())?;
-        }
+            Some(plan)
+        } else {
+            None
+        };
 
         // The chosen tubing calibration, checked before anything changes.
         let calibration = match cfg.tubing_calibration_id {
@@ -1458,6 +1476,7 @@ impl<T: Transport> Engine<T> {
             responsible: cfg.responsible.clone(),
             density_g_per_ml: cfg.gravimetric_trim.then_some(self.scale_density_g_per_ml),
             auto_refill: cfg.auto_refill,
+            refill_draw_g: cfg.auto_refill.then_some(cfg.refill_draw_g).flatten(),
         }) {
             Ok(id) => id,
             Err(e) => {
@@ -1529,8 +1548,9 @@ impl<T: Transport> Engine<T> {
             kind: cfg.kind,
             auto_refill: cfg.auto_refill,
         });
-        if cfg.auto_refill {
+        if let Some(plan) = refill_plan {
             self.refill_run_started(std::time::Instant::now());
+            self.refill_plan_start(plan, id);
         }
         Ok(id)
     }
@@ -1693,7 +1713,8 @@ impl<T: Transport> Engine<T> {
             readback,
             note: None,
             weight_g: self.live_weight.map(|(w, _)| w),
-            delivered_g: trimmed.then_some(self.tracker.delivered_g),
+            delivered_g: trimmed.then(|| self.delivered_for_journal().0),
+            delivered_estimated: trimmed && self.delivered_for_journal().1,
         }) {
             Ok(_) => self.journal_fails = 0,
             Err(e) => {
@@ -1959,6 +1980,7 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
     refills.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
     let (weight_start_g, weight_end_g) = store.weight_bounds(run_id)?;
     Ok(Some(TrackingReport {
+        estimated: store.estimated_spans(run_id)?,
         markers,
         weight_start_g,
         weight_end_g,
@@ -2000,6 +2022,7 @@ impl<T: Transport> Engine<T> {
             return;
         }
         let Some((raw_g, _stable)) = self.read_scale() else {
+            self.refill_cycle_read_failed(now);
             return;
         };
         // Everything below reasons about a feed bottle whose weight falls as
@@ -2023,6 +2046,9 @@ impl<T: Transport> Engine<T> {
         self.tracker.required_g += required;
         self.tracker.commanded_g += required * self.trim_c;
         self.tracker.last_t_s = Some(t);
+        // The automatic refill, before the balance's state machine: a fill
+        // starting now holds the regulation from this read on.
+        self.refill_cycle_step(raw_g, t, now);
 
         let prev = self.last_weight_g.unwrap_or(weight_g);
         self.last_weight_g = Some(weight_g);
@@ -2072,7 +2098,7 @@ impl<T: Transport> Engine<T> {
             rise_g: rise,
             gained,
             seconds_in_settling,
-            manual_refill_mode: self.manual_refill_mode,
+            manual_refill_mode: self.manual_refill_mode || self.refill_filling(),
             manual_refill_done: self.manual_refill_done_flag,
             expected_step_g: required * self.trim_c,
         };
@@ -2381,6 +2407,22 @@ impl<T: Transport> Engine<T> {
         }
         if save {
             self.save_trim_state();
+        }
+    }
+
+    /// The cumulative delivered mass for the journal, and whether it is an
+    /// estimate: while the balance cannot measure (a refill, a touch), the
+    /// weighed count stands still since the anchor; the pump's ratio times
+    /// what it was told since then carries it on, as the anchor will settle
+    /// it, instead of a flat line the gap chart reads as a dive.
+    fn delivered_for_journal(&self) -> (f64, bool) {
+        let tr = &self.tracker;
+        match tr.anchor {
+            Some(a) => (
+                tr.delivered_g + tr.k.unwrap_or(1.0) * (tr.commanded_g - a.commanded_g).max(0.0),
+                true,
+            ),
+            None => (tr.delivered_g, false),
         }
     }
 
@@ -2902,6 +2944,7 @@ impl<T: Transport> Engine<T> {
         });
         if run.auto_refill {
             self.refill_run_resumed(std::time::Instant::now());
+            self.refill_plan_resume(run.id, now);
         }
         Ok(run.id)
     }
@@ -3243,6 +3286,7 @@ mod tests {
             tubing_calibration_id: None,
             responsible: None,
             auto_refill: false,
+            refill_draw_g: None,
         }
     }
 
@@ -3958,6 +4002,7 @@ mod tests {
                     responsible: None,
                     density_g_per_ml: None,
                     auto_refill: false,
+                    refill_draw_g: None,
                 })
                 .unwrap();
             store

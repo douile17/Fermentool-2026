@@ -125,6 +125,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scale/refill_mode", post(scale_refill_mode))
         .route("/api/scale/refill_done", post(scale_refill_done))
         .route("/api/refill/test", post(refill_test))
+        .route("/api/refill/now", post(refill_now))
+        .route("/api/refill/stop", post(refill_pause))
         .route("/api/calibrations", get(list_calibrations).post(create_calibration))
         .route(
             "/api/calibrations/draft",
@@ -783,6 +785,24 @@ async fn refill_test(State(s): State<AppState>) -> ApiResult<Response> {
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "ok": true, "seconds": crate::engine::REFILL_TEST_S })).into_response())
+}
+
+async fn refill_now(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::RefillNow)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "ok": true })).into_response())
+}
+
+async fn refill_pause(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::RefillPause)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "ok": true })).into_response())
 }
 
 async fn get_recovery(State(s): State<AppState>) -> ApiResult<Response> {
@@ -1660,6 +1680,7 @@ mod tests {
                     responsible: None,
                     density_g_per_ml: None,
                     auto_refill: false,
+                    refill_draw_g: None,
                 })
                 .unwrap();
             store

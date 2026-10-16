@@ -61,6 +61,7 @@
     try {
       const { cfg } = await patchConfig((c) => {
         c.refill = {
+          ...c.refill,
           pump_address: Number(address),
           speed_rpm: Number(speed),
           direction,
@@ -144,6 +145,7 @@
 
 <style>
   .seg { align-self: start; }
+
   .link {
     grid-column: 1 / -1;
     margin: 0;

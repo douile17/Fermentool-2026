@@ -84,6 +84,11 @@ pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
         "crash_detected" => (Alarm, "Fermentool was interrupted during the run".into()),
         "resume" => (Good, "Run resumed".into()),
         "refill" => (Info, "Bottle refilled".into()),
+        "alarm_refill_no_flow" => (Alarm, "Refill: nothing comes (reservoir empty or line off)".into()),
+        "alarm_refill_overfill" => (Alarm, "Refill: the bottle is above its level".into()),
+        "alarm_refill_timeout" => (Alarm, "Refill too slow, stopped".into()),
+        "alarm_refill_stop_failed" => (Alarm, "The refill pump does not stop".into()),
+        "refill_restarted" => (Good, "Automatic refill on again".into()),
         "trim_limit" => (Info, "Correction limit changed".into()),
         "curve_done" => (Info, "Curve finished, holding its end value until Stop".into()),
         "stop" => match run.status {
@@ -110,6 +115,8 @@ pub fn family_of(kind: &str) -> Option<&'static str> {
         "journal_stalled" => Some("journal"),
         "crash_detected" => Some("crash"),
         "stop_pending" => Some("stop"),
+        "alarm_refill_no_flow" | "alarm_refill_overfill" | "alarm_refill_timeout"
+        | "alarm_refill_stop_failed" => Some("refill"),
         // "abort" ends the run: said once, nothing goes on to repeat.
         _ => None,
     }
@@ -124,6 +131,7 @@ pub fn clears(kind: &str) -> Option<Option<&'static str>> {
         "readback_ok" => Some("readback"),
         "resume" => Some("crash"),
         "pump_stopped" => Some("stop"),
+        "refill_restarted" => Some("refill"),
         "stop" | "abort" => None,
         _ => return None,
     })
@@ -742,6 +750,7 @@ mod tests {
                 responsible: Some("Drew".into()),
                 density_g_per_ml: None,
                 auto_refill: false,
+                refill_draw_g: None,
             })
             .unwrap();
         s.finish_run(id, status, jiff::Timestamp::now()).ok();
@@ -971,6 +980,7 @@ mod tests {
                 responsible: Some("Drew".into()),
                 density_g_per_ml: None,
                 auto_refill: false,
+                refill_draw_g: None,
             })
             .unwrap();
         let mut cfg = Config::default();
