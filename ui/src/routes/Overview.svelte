@@ -4,7 +4,7 @@
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
   import { bottleWeights } from '../lib/balance.js';
-  import { valueAt, hm, clock, when, bottleEmptyInS, runState, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
+  import { valueAt, hm, clock, when, bottleEmptyInS, refillDueInS, runState, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
   import PumpHead from '../components/PumpHead.svelte';
@@ -187,23 +187,24 @@
   // When the bottle runs dry: the curve integrated forward, at the grams per
   // minute the balance measures for one unit of setpoint now.
   const weightG = $derived(app.status?.scale_weight_g ?? null);
-  const emptyInS = $derived.by(() => {
+  // A run with automatic refill: the refill pump's cycle (status frame).
+  const cycle = $derived(app.status?.refill?.cycle ?? null);
+  const flow = $derived.by(() => {
     void now;
     const s = app.status;
     if (!trimmed || !feedSide || !run || s?.tracking?.alarm || s?.scale_connected === false) return null;
     const rate = Math.abs(s?.rate_g_per_min ?? 0);
     const target = active?.last_target ?? 0;
     if (!(rate > 0) || !(target > 0)) return null;
-    return bottleEmptyInS({
-      weightG,
-      gPerUnit: rate / target,
-      planned,
-      elapsedS: elapsed,
-      durationS: run.duration_s,
-      c: s?.trim_c ?? 1,
-    });
+    return { gPerUnit: rate / target, planned, elapsedS: elapsed, durationS: run.duration_s, c: s?.trim_c ?? 1 };
   });
+  const emptyInS = $derived(flow ? bottleEmptyInS({ weightG, ...flow }) : null);
   const dryMs = $derived(emptyInS != null ? now + emptyInS * 1000 : null);
+  // When the automatic refill should start, for the line on the chart.
+  const refillInS = $derived(flow ? refillDueInS({ cycle, weightG, ...flow }) : null);
+  const refillMark = $derived(
+    refillInS != null ? { t: elapsed + refillInS, label: `refill ${when(now + refillInS * 1000, now)}` } : null
+  );
   // The one thing the operator has to do next, as a clock time.
   const next = $derived.by(() => {
     if (!run) return null;
@@ -297,8 +298,6 @@
   const refilling = $derived(
     app.status?.scale_state === 'refill_pending' || app.status?.scale_state === 'refill_settling'
   );
-  // A run with automatic refill: the refill pump's cycle (status frame).
-  const cycle = $derived(app.status?.refill?.cycle ?? null);
   async function refillCycle(action) {
     refillBusy = true;
     err = null;
@@ -551,6 +550,7 @@
             durationS={run.duration_s}
             {unit}
             {digits}
+            refill={refillMark}
           />
         </section>
 
@@ -619,7 +619,7 @@
                   {#if bottle?.refills.length}
                     <div>
                       <dt>Refilled</dt>
-                      <dd class="mono">+{num(bottle.refills.reduce((g, r) => g + r.after_g - r.before_g, 0), 1)} g</dd>
+                      <dd class="mono">+{num(bottle.refills.reduce((g, r) => g + r.added_g, 0), 1)} g</dd>
                     </div>
                   {/if}
                 </dl>

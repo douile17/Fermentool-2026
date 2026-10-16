@@ -162,7 +162,8 @@
         <p class="bottle mono">
           Balance: <b>{num(bottle.start, 1)} g</b> at start
           {#each bottle.refills as r}
-            | refill at {dur(r.t_s)}: <b>{num(r.before_g, 1)} → {num(r.after_g, 1)} g</b>
+            | refill at {dur(r.t_s)}: <b>{num(r.before_g, 1)} → {num(r.after_g, 1)} g</b>{#if r.drawn_g >= 0.05}
+              (+{num(r.added_g, 1)} g poured, {num(r.drawn_g, 1)} g fed meanwhile){/if}
           {/each}
           | <b>{num(bottle.end, 1)} g</b> {live ? 'now' : 'at end'}
           | weighed {bottle.weighedOut >= 0 ? 'out' : 'in'} <b>{num(Math.abs(bottle.weighedOut), 1)} g</b>

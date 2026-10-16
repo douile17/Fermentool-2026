@@ -12,7 +12,9 @@
    *   nowVolumeMl?: number | null,
    *   actualColor?: string,
    *   actualOpacity?: number,
+   *   actualWidth?: number,
    *   markers?: { t: number, label: string }[],
+   *   refill?: { t: number, label: string } | null,
    * }}
    */
   let {
@@ -27,8 +29,11 @@
     // slightly see-through so the planned curve shows where they overlap.
     actualColor = 'var(--green-500)',
     actualOpacity = 1,
+    actualWidth = 2.5,
     // Vertical time markers (e.g. when the regulation acted), dashed, labelled.
     markers = [],
+    // When the next automatic refill should start: its own line, labelled.
+    refill = null,
   } = $props();
 
   // Two charts can share a page (a run's curve and its weighed feed): each
@@ -149,6 +154,11 @@
     return out;
   });
 
+  // The next refill, drawn only inside the chart (past its end it would sit
+  // on the end and lie about the time). Label on the side with room.
+  const refillX = $derived(refill && refill.t > 0 && refill.t < dspan ? x(refill.t) : null);
+  const refillFlip = $derived(refillX != null && refillX > W - 110);
+
   // Journalled setpoints drawn as one continuous trace rather than a dot per tick.
   const actualLine = $derived(
     actual.length
@@ -199,7 +209,7 @@
       <path class="progress" d={progressLine} fill="none" stroke="var(--green-500)"
             stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" />
     {:else if actualLine}
-      <path d={actualLine} fill="none" stroke={actualColor} stroke-opacity={actualOpacity} stroke-width="2.5"
+      <path d={actualLine} fill="none" stroke={actualColor} stroke-opacity={actualOpacity} stroke-width={actualWidth}
             stroke-linejoin="round" stroke-linecap="round" />
     {/if}
 
@@ -210,6 +220,12 @@
       <circle cx={m.bx} cy={BADGE_R + 1} r={BADGE_R} class="badge" />
       <text x={m.bx} y={BADGE_R + 4.5} text-anchor="middle" class="badge-n">{m.n}</text>
     {/each}
+
+    {#if refillX != null}
+      <line x1={refillX} x2={refillX} y1={padT} y2={H - padB} class="refill" />
+      <text x={refillX + (refillFlip ? -5 : 5)} y={padT + 10} text-anchor={refillFlip ? 'end' : 'start'}
+            class="axl refill-l">{refill.label}</text>
+    {/if}
 
     {#if nowX != null && nowS < dspan}
       <line x1={nowX} x2={nowX} y1={padT} y2={H - padB}
@@ -235,6 +251,8 @@
   .axl { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
   .now-vol { fill: var(--ink); font-weight: 600; }
   .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
+  .refill { stroke: var(--teal-600); stroke-width: 1.5; stroke-dasharray: 6 4; }
+  .refill-l { fill: var(--teal-600); font-weight: 600; }
   .badge { fill: var(--surface); stroke: var(--ink); stroke-opacity: 0.55; stroke-width: 1; }
   .badge-n { font-family: var(--mono); font-size: 10px; font-weight: 600; fill: var(--ink); }
   .progress { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--green-500) 55%, transparent)); }

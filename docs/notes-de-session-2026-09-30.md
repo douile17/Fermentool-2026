@@ -174,3 +174,18 @@ Par ordre d'importance pour des runs de 100 h sans surveillance :
     même derrière le VPN (tout le campus est sur ce réseau), et une
     sauvegarde Hyper Backup de la base. Spec avant de coder. Détail :
     `docs/idee-fiche-de-fermentation.md`.
+13. **Manuel d'utilisation** (à écrire, il n'existe pas encore). Y expliquer
+    les représentations, à commencer par le graphique de History : la courbe
+    verte est le débit **pesé** par la balance, en moyenne glissante sur
+    10 min (ou 1/30 de la run si elle est plus longue), ramené dans l'unité
+    de la consigne ; pendant une recharge c'est l'estimation du daemon. Sans
+    balance, c'est la consigne envoyée à la pompe (« Sent to the pump »). Le
+    graphique « Gap » est un écart **cumulé** en mL, donc lisse ; un débit
+    est une dérivée du poids, donc bruité sur une fenêtre courte. Expliquer
+    aussi la ligne « refill » de l'Overview (prochaine recharge prévue), le
+    panneau Feed bottle (« Weighed out » compte ce que l'alimentation tire
+    pendant une recharge) et les fiches QC.
+14. **Erreurs USB-série** (« failed to write whole buffer ») sur les deux
+    adaptateurs FTDI, en hausse le 2026-10-15 (32 sur la balance pendant la
+    run 183), puis arrêt inattendu du PC. Aucune pendant la run 184. Piste
+    matérielle : branchement sans hub, câbles, veille sélective USB, RAM.

@@ -7,6 +7,7 @@
   import Icon from '../components/Icon.svelte';
   import { bottleWeights } from '../lib/balance.js';
   import { downloadSettings } from '../lib/runfile.js';
+  import { weighedFlow, flowWindowS } from '../lib/runview.js';
 
   let runs = $state([]);
   let err = $state(null);
@@ -194,8 +195,15 @@
 
   // The detail holds a server-side sample (a few thousand ticks); thinned
   // again here only if a caller ever hands it more.
+  // The balance's view when the run was weighed: the flow it really got.
+  // Otherwise what was sent to the pump, the only record there is.
+  const flowWindow = $derived(flowWindowS(sel?.run?.duration_s));
+  const chartWeighed = $derived(
+    sel?.report?.points?.length ? weighedFlow(sel.report.points, sel.planned, flowWindow) : [],
+  );
   const chartActual = $derived.by(() => {
     if (!sel) return [];
+    if (chartWeighed.length) return chartWeighed;
     const t = sel.ticks;
     const cap = 3000;
     if (t.length <= cap) return t.map((p) => [p.elapsed_s, p.target]);
@@ -262,6 +270,8 @@
         rows.push([`refill_${i + 1}_elapsed_s`, fix(r.t_s, 0)]);
         rows.push([`refill_${i + 1}_before_g`, fix(r.before_g, 1)]);
         rows.push([`refill_${i + 1}_after_g`, fix(r.after_g, 1)]);
+        rows.push([`refill_${i + 1}_fed_meanwhile_g`, fix(r.drawn_g, 1)]);
+        rows.push([`refill_${i + 1}_poured_g`, fix(r.added_g, 1)]);
       });
       rows.push(['balance_end_g', fix(bottle.end, 1)]);
       rows.push(['weighed_out_g', fix(bottle.weighedOut, 1)]);
@@ -428,11 +438,20 @@
       <Chart
         planned={sel.planned}
         actual={chartActual}
+        actualWidth={chartWeighed.length ? 1.75 : 2.5}
         nowS={null}
         durationS={sel.run.duration_s}
         unit={unitFor(sel.run.control_var)}
         digits={digitsFor(sel.run.control_var)}
       />
+      <div class="legend">
+        <span><i class="sw planned"></i>Requested</span>
+        {#if chartWeighed.length}
+          <span title="Weighed by the balance, averaged over {dur(flowWindow)}; estimated while the bottle was refilled"><i class="sw actual"></i>Delivered, weighed ({dur(flowWindow)} average)</span>
+        {:else}
+          <span title="No balance on this run: what the pump was told, not what it delivered"><i class="sw actual"></i>Sent to the pump</span>
+        {/if}
+      </div>
       <div class="pv-cap mono">
         {dur(sel.run.duration_s)} | {sel.run.curve.params.kind} |
         {num(sel.run.curve.start, digitsFor(sel.run.control_var))} → {num(sel.run.curve.end, digitsFor(sel.run.control_var))}
@@ -579,6 +598,18 @@
   .confirm h2 { font-size: 17px; margin: 6px 0 var(--s-3); }
   .confirm .lede { margin: 0; color: var(--muted); font-size: 13px; }
   .confirm .err { margin-top: var(--s-3); }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-1) var(--s-4);
+    margin-top: var(--s-2);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  .sw.planned { background: var(--teal-400); }
+  .sw.actual { background: var(--green-500); }
+
   .pv-cap {
     font-size: 13px;
     font-weight: 600;

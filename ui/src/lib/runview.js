@@ -76,6 +76,50 @@ export function bottleEmptyInS({ weightG, gPerUnit, planned, elapsedS, durationS
   return null;
 }
 
+/** The averaging window for `weighedFlow`: 10 min, or a 30th of a longer
+ *  run. 2 min left the balance's noise in (±3.5 % on run 184); 10 min
+ *  reads within ±0.7 %, and still shows a pump drifting over the run. */
+export const flowWindowS = (durationS) => Math.max(600, (durationS || 0) / 30);
+
+/** The flow the balance weighed, in the curve's own unit, for the History
+ *  chart: over a trailing `windowS` window of the tracking report's
+ *  `[t, required_ml, delivered_ml]` points, delivered over required times
+ *  the curve at the window's middle. So an rpm run reads in rpm with no
+ *  calibration at hand, and a pump that delivers 2 % short reads 2 % under
+ *  the curve. Refills are in it as the daemon estimated them. */
+export function weighedFlow(points, planned, windowS = 600, maxPoints = 150) {
+  const out = [];
+  if (!points?.length || !planned?.length) return out;
+  let j = 0;
+  for (let i = 0; i < points.length; i++) {
+    const [t, r, d] = points[i];
+    while (j + 1 < i && t - points[j + 1][0] >= windowS) j++;
+    const [t0, r0, d0] = points[j];
+    if (t - t0 < windowS) continue;
+    const asked = r - r0;
+    if (!(asked > 1e-9)) continue;
+    const mid = (t + t0) / 2;
+    out.push([mid, valueAt(planned, mid) * ((d - d0) / asked)]);
+  }
+  // A calm line: about `maxPoints`, the last one kept.
+  if (out.length <= maxPoints) return out;
+  const stride = Math.ceil(out.length / maxPoints);
+  const thin = out.filter((_, i) => i % stride === 0);
+  if (thin.at(-1) !== out.at(-1)) thin.push(out.at(-1));
+  return thin;
+}
+
+/** Seconds until an automatic refill starts: the bottle down to the cycle's
+ *  `low_g`, the curve integrated forward as in `bottleEmptyInS`. Null when
+ *  no refill is waiting (none set up, stopped, one under way, or already
+ *  under the level). */
+export function refillDueInS({ cycle, weightG, ...flow }) {
+  if (!cycle || cycle.halted || cycle.phase !== 'idle' || weightG == null) return null;
+  const left = weightG - cycle.low_g;
+  if (!(left > 0)) return null;
+  return bottleEmptyInS({ weightG: left, ...flow });
+}
+
 /** The run's state in one line, worst first, with what to check when it
  *  needs someone. tone: 'ok' | 'info' | 'warn' | 'bad' | 'idle'. */
 export function runState(status, connected, inHold) {
