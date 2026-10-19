@@ -68,7 +68,7 @@ describe('refillDueInS', () => {
 
 describe('runState', () => {
   const run = { active: { gravimetric_trim: true, auto_refill: true }, scale_state: 'normal', scale_ok: true };
-  const cycle = (o) => ({ refill: { cycle: { phase: 'idle', halted: false, low_g: 3063, high_g: 5063, weight_g: 4000, flow_ml_min: 300, ...o } } });
+  const cycle = (o) => ({ refill: { cycle: { phase: 'idle', halted: false, low_g: 3063, high_g: 5063, weight_g: 4000, rise_g_per_min: null, not_rising: false, ...o } } });
 
   it('tells feeding from refilling at a glance: colour, word and picture differ', () => {
     const feeding = runState({ ...run, ...cycle() }, true, false);
@@ -79,6 +79,10 @@ describe('runState', () => {
   it('shows a full bottle settling with its own picture', () => {
     expect(runState({ ...run, ...cycle({ phase: 'settling' }) }, true, false)).toMatchObject({ tone: 'fill', word: 'Settling', icon: 'full' });
     expect(runState({ ...run, scale_state: 'refill_settling' }, true, false).icon).toBe('full');
+  });
+  it('a fill the balance does not see rising is said, though the pump goes on', () => {
+    const s = { ...run, ...cycle({ phase: 'filling', not_rising: true }) };
+    expect(runState(s, true, false)).toMatchObject({ tone: 'warn', word: 'Not filling', icon: 'bottle-warn' });
   });
   it('a stopped automatic refill needs a look (run 186: the refill pump gained 2 g of 146)', () => {
     expect(runState({ ...run, ...cycle({ halted: true }) }, true, false)).toMatchObject({ tone: 'warn', word: 'Refill stopped', icon: 'bottle-warn' });
@@ -93,15 +97,22 @@ describe('runState', () => {
 });
 
 describe('refillProgress', () => {
-  it('goes from the refill level to the full bottle, with the time left at the refill flow', () => {
-    const p = refillProgress({ phase: 'filling', low_g: 3063, high_g: 5063, weight_g: 3903, flow_ml_min: 290 });
+  it('goes from the refill level to the full bottle, the time left at the rise the balance sees', () => {
+    // Run 192's fill: +99 g/min net of the feed.
+    const p = refillProgress({ phase: 'filling', low_g: 3063, high_g: 5063, weight_g: 3903, rise_g_per_min: 99 });
     expect(p.frac).toBeCloseTo(0.42, 2);
-    expect(p.leftMin).toBeCloseTo(4, 0);
+    expect(p.leftMin).toBeCloseTo(11.7, 1);
+    expect(p.riseGMin).toBe(99);
     expect(p.toG).toBe(5063);
+  });
+  it('gives no time left before the rise is measured, or while it does not rise', () => {
+    const c = { phase: 'filling', low_g: 3063, high_g: 5063, weight_g: 3903 };
+    expect(refillProgress({ ...c, rise_g_per_min: null }).leftMin).toBeNull();
+    expect(refillProgress({ ...c, rise_g_per_min: -4 }).leftMin).toBeNull();
   });
   it('is nothing when no fill is under way, and stays in 0..1 for a Refill now above the level', () => {
     expect(refillProgress({ phase: 'idle', low_g: 0, high_g: 1, weight_g: 0.5 })).toBeNull();
-    expect(refillProgress({ phase: 'filling', low_g: 3063, high_g: 5063, weight_g: 2580, flow_ml_min: 0 })).toMatchObject({ frac: 0, leftMin: null });
+    expect(refillProgress({ phase: 'filling', low_g: 3063, high_g: 5063, weight_g: 2580, rise_g_per_min: 0 })).toMatchObject({ frac: 0, leftMin: null });
   });
 });
 

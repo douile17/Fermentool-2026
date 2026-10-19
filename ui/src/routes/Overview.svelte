@@ -455,7 +455,7 @@
             </div>
             <div class="fillcap mono">
               <span>{Math.round(p.weightG)} g → {Math.round(p.toG)} g</span>
-              <span>{Math.round(p.frac * 100)} %{p.leftMin != null ? ` · about ${Math.max(1, Math.round(p.leftMin))} min` : ''}</span>
+              <span>{Math.round(p.frac * 100)} %{p.riseGMin != null ? ` · ${p.riseGMin >= 0 ? '+' : '−'}${Math.abs(Math.round(p.riseGMin))} g/min` : ''}{p.leftMin != null ? ` · about ${Math.max(1, Math.round(p.leftMin))} min` : ''}</span>
             </div>
           {/if}
         </div>

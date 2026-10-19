@@ -86,7 +86,7 @@ Aucun de ces cas n'a été vérifié en vrai : le journal ne contient aucun év�
 | `bottle_capacity_ml` | `1000` | Contenance de la bouteille pesée, **choisie à la création du run** dans New run : **500 mL, 1 L, 2 L, 5 L** (décision du 2026-10-05, 1 L par défaut ; le dernier choix est repris) |
 | `low_pct` | `25` | Sous ce pourcentage de la contenance, un remplissage démarre (125 / 250 / 500 / 1250 mL) |
 | `high_ml` | vide | Le remplissage s'arrête à ce volume ; **vide : le poids de la bouteille au début du run** (décision du 2026-10-05) |
-| `expected_ml_min` | `285` | Débit attendu (mesuré : 2 L en 7 min) ; mis à jour par la mesure de chaque remplissage |
+| ~~`expected_ml_min`~~ | retiré | **Retiré le 2026-10-19.** La pompe de remplissage n'est pas calibrée : un débit attendu devient faux dès qu'on change de tuyau ou de vitesse (run 192 : 100 mL/min à 145 rpm contre 285 attendus à 350, coupé à tort). Une valeur restée dans `config.toml` est ignorée. |
 
 Le volume vient du poids : `(poids − tare) / densité` (densité de `[scale]`).
 
@@ -134,9 +134,9 @@ Idle ──(volume < low_ml, conditions OK)──> Filling ──(volume ≥ hig
 - **Settling :** la pompe de remplissage est arrêtée (Stop confirmé par la pompe),
   le poids doit rester dans ±2 pas de balance pendant 20 s.
 - **Retour à Idle :** un seul événement `refill` est journalisé : poids avant et
-  après, durée, débit mesuré. Le débit mesuré met à jour `expected_ml_min`
-  (moyenne glissante) : un débit qui baisse d'un remplissage à l'autre signale un
-  tuyau usé ou un réservoir presque vide.
+  après. L'événement `refill_stop` note la durée, la vitesse en rpm et la
+  montée nette (g/min, alimentation déduite) : une montée qui baisse d'un
+  remplissage à l'autre signale un tuyau usé ou un réservoir presque vide.
 - **Bouton « Refill now »** dans l'UI : démarre un cycle sans attendre le niveau
   bas (même garde-fous). **« Stop refill »** l'interrompt.
 
@@ -159,14 +159,20 @@ Idle ──(volume < low_ml, conditions OK)──> Filling ──(volume ≥ hig
 
 ### 4. Garde-fous
 
-Chacun **arrête la pompe de remplissage** et lève une alarme qui sonne jusqu'à
-acquittement (relances ntfy, famille `refill`) :
+**Révisé le 2026-10-19.** Aucun débit n'est supposé : un remplissage est jugé
+par la balance seule. Le poids doit **monter**, donc la pompe de remplissage
+apporte plus que ce que la pompe d'alimentation tire.
+
+| Condition | Alarme | Effet |
+|---|---|---|
+| Pendant `Filling`, le poids n'a pas monté d'au moins 10 pas de balance (2 g au minimum) sur les 30 dernières secondes | `alarm_refill_no_rise` (famille `refill_rise`, sonne jusqu'à acquittement) | **La pompe continue** : l'amorçage n'a peut-être pas pris, et on veut le remplissage même mauvais. `refill_rising` quand le poids remonte, qui efface l'alarme ; aussi effacée par la fin du remplissage ou « Stop refill » |
+
+Les gardes suivants **arrêtent la pompe de remplissage** et suspendent le
+remplissage auto jusqu'à « Refill now » (famille `refill`) :
 
 | Condition | Alarme | Cause probable |
 |---|---|---|
-| Après 30 s de `Filling`, le poids monte de moins de 50 % du débit attendu | `refill_no_flow` | Réservoir vide, tuyau débranché ou pincé, pompe à l'arrêt |
-| Poids au-dessus de `high_ml` + 50 g | `refill_overfill` | Stop pas reçu, ou débit plus fort que prévu |
-| `Filling` plus long que `(high − low) / débit attendu` × 1,5 | `refill_timeout` | Débit trop faible |
+| Poids au-dessus de `high_ml` + 50 g | `refill_overfill` | Stop pas reçu |
 | Balance perdue pendant `Filling` | `refill_scale_lost` | Plus de mesure : on ne remplit pas à l'aveugle |
 | Le Stop n'est pas confirmé par la pompe après 3 essais | `refill_stop_failed` | **Critique** : la pompe peut continuer ; Stop renvoyé à chaque lecture |
 
@@ -273,7 +279,8 @@ quand la pompe de remplissage tourne, bruit de ±1 pas, précision 0,1 g et 1 g)
 | Scénario | Attendu |
 |---|---|
 | Run exponentiel de 100 h, deux remplissages automatiques | c varie de moins de 0,5 % autour de chaque remplissage ; aucune alarme ; volume délivré à 1 % près |
-| Réservoir vide au 2ᵉ remplissage | `refill_no_flow` en moins de 35 s, pompe de remplissage arrêtée |
+| Réservoir vide au 2ᵉ remplissage | `alarm_refill_no_rise` après 30 s, une seule fois ; la pompe de remplissage continue ; `refill_rising` si l'eau arrive |
+| Pompe de remplissage lente (tuyau fin, vitesse basse) | Remplit jusqu'au niveau haut, sans alarme |
 | La pompe de remplissage ignore Stop | `refill_stop_failed`, Stop renvoyé à chaque lecture, `refill_overfill` |
 | Plantage du daemon en plein remplissage, reprise | Stop envoyé en premier ; volume délivré cohérent ; nouveau cycle |
 | La pompe de remplissage redémarre seule (coupure simulée) hors remplissage | Arrêtée en moins de 10 s |
@@ -337,9 +344,11 @@ avec au moins deux remplissages (« Reste à faire » n° 6).
      `RefillPending` pendant que la pompe tourne) : c figé, historique du
      rendement gardé, événement `refill` comme pour un remplissage à la main.
      Le Stop périodique est suspendu pendant un remplissage.
-   - Garde-fous : `alarm_refill_no_flow`, `_overfill`, `_timeout`,
-     `_stop_failed` (sonnent jusqu'à acquittement, famille `refill`) ; le
-     remplissage auto est alors suspendu jusqu'à « Refill now ». Lecture de
+   - Garde-fous : `alarm_refill_overfill`, `_stop_failed` (sonnent jusqu'à
+     acquittement, famille `refill`) ; le remplissage auto est alors suspendu
+     jusqu'à « Refill now ». `alarm_refill_no_rise` (2026-10-19) prévient
+     sans couper. `_no_flow` et `_timeout` n'existent plus que dans les
+     anciens journaux. Lecture de
      balance perdue en cours de remplissage : pompe arrêtée, reprise plus
      tard. Overview : « Refill now » / « Stop refill ».
    - Niveaux et débit mesuré persistés (`app_state.refill_plan`), repris

@@ -208,6 +208,15 @@ export function runState(status, connected, inHold) {
       detail: 'The pump runs correctly, but the run history is not being saved.',
       check: 'Check free disk space.',
     });
+  if (cycle?.phase === 'filling' && cycle.not_rising)
+    return {
+      tone: 'warn',
+      word: 'Not filling',
+      icon: 'bottle-warn',
+      title: 'The bottle is not filling',
+      detail: 'The refill pump keeps going, in case the line is only priming.',
+      check: 'Reservoir empty? Line off, pinched or not primed? Refill pump turning? Stop refill if it cannot work.',
+    };
   if (cycle?.phase === 'filling')
     return {
       tone: 'fill',
@@ -245,19 +254,22 @@ export function runState(status, connected, inHold) {
 }
 
 /** How far a refill pump's fill has got, from the refill level `low_g` to
- *  the full bottle `high_g`: `{ weightG, toG, frac, leftMin }`, or null
- *  when nothing is filling. `leftMin` takes a gram for a mL (water-like
- *  feed) and leaves out what the feed pump draws meanwhile: "about". */
+ *  the full bottle `high_g`: `{ weightG, toG, frac, riseGMin, leftMin }`,
+ *  or null when nothing is filling. The time left comes from how fast the
+ *  balance sees the bottle rise (net of the feed), not from an expected
+ *  flow: the refill pump is not calibrated. */
 export function refillProgress(cycle) {
   if (cycle?.phase !== 'filling' || cycle.weight_g == null) return null;
   const span = cycle.high_g - cycle.low_g;
   const frac = span > 0 ? Math.max(0, Math.min(1, (cycle.weight_g - cycle.low_g) / span)) : 0;
   const left = Math.max(0, cycle.high_g - cycle.weight_g);
+  const rise = cycle.rise_g_per_min ?? null;
   return {
     weightG: cycle.weight_g,
     toG: cycle.high_g,
     frac,
-    leftMin: cycle.flow_ml_min > 0 ? left / cycle.flow_ml_min : null,
+    riseGMin: rise,
+    leftMin: rise > 0 ? left / rise : null,
   };
 }
 

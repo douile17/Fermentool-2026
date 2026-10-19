@@ -10,9 +10,17 @@
 //! `refill` event and resumes on the kept ratio history.
 //!
 //! Evaluated on every balance read of a run that drives the refill pump
-//! ([`Engine::scale_tick`]). Every guard stops the refill pump and halts
-//! the automatic refill until "Refill now".
+//! ([`Engine::scale_tick`]).
+//!
+//! No flow is assumed: the refill pump is not calibrated, and a new tube or
+//! another speed changes what it delivers (run 192: 100 mL/min at 145 rpm
+//! against the 285 expected at 350, cut as "no flow" while it filled fine).
+//! A fill is judged by the balance alone: the bottle must gain, so the
+//! refill pump brings more than the feed pump draws. When it does not, the
+//! fill goes on (the line may only be priming) and an alarm is notified;
+//! only the high level, and the overfill and Stop guards, stop it.
 
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use jiff::Timestamp;
@@ -30,17 +38,21 @@ const PLAN_KEY: &str = "refill_plan";
 /// A run must use at least this much before a refill, or a refill would
 /// hardly be worth starting the pump for.
 pub const MIN_SPAN_G: f64 = 100.0;
-/// The Stop goes out this long of flow before the high level: one read and
-/// the Stop's own round trip.
+/// The Stop goes out this long of measured rise before the high level: one
+/// read and the Stop's own round trip.
 const OVERSHOOT_S: f64 = 1.5;
 /// Past the high level by this much: the pump did not stop.
 pub const OVERFILL_G: f64 = 50.0;
-/// The flow is judged after this long of filling...
-pub const NO_FLOW_AFTER_S: f64 = 30.0;
-/// ... and must have brought at least this share of what was expected.
-const NO_FLOW_SHARE: f64 = 0.5;
-/// A refill may take this many times its expected duration (plus a minute).
-const TIMEOUT_FACTOR: f64 = 1.5;
+/// The bottle must have risen over this trailing window of a fill (the
+/// first one leaves the line time to prime and the balance its ~2 s lag)...
+pub const RISE_WINDOW_S: f64 = 30.0;
+/// ... by at least this many balance steps, and never less than
+/// [`RISE_MIN_G`]: past the balance's noise, and past a feed that the
+/// refill only matches.
+const RISE_MIN_STEPS: f64 = 10.0;
+const RISE_MIN_G: f64 = 2.0;
+/// The measured rise is trusted once it spans this long.
+const RATE_MIN_SPAN_S: f64 = 10.0;
 /// Stops not acknowledged before the refill pump is called out of control.
 const STOP_FAILS_ALARM: u32 = 3;
 /// After a fill, the level must settle (the balance back to `Normal`) within
@@ -56,8 +68,6 @@ pub(super) struct Plan {
     pub low_g: f64,
     /// ... and fills back up to this one (the weight at the run's start).
     pub high_g: f64,
-    /// Refill pump flow, ml/min: from Settings, then measured by each fill.
-    pub flow_ml_min: f64,
     /// No automatic refill until "Refill now": a guard tripped, or the
     /// operator pressed "Stop refill".
     pub halted: bool,
@@ -78,21 +88,44 @@ pub(super) enum Phase {
     Settling { since_t: f64 },
 }
 
+/// What the balance saw of the fill under way: its trailing
+/// [`RISE_WINDOW_S`] of reads, and whether "not rising" was said.
+#[derive(Debug, Default)]
+pub(super) struct FillTrack {
+    window: VecDeque<(f64, f64)>,
+    /// The bottle's rise over the window, g/s, once it spans
+    /// [`RATE_MIN_SPAN_S`].
+    rate_g_s: Option<f64>,
+    not_rising: bool,
+}
+
+impl FillTrack {
+    /// Add the read `weight_g` at `t`: the rise over the trailing window,
+    /// `(g, over s)`.
+    fn push(&mut self, t: f64, weight_g: f64) -> (f64, f64) {
+        self.window.push_back((t, weight_g));
+        // Keep the newest read at least a window old as the window's start.
+        while self.window.len() > 2 && t - self.window[1].0 >= RISE_WINDOW_S {
+            self.window.pop_front();
+        }
+        let (t0, w0) = self.window[0];
+        let span = t - t0;
+        self.rate_g_s = (span >= RATE_MIN_SPAN_S).then(|| (weight_g - w0) / span);
+        (weight_g - w0, span)
+    }
+}
+
 /// Why the automatic refill stopped itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefillAlarm {
-    NoFlow,
     Overfill,
-    Timeout,
     StopFailed,
 }
 
 impl RefillAlarm {
     pub fn kind(self) -> &'static str {
         match self {
-            RefillAlarm::NoFlow => "alarm_refill_no_flow",
             RefillAlarm::Overfill => "alarm_refill_overfill",
-            RefillAlarm::Timeout => "alarm_refill_timeout",
             RefillAlarm::StopFailed => "alarm_refill_stop_failed",
         }
     }
@@ -110,7 +143,12 @@ pub struct CycleStatus {
     pub high_g: f64,
     /// The balance now, g (`None` before a read).
     pub weight_g: Option<f64>,
-    pub flow_ml_min: f64,
+    /// During a fill: how fast the bottle rises, g/min, net of the feed
+    /// (`None` before 10 s of reads).
+    pub rise_g_per_min: Option<f64>,
+    /// During a fill: the bottle has not risen over the last 30 s; the
+    /// refill pump goes on regardless.
+    pub not_rising: bool,
 }
 
 /// The levels for a run that refills once the bottle has given `draw_g`
@@ -156,14 +194,12 @@ impl<T: Transport> Engine<T> {
             .live_weight
             .map(|(w, _)| w)
             .ok_or_else(|| EngineError::Config("automatic refill needs a balance reading: check the balance".into()))?;
-        let cfg = &self.refill.cfg;
         let (low_g, high_g) = plan_for(low_g.unwrap_or(0.0), weight_g)
             .map_err(|e| EngineError::Config(format!("automatic refill: {e}")))?;
         Ok(Plan {
             run_id: 0,
             low_g,
             high_g,
-            flow_ml_min: cfg.expected_ml_min,
             halted: false,
             overfilled: false,
         })
@@ -219,7 +255,8 @@ impl<T: Transport> Engine<T> {
             low_g: p.low_g,
             high_g: p.high_g,
             weight_g: self.live_weight.map(|(w, _)| w),
-            flow_ml_min: p.flow_ml_min,
+            rise_g_per_min: if self.refill_filling() { self.refill.fill.rate_g_s.map(|r| r * 60.0) } else { None },
+            not_rising: self.refill_filling() && self.refill.fill.not_rising,
         })
     }
 
@@ -249,12 +286,14 @@ impl<T: Transport> Engine<T> {
             return false;
         }
         self.refill.phase = Phase::Filling { since_t: t, start_g: weight_g };
+        self.refill.fill = FillTrack::default();
+        self.refill.fill.push(t, weight_g);
         let high_g = self.refill.plan.as_ref().expect("a cycle has a plan").high_g;
         self.refill_event(
             now,
             EventLevel::Info,
             "refill_start",
-            format!("{why}: {weight_g:.0} g on the balance, filling to {high_g:.0} g"),
+            format!("{why}: {weight_g:.0} g on the balance, filling to {high_g:.0} g at {} rpm", cfg.speed_rpm),
         );
         true
     }
@@ -300,7 +339,6 @@ impl<T: Transport> Engine<T> {
         let Some(plan) = self.refill.plan.clone() else {
             return;
         };
-        let g_per_s = plan.flow_ml_min * self.scale_density_g_per_ml / 60.0;
         match self.refill.phase {
             Phase::Idle => {
                 if plan.halted {
@@ -311,7 +349,7 @@ impl<T: Transport> Engine<T> {
                     return;
                 }
                 if self.refill.resume_fill {
-                    if weight_g >= plan.high_g - OVERSHOOT_S * g_per_s {
+                    if weight_g >= plan.high_g {
                         self.refill.resume_fill = false;
                     } else if self.refill_line_up()
                         && self.refill_start_pump(t, weight_g, now, "resuming the interrupted refill")
@@ -327,38 +365,47 @@ impl<T: Transport> Engine<T> {
             Phase::Filling { since_t, start_g } => {
                 let dur = t - since_t;
                 let gained = weight_g - start_g;
-                if weight_g >= plan.high_g - OVERSHOOT_S * g_per_s {
+                let (rise, span) = self.refill.fill.push(t, weight_g);
+                let lead = OVERSHOOT_S * self.refill.fill.rate_g_s.unwrap_or(0.0).max(0.0);
+                if weight_g >= plan.high_g - lead {
                     self.refill_stop_fill(t, start_g);
-                    // The pump's real flow, for the next fill's checks.
-                    if dur > NO_FLOW_AFTER_S && gained > 0.0 {
-                        let measured = gained / dur * 60.0 / self.scale_density_g_per_ml;
-                        if let Some(p) = self.refill.plan.as_mut() {
-                            p.flow_ml_min = 0.5 * (p.flow_ml_min + measured);
-                        }
-                        self.save_refill_plan();
-                    }
                     self.refill_event(
                         now,
                         EventLevel::Info,
                         "refill_stop",
-                        format!("filled {:.0} g in {dur:.0} s ({:.0} mL/min)", gained, gained / dur.max(1.0) * 60.0 / self.scale_density_g_per_ml),
-                    );
-                } else if dur >= NO_FLOW_AFTER_S && gained < NO_FLOW_SHARE * g_per_s * (dur - 2.0) {
-                    self.refill_stop_fill(t, start_g);
-                    self.refill_alarm(
-                        RefillAlarm::NoFlow,
-                        now,
                         format!(
-                            "refill pump on for {dur:.0} s, the bottle gained {gained:.0} g of the {:.0} g expected: reservoir empty, line off or pinched, pump not turning",
-                            g_per_s * dur
+                            "filled {gained:.0} g in {dur:.0} s at {} rpm ({:+.0} g/min net of the feed)",
+                            self.refill.cfg.speed_rpm,
+                            gained / dur.max(1.0) * 60.0
                         ),
                     );
-                } else if dur > (plan.high_g - start_g).max(0.0) / g_per_s * TIMEOUT_FACTOR + 60.0 {
-                    self.refill_stop_fill(t, start_g);
-                    self.refill_alarm(
-                        RefillAlarm::Timeout,
+                    return;
+                }
+                if span < RISE_WINDOW_S {
+                    return;
+                }
+                let rise_min = (RISE_MIN_STEPS * self.scale_resolution_g).max(RISE_MIN_G);
+                if rise < rise_min && !self.refill.fill.not_rising {
+                    // Said, not acted on: the line may only be priming, and a
+                    // refill is wanted even a poor one.
+                    self.refill.fill.not_rising = true;
+                    tracing::warn!("alarm_refill_no_rise: {rise:+.1} g over {span:.0} s");
+                    self.refill_event(
                         now,
-                        format!("refill still under its high level after {dur:.0} s: the refill pump delivers too slowly"),
+                        EventLevel::Error,
+                        "alarm_refill_no_rise",
+                        format!(
+                            "refill pump on for {dur:.0} s at {} rpm, the bottle moved {rise:+.1} g over the last {span:.0} s: it keeps pumping in case the line is priming. Check the reservoir, the line and the refill pump",
+                            self.refill.cfg.speed_rpm
+                        ),
+                    );
+                } else if rise >= rise_min && self.refill.fill.not_rising {
+                    self.refill.fill.not_rising = false;
+                    self.refill_event(
+                        now,
+                        EventLevel::Info,
+                        "refill_rising",
+                        format!("the bottle fills again: {:+.0} g/min net of the feed", rise / span * 60.0),
                     );
                 }
             }
@@ -418,7 +465,7 @@ impl<T: Transport> Engine<T> {
         let Some((weight_g, _)) = self.live_weight.filter(|_| self.scale_link_up()) else {
             return Err("No balance reading: a refill is not run blind.".into());
         };
-        if weight_g >= plan.high_g - OVERSHOOT_S * plan.flow_ml_min * self.scale_density_g_per_ml / 60.0 {
+        if weight_g >= plan.high_g {
             if plan.halted {
                 self.refill_resume_auto(now);
                 return Ok(());
@@ -514,12 +561,15 @@ mod tests {
     }
 
     /// A 1 L bottle (300 g empty, overflow line fitted) starting with 800 mL,
-    /// fed at 60 mL/min, refilled at 285 mL/min from address 2.
+    /// fed at 60 mL/min, refilled at 285 mL/min from address 2 unless a test
+    /// says otherwise.
     struct Bench {
         e: Engine<SimBus>,
         w: f64,
         /// The reservoir has run dry: the refill pump turns, nothing comes.
         dry: bool,
+        /// What the refill pump really delivers, mL/min.
+        refill_ml_min: f64,
         run_id: i64,
     }
 
@@ -531,7 +581,7 @@ mod tests {
                 RefillConfig { pump_address: 2, ..RefillConfig::default() },
                 Instant::now(),
             );
-            Bench { e, w: 1100.0, dry: false, run_id: 0 }
+            Bench { e, w: 1100.0, dry: false, refill_ml_min: 285.0, run_id: 0 }
         }
 
         fn start(&mut self) {
@@ -565,7 +615,7 @@ mod tests {
             self.e.tick(now).unwrap();
             self.w -= 60.0 / 60.0 * self.e.trim_c();
             if self.refill_running() && !self.dry {
-                self.w += 285.0 / 60.0;
+                self.w += self.refill_ml_min / 60.0;
             }
         }
 
@@ -616,25 +666,109 @@ mod tests {
         assert!(spans.iter().all(|s| s[1] - s[0] >= 30.0), "{spans:?}");
     }
 
-    #[test]
-    fn an_empty_reservoir_stops_the_refill_pump_and_halts_the_refill() {
-        let mut b = Bench::new(Store::open_in_memory().unwrap());
-        b.start();
-        b.dry = true;
-        let mut started_at = None;
-        for i in 1..1200 {
+    /// Runs the bench until the refill pump starts; returns the second.
+    fn until_refill(b: &mut Bench) -> i64 {
+        let mut i = 1;
+        while !b.refill_running() {
             b.second(i);
-            if started_at.is_none() && b.refill_running() {
-                started_at = Some(i);
-            }
+            i += 1;
+            assert!(i < 1200, "no refill started");
+        }
+        i
+    }
+
+    #[test]
+    fn a_slow_refill_pump_fills_to_the_top_without_an_alarm() {
+        // Run 192: 100 mL/min at 145 rpm, cut as "no flow" against the 285
+        // expected at 350. Nothing is expected now: it rises, it fills.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.refill_ml_min = 100.0;
+        b.start();
+        let mut high_seen: f64 = 0.0;
+        for i in 1..2400 {
+            b.second(i);
+            high_seen = high_seen.max(b.w);
         }
         let kinds = b.kinds();
-        assert!(kinds.contains(&"alarm_refill_no_flow".to_string()), "{kinds:?}");
-        assert!(!b.refill_running());
-        assert_eq!(kinds.iter().filter(|k| *k == "refill_start").count(), 1, "halted, not tried again");
+        assert!(kinds.iter().filter(|k| *k == "refill_stop").count() >= 1, "{kinds:?}");
+        assert!(!kinds.iter().any(|k| k.starts_with("alarm_")), "{kinds:?}");
+        assert!(high_seen > 1100.0 - 15.0 && high_seen < 1100.0 + 15.0, "{high_seen}");
+        let stop = b.e.store.events(Some(b.run_id), 10_000).unwrap().into_iter().find(|e| e.kind == "refill_stop").unwrap();
+        let detail = stop.detail.unwrap();
+        assert!(detail.contains("rpm") && detail.contains("g/min"), "the journal says how fast: {detail}");
+    }
+
+    #[test]
+    fn an_empty_reservoir_is_notified_and_the_refill_pump_keeps_going() {
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let start = until_refill(&mut b);
+        b.dry = true;
+        for i in start..start + 600 {
+            b.second(i);
+        }
+        let kinds = b.kinds();
+        assert_eq!(kinds.iter().filter(|k| *k == "alarm_refill_no_rise").count(), 1, "said once: {kinds:?}");
+        assert!(b.refill_running(), "never cut: the line may only be priming");
         let st = b.e.refill_cycle_status().unwrap();
-        assert!(st.halted);
-        let _ = started_at.expect("a refill started");
+        assert!(!st.halted);
+        assert!(st.not_rising);
+        assert_eq!(st.phase, "filling");
+    }
+
+    #[test]
+    fn a_line_that_primes_late_is_said_then_cleared_and_fills_on() {
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let start = until_refill(&mut b);
+        b.dry = true;
+        let mut i = start;
+        while i < start + 45 {
+            b.second(i);
+            i += 1;
+        }
+        b.dry = false;
+        let mut high_seen: f64 = 0.0;
+        for _ in 0..400 {
+            b.second(i);
+            i += 1;
+            high_seen = high_seen.max(b.w);
+        }
+        let kinds = b.kinds();
+        let alarm = kinds.iter().position(|k| k == "alarm_refill_no_rise").expect("said");
+        let rising = kinds.iter().position(|k| k == "refill_rising").expect("cleared");
+        let stop = kinds.iter().position(|k| k == "refill_stop").expect("filled to the top");
+        assert!(alarm < rising && rising < stop, "{kinds:?}");
+        assert!(high_seen > 1100.0 - 15.0, "{high_seen}");
+        assert!(!b.e.refill_cycle_status().unwrap().not_rising);
+    }
+
+    #[test]
+    fn a_refill_pump_slower_than_the_feed_is_said_the_bottle_does_not_rise() {
+        // 40 mL/min in, 60 mL/min out: the bottle falls while it "refills".
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.refill_ml_min = 40.0;
+        b.start();
+        let start = until_refill(&mut b);
+        for i in start..start + 120 {
+            b.second(i);
+        }
+        assert!(b.kinds().contains(&"alarm_refill_no_rise".to_string()));
+        assert!(b.refill_running());
+    }
+
+    #[test]
+    fn the_rise_is_shown_while_filling() {
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.refill_ml_min = 100.0;
+        b.start();
+        let start = until_refill(&mut b);
+        for i in start..start + 20 {
+            b.second(i);
+        }
+        let r = b.e.refill_cycle_status().unwrap().rise_g_per_min.expect("measured after 10 s");
+        // 100 in, 60 out: about +40 g/min net.
+        assert!((r - 40.0).abs() < 5.0, "{r}");
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub(super) struct RefillLink {
     /// A fill was cut by a lost balance read: it goes on to the high level
     /// once the balance answers, not only under the low level.
     pub(super) resume_fill: bool,
+    /// What the balance saw of the fill under way.
+    pub(super) fill: super::refill_cycle::FillTrack,
 }
 
 /// The refill pump's part of the status frame. `None` there while nothing
