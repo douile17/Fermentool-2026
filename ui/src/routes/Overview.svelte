@@ -7,7 +7,6 @@
   import { valueAt, hm, clock, when, bottleEmptyInS, refillDueInS, runState, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
-  import PumpHead from '../components/PumpHead.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
   import Icon from '../components/Icon.svelte';
   import StateIcon from '../components/StateIcon.svelte';
@@ -436,7 +435,7 @@
     <!-- 1. Is everything all right, and what do I do next? -->
     <section class="band {rs.tone}" role={rs.tone === 'bad' ? 'alert' : undefined} aria-label="Run state">
       <div class="band-state">
-        <StateIcon icon={rs.icon} moving={app.connected} />
+        <StateIcon icon={rs.icon} moving={app.connected} direction={run?.direction ?? active?.direction} />
         <div class="band-text">
           <span class="band-word">{rs.word}</span>
           <div class="band-title">
@@ -508,7 +507,6 @@
             <div>
               <div class="k">Feed rate now</div>
               <div class="big-line">
-                <PumpHead direction={run.direction} frac={pumpFrac} size={60} spin={app.connected && !app.status?.stop_pending} />
                 <span class="big mono-num">{num(curveNow ?? active.last_target, digits)}</span>
                 <span class="big-u">{unit}</span>
               </div>
@@ -834,12 +832,11 @@
   .band-next .what { font-weight: 600; font-size: 15px; }
   .band-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; }
   .band-actions button { min-height: 40px; }
-  /* The band takes the state's colour: green feeding, blue refilling,
-     orange a look, red an alarm. Read from across the lab. */
-  .band.ok { background: var(--ok-bg); border-color: var(--ok-line); --si-ring: var(--ok-line); }
-  .band.ok .band-title { color: var(--green-600); }
-  .band.ok .band-word { color: var(--green-600); background: color-mix(in srgb, var(--green-500) 18%, transparent); }
-  .band.ok .band-next { border-left-color: var(--ok-line); }
+  /* The band takes the state's colour when it needs an eye: blue
+     refilling, orange a look, red an alarm. Read from across the lab. */
+  /* Feeding normally is the quiet state: white band, ink title, the green
+     kept to the picture and the word. Colour is for what needs an eye. */
+  .band.ok .band-word { color: var(--green-600); background: color-mix(in srgb, var(--green-500) 14%, transparent); }
   .band.fill { background: var(--fill-bg); border-color: var(--fill-line); --si-ring: var(--fill-line); }
   .band.fill .band-title { color: var(--fill); }
   .band.fill .band-word { color: var(--fill); background: color-mix(in srgb, var(--fill) 18%, transparent); }

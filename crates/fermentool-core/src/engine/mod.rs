@@ -431,6 +431,8 @@ pub struct ActiveStatus {
     pub responsible: Option<String>,
     /// The run drives the refill pump.
     pub auto_refill: bool,
+    /// Which way the pump head turns, so the UI's pump turns the same way.
+    pub direction: Direction,
 }
 
 struct ActiveRun {
@@ -476,6 +478,7 @@ struct ActiveRun {
     kind: RunKind,
     /// The run drives the refill pump.
     auto_refill: bool,
+    direction: Direction,
 }
 
 /// The `refill` event's detail. [`parse_refill`] reads it back for the
@@ -1328,6 +1331,7 @@ impl<T: Transport> Engine<T> {
             curve_done: a.curve_done,
             responsible: a.responsible.clone(),
             auto_refill: a.auto_refill,
+            direction: a.direction,
         })
     }
 
@@ -1545,6 +1549,7 @@ impl<T: Transport> Engine<T> {
         self.readback_fails = 0;
         self.pump_confirmed = true;
         self.active = Some(ActiveRun {
+            direction: cfg.direction,
             id,
             name: cfg.name.clone(),
             responsible: cfg.responsible.clone(),
@@ -2944,6 +2949,7 @@ impl<T: Transport> Engine<T> {
         self.readback_fails = 0;
         self.pump_confirmed = true;
         self.active = Some(ActiveRun {
+            direction: run.direction,
             id: run.id,
             name: run.name.clone(),
             responsible: run.responsible.clone(),
@@ -4953,6 +4959,15 @@ mod tests {
             w -= 2.0 * b.trim_c();
         }
         assert!((b.trim_c() - 1.0).abs() < 0.01, "resume lost the rpm-to-volume conversion: c = {}", b.trim_c());
+    }
+
+    #[test]
+    fn status_says_which_way_the_pump_turns() {
+        // The UI's pump picture turns the way the real head does.
+        let mut e = engine();
+        let cfg = RunConfig { direction: Direction::Ccw, ..linear_cfg() };
+        e.start_run(cfg, t0()).unwrap();
+        assert_eq!(e.active_status().unwrap().direction, Direction::Ccw);
     }
 
     #[test]

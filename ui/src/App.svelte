@@ -99,8 +99,8 @@
 
   const refillLine = $derived(refillView(app.status?.refill));
 
-  // The feeding cycle's state, seen from every page: a pill under Pump
-  // control, and the window's title and icon (the taskbar, other tabs).
+  // The feeding cycle's state, seen from every page: a bar over the other
+  // pages, and the window's title and icon (the taskbar, other tabs).
   // A calibration burst is not a cycle: Tubing calibration follows it.
   const cycleRun = $derived(
     app.status?.active && app.status.active.kind !== 'calibration' ? app.status.active : null
@@ -118,11 +118,14 @@
     if (runRs.tone === 'ok') return { label: runRs.word, sub: runValue ?? '' };
     return { label: runRs.word, sub: runRs.title };
   });
+  // The Overview's band says it already, in full.
+  const onOverview = $derived(app.route === 'pump' && app.tab === 'overview');
   $effect(() => {
     document.title = stateTitle(runRs, runValue);
   });
-  // The tab's icon in the state's colour; the usual one with no cycle.
-  const FAVICON_FILL = { ok: '#10a074', fill: '#1f8fb0', warn: '#e07800', bad: '#d64545' };
+  // The tab's icon in the state's colour; the usual one otherwise.
+  // Feeding normally keeps the usual icon: colour only when it needs an eye.
+  const FAVICON_FILL = { fill: '#1f8fb0', warn: '#e07800', bad: '#d64545' };
   $effect(() => {
     const link = document.querySelector('link[rel="icon"]');
     if (!link) return;
@@ -324,15 +327,8 @@
         class:running
         onclick={() => go(() => (app.route = 'pump'))}
       >
-        <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} solid /></span>Pump control
+        <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} direction={app.status?.active?.direction ?? 'cw'} solid /></span>Pump control
       </button>
-      {#if runPill}
-        <button class="run-pill {runRs.tone}" title={runRs.title}
-          onclick={() => go(() => { app.route = 'pump'; app.tab = 'overview'; })}>
-          <StateIcon icon={runRs.icon} size={22} ring={false} moving={app.connected} />
-          <span class="run-pill-text">{runPill.label}<small>{runPill.sub}</small></span>
-        </button>
-      {/if}
     </nav>
 
     <button
@@ -387,6 +383,15 @@
   <main class="main">
     <div class="wrap">
       <ConnBar />
+
+      {#if runPill && !onOverview}
+        <div class="run-bar {runRs.tone}" role={runRs.tone === 'bad' ? 'alert' : 'status'}>
+          <StateIcon icon={runRs.icon} size={24} ring={false} moving={app.connected} direction={cycleRun.direction} />
+          <span class="run-bar-word">{runPill.label}</span>
+          <span class="run-bar-sub">{runPill.sub}</span>
+          <button class="run-bar-go" onclick={() => go(() => { app.route = 'pump'; app.tab = 'overview'; })}>Open Overview →</button>
+        </div>
+      {/if}
 
       {#each pageRuns as p (p.run_id)}
         <div class="paging" role="alert">
@@ -479,24 +484,6 @@
   .word { font-weight: 600; letter-spacing: -0.01em; }
 
   nav { display: flex; flex-direction: column; gap: 1px; }
-  /* The run's state, from every page: its colour, picture and word. */
-  .run-pill {
-    display: flex; align-items: center; gap: var(--s-2);
-    margin-top: var(--s-2); padding: var(--s-2) var(--s-3);
-    border-radius: 10px; border: none; width: 100%; cursor: pointer; text-align: left;
-    font-family: var(--font-title); font-size: 15px; font-weight: 600; line-height: 1.2;
-    background: var(--surface-sunken); color: var(--ink);
-  }
-  .run-pill-text { min-width: 0; display: flex; flex-direction: column; }
-  .run-pill small {
-    font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--muted);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .run-pill.ok { background: var(--ok-bg); color: var(--green-600); }
-  .run-pill.fill { background: var(--fill-bg); color: var(--fill); }
-  .run-pill.warn { background: var(--warn-bg); color: var(--measured); }
-  .run-pill.bad { background: var(--danger-bg); color: var(--danger); }
-  .run-pill:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
   .nav-item {
     display: flex; align-items: center; gap: var(--s-3);
     padding: var(--s-2) var(--s-3);
@@ -644,7 +631,6 @@
     .brand .word { display: none; }
     nav { flex-direction: row; }
     .nav-item { width: auto; white-space: nowrap; }
-    .run-pill { width: auto; margin-top: 0; }
     .nav-settings { margin-top: 0; }
     .rail-foot {
       margin-top: 0; padding: 0;
@@ -655,5 +641,27 @@
     .rail-foot-row { gap: var(--s-4); }
     .rail-foot .theme { display: none; }
     .main { padding: var(--s-5) var(--s-4) var(--s-7); }
+  }
+  /* The run's state over the other pages: its colour, picture and word. */
+  .run-bar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2) var(--s-3);
+    margin-bottom: var(--s-4); padding: var(--s-2) var(--s-3) var(--s-2) var(--s-4);
+    border-radius: var(--radius-ctl); border: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .run-bar-word { font-family: var(--font-title); font-size: 16px; font-weight: 600; line-height: 1.2; }
+  .run-bar-sub { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 0; flex: 1 1 auto; }
+  .run-bar-go {
+    margin-left: auto; min-height: 32px; padding: 0 var(--s-3);
+    border-radius: 8px; border: 1px solid transparent; background: var(--surface);
+    color: inherit; font-weight: 500; cursor: pointer;
+  }
+  .run-bar-go:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
+  /* feeding normally stays quiet: white, only the picture in green */
+  .run-bar.fill { background: var(--fill-bg); border-color: var(--fill-line); color: var(--fill); }
+  .run-bar.warn { background: var(--warn-bg); border-color: var(--warn-line); color: var(--measured); }
+  .run-bar.bad {
+    background: var(--danger-bg); color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--surface));
   }
 </style>

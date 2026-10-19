@@ -24,10 +24,8 @@
   /* Measured (weighed) feed: warm, so it stands out against the teal/green
      requested curve without reading as an alarm red. */
   --measured: #e07800;
-  /* The run state's band (Overview) and pill (sidebar): green feeding, blue
-     refilling, orange a look, red an alarm (danger). */
-  --ok-bg: #e6f5ef;
-  --ok-line: #bfe5d5;
+  /* The run state's band (Overview) and bar (other pages): blue refilling,
+     orange a look, red an alarm (danger); feeding normally stays white. */
   --fill: #1f8fb0;
   --fill-bg: #e3f1f4;
   --fill-line: #b6dbe2;
@@ -69,8 +67,6 @@
     --danger-solid: #c4463f;
     --danger-solid-hover: #d4554e;
     --measured: #ffad42;
-    --ok-bg: #234239;
-    --ok-line: #2f5d4e;
     --fill: #5ec4e3;
     --fill-bg: #213d47;
     --fill-line: #2e5866;
@@ -100,8 +96,6 @@
   --danger-solid: #c4463f;
   --danger-solid-hover: #d4554e;
   --measured: #ffad42;
-  --ok-bg: #234239;
-  --ok-line: #2f5d4e;
   --fill: #5ec4e3;
   --fill-bg: #213d47;
   --fill-line: #2e5866;

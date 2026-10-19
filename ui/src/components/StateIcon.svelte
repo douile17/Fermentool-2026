@@ -2,9 +2,10 @@
   /**
    * The run state's large picture, in its ring: what the Overview band and
    * the sidebar show beside the state's word (runState().icon).
-   * @type {{ icon: string, size?: number, ring?: boolean, moving?: boolean }}
+   * `direction` ('cw' | 'ccw'): the pump's rotor turns the way the real head does.
+   * @type {{ icon: string, size?: number, ring?: boolean, moving?: boolean, direction?: string }}
    */
-  let { icon, size = 56, ring = true, moving = true } = $props();
+  let { icon, size = 56, ring = true, moving = true, direction = 'cw' } = $props();
 
   // Two icons can share a page (band and sidebar): each its own clip path.
   const clipId = `ftbottle-${Math.random().toString(36).slice(2, 9)}`;
@@ -13,7 +14,7 @@
   const BOTTLE_FIT = 'translate(28 28) scale(.72) translate(-28 -30)';
 </script>
 
-<svg class="si {icon}" class:moving class:ring width={size} height={size} viewBox="0 0 56 56" aria-hidden="true">
+<svg class="si {icon}" class:moving class:ring class:ccw={direction === 'ccw'} width={size} height={size} viewBox="0 0 56 56" aria-hidden="true">
   {#if ring}<circle class="ring-c" cx="28" cy="28" r="26" />{/if}
 
   {#if icon === 'pump'}
@@ -75,6 +76,7 @@
 
   /* Moving only while something happens: a frozen page also looks frozen. */
   .moving .rotor { animation: si-spin 3s linear infinite; }
+  .ccw.moving .rotor { animation-direction: reverse; }
   .moving .liq.rise { animation: si-rise 4s ease-in-out infinite; }
   .moving .bub { animation: si-bub 2s ease-in infinite; }
   .moving .bub.b2 { animation-delay: 0.7s; }
