@@ -1,5 +1,6 @@
 <script>
   import { num, vol } from '../lib/fmt.js';
+  import { valueScale } from '../lib/chartscale.js';
 
   /**
    * @type {{
@@ -54,19 +55,11 @@
   const dotR = 3.5;
   const clampX = (px) => Math.max(dotR, Math.min(W - dotR, px));
 
-  const bounds = $derived.by(() => {
-    const vals = [...planned.map((p) => p[1]), ...actual.map((p) => p[1])];
-    let lo = Math.min(...vals, Infinity);
-    let hi = Math.max(...vals, -Infinity);
-    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
-      lo = 0;
-      hi = 1;
-    }
-    if (hi - lo < 1e-6) {
-      hi = lo + 1;
-    }
-    const pad = (hi - lo) * 0.08;
-    return { lo: lo - pad, hi: hi + pad };
+  // From zero with a graduated axis, never zoomed onto the data (chartscale.js).
+  const bounds = $derived(valueScale([...planned.map((p) => p[1]), ...actual.map((p) => p[1])]));
+  const tickDigits = $derived.by(() => {
+    const step = bounds.ticks.length > 1 ? bounds.ticks[1] - bounds.ticks[0] : 1;
+    return (String(+step.toPrecision(6)).split('.')[1] ?? '').length;
   });
 
   const dspan = $derived(durationS > 0 ? durationS : 1);
@@ -92,6 +85,17 @@
       eVal: e[1],
     };
   });
+
+  // A gridline per graduation, its value above it at the left edge; left out
+  // where it would sit on the curve's start label.
+  const grid = $derived(
+    bounds.ticks.map((v) => {
+      const gy = y(v);
+      const ly = Math.max(10, gy - 3);
+      const clash = labels && labels.sx < 80 && Math.abs(ly - labels.sy) < 12;
+      return { gy, ly, text: clash ? null : num(v, tickDigits) };
+    })
+  );
 
   const line = $derived(planned.map((p, i) => `${i ? 'L' : 'M'}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' '));
   const area = $derived(
@@ -188,9 +192,11 @@
       </linearGradient>
     </defs>
 
-    {#each [0.25, 0.5, 0.75] as f}
-      <line x1={padL} x2={W - padR} y1={padT + f * (H - padT - padB)} y2={padT + f * (H - padT - padB)}
-            stroke="var(--line-soft)" stroke-width="1" />
+    {#each grid as g}
+      <line x1={padL} x2={W - padR} y1={g.gy} y2={g.gy} stroke="var(--line-soft)" stroke-width="1" />
+      {#if g.text != null}
+        <text x={padL + 2} y={g.ly} class="axl tick">{g.text}</text>
+      {/if}
     {/each}
 
     {#if area}
@@ -249,6 +255,7 @@
      progress bar, and labels at their real size. */
   svg { width: 100%; height: auto; display: block; }
   .axl { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+  .tick { font-size: 9.5px; opacity: 0.8; }
   .now-vol { fill: var(--ink); font-weight: 600; }
   .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
   .refill { stroke: var(--teal-600); stroke-width: 1.5; stroke-dasharray: 6 4; }
