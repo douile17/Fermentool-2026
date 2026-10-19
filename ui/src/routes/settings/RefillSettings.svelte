@@ -157,8 +157,8 @@
   .link .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
   .link.ok { color: var(--green-600); }
   .link.ok .dot { background: var(--green-500); }
-  .link.warn { color: #a2621c; }
+  .link.warn { color: var(--warn-ink); }
   .link.warn .dot { background: #d68b45; }
-  .link.bad { color: var(--danger); }
+  .link.bad { color: var(--danger-ink); }
   .link.bad .dot { background: var(--danger); }
 </style>

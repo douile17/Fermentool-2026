@@ -283,9 +283,9 @@
   .qr-help { font-size: 13px; flex: 1; min-width: 220px; }
   .qr-help p { margin: 0 0 var(--s-2); }
   .topic-line { display: flex; align-items: center; gap: var(--s-2); word-break: break-all; }
-  .pending { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--danger); }
+  .pending { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--danger-ink); }
   .save-state { font-size: 13px; color: var(--green-600); }
-  .save-state.bad { color: var(--danger); }
+  .save-state.bad { color: var(--danger-ink); }
   .linkish { background: none; border: none; padding: 0; font: inherit; font-size: 12px; color: var(--teal-700); cursor: pointer; }
   .server { margin-top: var(--s-4); }
   .server-field { margin-top: var(--s-2); }

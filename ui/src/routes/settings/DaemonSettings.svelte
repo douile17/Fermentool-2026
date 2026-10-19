@@ -97,6 +97,6 @@
 </SettingsCard>
 
 <style>
-  .confirm-note { margin-bottom: var(--s-3); color: var(--danger); }
+  .confirm-note { margin-bottom: var(--s-3); color: var(--danger-ink); }
   .row { display: flex; gap: var(--s-3); flex-wrap: wrap; }
 </style>

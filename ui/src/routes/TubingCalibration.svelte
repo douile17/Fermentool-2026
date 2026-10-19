@@ -671,6 +671,9 @@
   // --- The page as four steps, in the order of the job (tube, settings,
   // bursts, result), with the session summed up beside them.
   let step = $state(1);
+  // The tube fields turn orange once left empty, not before anything is
+  // typed: marked from the start they read as errors (UX audit, 19 Oct).
+  let left = $state({});
   let stepPicked = false;
   $effect(() => {
     if (!loaded || stepPicked) return;
@@ -1022,22 +1025,22 @@
             <div class="field" id="cal-brand"><span>Brand</span>
               <!-- not locked by the bursts: it names the tube, it does not change it -->
               <select aria-label="Brand" value={brandCustom ? '__custom' : (d.brand ?? '')} onchange={(e) => pickBrand(e.currentTarget.value)}
-                class:missing={!(d.brand ?? '').trim() && !brandCustom}>
+                onblur={() => (left.brand = true)} class:missing={left.brand && !(d.brand ?? '').trim() && !brandCustom}>
                 <option value="" disabled>Choose…</option>
                 {#each brands as b (b)}<option value={b}>{b}</option>{/each}
                 <option value="__custom">Custom…</option>
               </select>
               {#if brandCustom}
                 <input type="text" bind:this={brandBox} bind:value={d.brand} onchange={persist} placeholder="Type the brand"
-                  aria-label="Custom brand" class:missing={!(d.brand ?? '').trim()} />
+                  aria-label="Custom brand" onblur={() => (left.brand = true)} class:missing={left.brand && !(d.brand ?? '').trim()} />
               {/if}
             </div>
             <label class="field" id="cal-lot"><span>Tubing lot</span>
-              <input type="text" bind:value={d.tubing_lot_id} disabled={locked} onchange={persist} placeholder="e.g. LOT-2409" class:missing={!d.tubing_lot_id.trim()} />
+              <input type="text" bind:value={d.tubing_lot_id} disabled={locked} onchange={persist} placeholder="e.g. LOT-2409" onblur={() => (left.lot = true)} class:missing={left.lot && !d.tubing_lot_id.trim()} />
             </label>
             <label class="field" id="cal-ref"><span>Ref</span>
               <!-- not locked by the bursts: it names the tube, it does not change it -->
-              <input type="text" bind:value={d.product_ref} onchange={persist} placeholder="e.g. 06409-14" class:missing={!(d.product_ref ?? '').trim()} />
+              <input type="text" bind:value={d.product_ref} onchange={persist} placeholder="e.g. 06409-14" onblur={() => (left.ref = true)} class:missing={left.ref && !(d.product_ref ?? '').trim()} />
             </label>
             <label class="field"><span>Internal ref (optional)</span>
               <input type="text" bind:value={d.internal_ref} disabled={locked} onchange={persist} />
@@ -1626,19 +1629,19 @@
   .k { font-size: 12.5px; color: var(--muted); margin: 0; }
   .lbl { font-size: 12.5px; color: var(--muted); font-weight: 500; }
   .muted { color: var(--muted); }
-  .warn { font-size: 13px; color: var(--danger); margin: 0; }
-  .k.bad { color: var(--danger); }
+  .warn { font-size: 13px; color: var(--danger-ink); margin: 0; }
+  .k.bad { color: var(--danger-ink); }
   .stall {
     display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--s-2) var(--s-4);
     padding: var(--s-3) var(--s-4); border-radius: var(--radius-ctl); font-size: 13.5px;
-    background: var(--danger-bg); color: var(--danger);
+    background: var(--danger-bg); color: var(--danger-ink);
     border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--surface));
   }
-  .stall b { color: var(--danger); }
+  .stall b { color: var(--danger-ink); }
   .blocked {
     display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--s-2) var(--s-4);
     padding: var(--s-3) var(--s-4); border-radius: var(--radius-ctl);
-    background: var(--danger-bg); color: var(--danger); font-size: 13.5px;
+    background: var(--danger-bg); color: var(--danger-ink); font-size: 13.5px;
     border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--surface));
     /* in with a slide and a short shake, then a slow glow while it lasts */
     animation: blk-in 0.45s ease-out, blk-glow 2.2s ease-in-out 0.6s infinite;
@@ -1664,7 +1667,7 @@
   }
   /* a real box: clicks on the inert zone fall through to it */
   .zone-wrap { display: flex; flex-direction: column; }
-  .bad { color: var(--danger); }
+  .bad { color: var(--danger-ink); }
   .panel {
     background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
     padding: var(--s-5); min-width: 0;
@@ -1725,7 +1728,7 @@
     display: grid; place-items: center;
     background: color-mix(in srgb, var(--teal-700) 10%, var(--surface)); color: var(--teal-700);
   }
-  .mode.on .mode-ic { background: var(--teal-700); color: #fff; }
+  .mode.on .mode-ic { background: var(--teal-700); color: var(--on-primary); }
   .mode.on { border: 2px solid var(--teal-700); background: color-mix(in srgb, var(--teal-700) 5%, var(--surface)); }
 
   /* bursts */
@@ -1762,9 +1765,9 @@
   .bc-head { display: flex; justify-content: space-between; align-items: center; }
   .btag { font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--surface-sunken); color: var(--muted); }
   .btag.t-ok { background: color-mix(in srgb, var(--green-500) 16%, var(--surface)); color: var(--green-600); }
-  .btag.t-now { background: var(--teal-700); color: #fff; text-transform: uppercase; letter-spacing: 0.06em; }
-  .held { font-size: 13px; font-weight: 600; color: var(--danger); }
-  .btag.t-alarm { background: var(--danger-bg); color: var(--danger); text-transform: uppercase; letter-spacing: 0.06em; }
+  .btag.t-now { background: var(--teal-700); color: var(--on-primary); text-transform: uppercase; letter-spacing: 0.06em; }
+  .held { font-size: 13px; font-weight: 600; color: var(--danger-ink); }
+  .btag.t-alarm { background: var(--danger-bg); color: var(--danger-ink); text-transform: uppercase; letter-spacing: 0.06em; }
   .bc-mid { display: flex; align-items: center; gap: var(--s-3); min-height: 52px; }
   .bc-big { font-size: 24px; font-weight: 500; line-height: 1.15; }
   .bar { height: 6px; border-radius: 999px; background: var(--surface-sunken); overflow: hidden; }
@@ -1773,7 +1776,7 @@
   .bar span.bad { background: var(--danger); }
   /* a burst with an alarm: red cross, red bar, red ground, until pumped again */
   .bcard.alarm { background: var(--danger-bg); border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--surface)); }
-  .bcard.alarm .bc-head b { color: var(--danger); }
+  .bcard.alarm .bc-head b { color: var(--danger-ink); }
   .bc-acts { display: flex; flex-wrap: wrap; gap: var(--s-2); }
   /* redoing a burst: a real button, in the page's teal, easy to find */
   .redo-btn {
@@ -1781,7 +1784,7 @@
     border: 1px solid var(--teal-700); background: var(--surface); color: var(--teal-700);
     font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
   }
-  .redo-btn:not(:disabled):hover { background: var(--teal-700); color: #fff; }
+  .redo-btn:not(:disabled):hover { background: var(--teal-700); color: var(--on-primary); }
   .redo-btn:disabled { opacity: 0.5; cursor: default; }
   .redo-ask { flex-basis: 100%; font-size: 12.5px; color: var(--ink); }
   .edit { display: inline-flex; align-items: center; gap: var(--s-1); }
@@ -1840,7 +1843,7 @@
   .saved-note .tick { color: var(--green-500); font-weight: 700; margin-right: 4px; }
   .abandon {
     background: none; border: none; padding: var(--s-1) 0; cursor: pointer;
-    font: inherit; font-size: 13px; font-weight: 500; color: var(--danger);
+    font: inherit; font-size: 13px; font-weight: 500; color: var(--danger-ink);
   }
   .abandon:hover:not(:disabled) { text-decoration: underline; }
   .abandon:disabled { opacity: 0.5; cursor: default; }

@@ -72,8 +72,8 @@
     flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
     font-size: 12.5px; font-weight: 600; background: var(--surface); color: var(--muted);
   }
-  .step.on .step-n { background: var(--teal-700); color: #fff; }
-  .step.done .step-n, .step.on.done .step-n { background: var(--green-500); color: #fff; }
+  .step.on .step-n { background: var(--teal-700); color: var(--on-primary); }
+  .step.done .step-n, .step.on.done .step-n { background: var(--green-500); color: var(--on-primary); }
   .step-t { display: flex; flex-direction: column; min-width: 0; }
   .step-l { font-weight: 600; }
   .step-s { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

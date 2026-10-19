@@ -295,7 +295,7 @@
     font-size: 13px; font-weight: 600; white-space: nowrap; transition: background 0.15s, color 0.15s;
   }
   .chg svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2.2; transition: transform 0.15s; }
-  .trigger:hover .chg, .trigger[aria-expanded='true'] .chg { background: var(--teal-700); color: #fff; }
+  .trigger:hover .chg, .trigger[aria-expanded='true'] .chg { background: var(--teal-700); color: var(--on-primary); }
   .trigger[aria-expanded='true'] .chg svg { transform: rotate(180deg); }
 
   .badge {
@@ -321,7 +321,7 @@
   .chip b { font-family: var(--mono); font-weight: 600; }
   .chip small { font-family: var(--mono); color: var(--muted); }
   .chip .dot { align-self: center; width: 9px; height: 9px; border-radius: 50%; background: var(--c-line); margin-right: 2px; }
-  .chip.on { background: var(--c-bg, color-mix(in srgb, var(--teal-700) 10%, var(--surface))); border-color: var(--c-line, var(--teal-700)); color: var(--c-ink, var(--teal-700)); }
+  .chip.on { background: var(--c-bg, color-mix(in srgb, var(--teal-700) 10%, var(--surface))); border-color: var(--c-line, var(--teal-700)); color: var(--c-ink, var(--teal-ink)); }
 
   .list { max-height: min(340px, calc(100vh - 300px)); overflow-y: auto; padding: 6px; }
   .grp { padding: 4px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }

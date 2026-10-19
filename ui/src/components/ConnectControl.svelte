@@ -199,7 +199,7 @@
 
   .cc-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .cc-label { font-size: 13px; font-weight: 600; color: var(--ink); }
-  .cc.bad .cc-label { color: var(--danger); }
+  .cc.bad .cc-label { color: var(--danger-ink); }
   .cc-hint { font-size: 12px; color: var(--muted); line-height: 1.35; }
   .compact-hint { margin: var(--s-2) 0 0; }
 
@@ -230,7 +230,7 @@
   .cc-controls button.ghost { color: var(--muted); }
 
   .cc-msg { margin: var(--s-2) 0 0; font-size: 12px; }
-  .cc-msg.err { color: var(--danger); }
+  .cc-msg.err { color: var(--danger-ink); }
   .cc-msg.ok { color: var(--green-600); }
 
   @media (max-width: 640px) {

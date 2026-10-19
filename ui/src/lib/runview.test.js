@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { flowWindowS, refillDueInS, refillProgress, runState, stateTitle, weighedFlow } from './runview.js';
+import { deliveryFigures, flowWindowS, inAbout, nextRefill, refillDueInS, refillProgress, runState, stateTitle, weighedFlow } from './runview.js';
 
 describe('weighedFlow', () => {
   // Run 184's curve: 13 -> 10 mL/min over 1 h, a point every 2 s.
@@ -111,5 +111,43 @@ describe('stateTitle', () => {
     expect(stateTitle({ tone: 'fill', word: 'Refilling', progress: { frac: 0.42 } })).toBe('Refilling 42 % · Fermentool');
     expect(stateTitle({ tone: 'bad', word: 'Alarm', title: 'Feed stopped' })).toBe('Feed stopped · Fermentool');
     expect(stateTitle(null)).toBe('Fermentool');
+  });
+});
+
+describe('nextRefill', () => {
+  const cycle = { phase: 'idle', halted: false, low_g: 2562.1, high_g: 4562.1, weight_g: 2840 };
+  const nowMs = Date.parse('2026-10-19T12:31:00Z');
+  it('says when and between which levels, not a task with nothing to do', () => {
+    const n = nextRefill({ cycle, inS: 33 * 60, nowMs });
+    expect(n.label).toBe('Next refill');
+    expect(n.what).toMatch(/^around /);
+    expect(n.sub).toBe('in about 33 min, at 2.56 kg, back to 4.56 kg');
+  });
+  it('gives the level when the balance cannot time it yet', () => {
+    expect(nextRefill({ cycle, inS: null, nowMs }).what).toBe('under 2.56 kg');
+  });
+  it('is nothing while a fill runs or the cycle is stopped', () => {
+    expect(nextRefill({ cycle: { ...cycle, phase: 'filling' }, inS: 10, nowMs })).toBeNull();
+    expect(nextRefill({ cycle: { ...cycle, halted: true }, inS: 10, nowMs })).toBeNull();
+  });
+});
+
+describe('inAbout', () => {
+  it('reads in minutes under an hour, in hours past it', () => {
+    expect(inAbout(35 * 60)).toBe('in about 35 min');
+    expect(inAbout(20)).toBe('in about 1 min');
+    expect(inAbout(2 * 3600 + 5 * 60)).toBe('in 2 h 05');
+  });
+});
+
+describe('deliveryFigures', () => {
+  it('reads as delivered, not as a bare 0 % (run 192: 1.722 L of 1.721 L)', () => {
+    const d = deliveryFigures([12000, 1721, 1722]);
+    expect(d.deliveredPct).toBeCloseTo(100.06, 2);
+    expect(d.gapPct).toBeCloseTo(0.06, 2);
+  });
+  it('is nothing before anything is asked', () => {
+    expect(deliveryFigures([0, 0, 0])).toBeNull();
+    expect(deliveryFigures(null)).toBeNull();
   });
 });

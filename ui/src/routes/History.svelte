@@ -1,7 +1,7 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post, del } from '../lib/api.js';
-  import { num, dur, shortTime, stampY, unitFor, digitsFor } from '../lib/fmt.js';
+  import { num, dur, shortTime, stampY, unitFor, digitsFor, ranFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
   import TrackingPanel from '../components/TrackingPanel.svelte';
   import Icon from '../components/Icon.svelte';
@@ -11,6 +11,13 @@
 
   let runs = $state([]);
   let err = $state(null);
+  // A running run's "so far" moves on: a minute is plenty for a list.
+  let now = $state(Date.now());
+  $effect(() => {
+    const id = setInterval(() => (now = Date.now()), 60_000);
+    return () => clearInterval(id);
+  });
+
   let sel = $state(null); // { run, planned, ticks, events }
   let q = $state('');
 
@@ -319,14 +326,6 @@
           Delete selected ({pickedShown.length})
         </button>
       {/if}
-      <button
-        class="btn-danger"
-        onclick={() => { clearErr = null; confirmClear = true; }}
-        disabled={!runs.length || clearBlocked}
-        title={clearBlocked ? 'Stop the run / pump first' : 'Delete every run'}
-      >
-        Reset history
-      </button>
     </div>
   </div>
   {#if err}<div class="err">{err}</div>{/if}
@@ -337,10 +336,11 @@
         <input type="checkbox" checked={allPicked} disabled={!pickable.length} onchange={toggleAll} aria-label="Select all runs" />
       </label>
       <div class="tr th">
-        <span>Name</span><span>Status</span><span>Curve</span><span>Duration</span><span>Started</span>
+        <span>Run</span><span>Name</span><span>Status</span><span>Curve</span><span>Ran</span><span>Started</span>
       </div>
     </div>
     {#each shown as r (r.id)}
+      {@const rf = ranFor(r, now)}
       <div class="row">
         <label class="pick">
           <input type="checkbox" checked={picked.includes(r.id)} disabled={r.status === 'running'}
@@ -352,10 +352,11 @@
           onclick={() => pick(r)}
           title={r.status === 'running' ? 'View live in Overview' : 'Open details'}
         >
+          <span class="rid mono">#{r.id}</span>
           <span class="nm">{r.name}{#if r.responsible}<small class="who">{r.responsible}</small>{/if}</span>
           <span><span class="pill {r.status}">{r.status}</span></span>
           <span class="mono">{r.curve.params.kind}</span>
-          <span class="mono">{dur(r.duration_s)}</span>
+          <span class="mono ran">{rf.ran}{#if rf.of}<small>{rf.of}</small>{/if}</span>
           <span class="mono">{stampY(r.started_at)}</span>
         </button>
       </div>
@@ -363,6 +364,17 @@
       <p class="muted">{q.trim() ? `No run matches “${q.trim()}”.` : 'No runs yet.'}</p>
     {/each}
   </div>
+  <!-- Out of the main action's place: deleting every run is rare and final. -->
+  {#if runs.length}
+    <div class="tbl-foot">
+      <button
+        class="link-danger"
+        onclick={() => { clearErr = null; confirmClear = true; }}
+        disabled={clearBlocked}
+        title={clearBlocked ? 'Stop the run / pump first' : 'Delete every run'}
+      >Reset history…</button>
+    </div>
+  {/if}
 </section>
 
 {#if confirmBulk}
@@ -534,7 +546,7 @@
   .bulk-err { white-space: pre-line; margin-top: var(--s-3); }
   .tr {
     display: grid;
-    grid-template-columns: 1.5fr 0.8fr 0.9fr 0.8fr 1.2fr;
+    grid-template-columns: 0.45fr 1.5fr 0.8fr 0.8fr 0.9fr 1.2fr;
     gap: var(--s-3);
     align-items: center;
     text-align: left;
@@ -550,6 +562,15 @@
   .tr:not(.th):hover { background: var(--surface-sunken); }
   .tr.sel { background: color-mix(in srgb, var(--teal-700) 9%, var(--surface)); }
   .tr .nm { font-weight: 600; }
+  .tr .rid { color: var(--muted); font-size: 12px; }
+  .tr .ran small { display: block; font-size: 11.5px; color: var(--muted); }
+  .tbl-foot { display: flex; justify-content: flex-end; margin-top: var(--s-3); }
+  .link-danger {
+    font: inherit; font-size: 13px; color: var(--danger-ink); background: none; border: none;
+    padding: var(--s-1) var(--s-2); cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  }
+  .link-danger:disabled { color: var(--muted); cursor: default; text-decoration: none; }
+  .link-danger:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; border-radius: 4px; }
   .tr .who { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
   .tr span { font-size: 13px; }
   .muted { color: var(--muted); padding: var(--s-3) var(--s-2); }
@@ -580,7 +601,7 @@
   .fold summary .eyebrow { color: var(--ink); }
   .fold summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent); outline-offset: 2px; }
   .peek { margin-left: auto; font-size: 12px; color: var(--muted); }
-  .peek .off { color: var(--danger); font-weight: 600; }
+  .peek .off { color: var(--danger-ink); font-weight: 600; }
   @media (prefers-reduced-motion: reduce) { .fold summary :global(.icon) { transition: none; } }
   .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
@@ -665,7 +686,7 @@
     /* No top padding on the detail: the sticky head is the top edge itself. */
   .modal.detail { padding-top: 0; }
   .detail-head { align-items: center; flex-wrap: wrap; }
-    .tr { grid-template-columns: 1.4fr 0.9fr 0.9fr; }
-    .tr span:nth-child(4), .tr span:nth-child(5) { display: none; }
+    .tr { grid-template-columns: 0.5fr 1.4fr 0.9fr 0.9fr; }
+    .tr > span:nth-child(4), .tr > span:nth-child(6) { display: none; }
   }
 </style>

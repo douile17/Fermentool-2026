@@ -118,6 +118,9 @@
     if (runRs.tone === 'ok') return { label: runRs.word, sub: runValue ?? '' };
     return { label: runRs.word, sub: runRs.title };
   });
+  const PAGE_TITLES = { overview: 'Overview', history: 'History', calibration: 'Tubing calibration', new: 'New run' };
+  const pageTitle = $derived(app.route === 'settings' ? 'Settings' : (PAGE_TITLES[app.tab] ?? 'Pump control'));
+
   // The Overview's band says it already, in full.
   const onOverview = $derived(app.route === 'pump' && app.tab === 'overview');
   $effect(() => {
@@ -381,6 +384,8 @@
   </aside>
 
   <main class="main">
+    <!-- One page title for screen readers; the tabs already say it on screen. -->
+    <h1 class="sr-only">{pageTitle}</h1>
     <div class="wrap">
       <ConnBar />
 
@@ -515,7 +520,7 @@
   .nav-item:hover { background: var(--surface-sunken); color: var(--ink); }
   .nav-item.active {
     background: color-mix(in srgb, var(--teal-700) 11%, var(--surface));
-    color: var(--teal-700); font-weight: 600;
+    color: var(--teal-ink); font-weight: 600;
   }
   /* Settings sits apart from Pump, pushed down to just above the rail foot. */
   .nav-settings { margin-top: auto; }
@@ -539,9 +544,9 @@
   .pumpstat .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
   .pumpstat.ok { color: var(--green-600); }
   .pumpstat.ok .dot { background: var(--green-500); }
-  .pumpstat.warn { color: #a2621c; }
+  .pumpstat.warn { color: var(--warn-ink); }
   .pumpstat.warn .dot { background: #d68b45; }
-  .pumpstat.bad { color: var(--danger); }
+  .pumpstat.bad { color: var(--danger-ink); }
   .pumpstat.bad .dot { background: var(--danger); }
   .pumpstat.sim .dot, .pumpstat.idle .dot { background: var(--muted); }
   .theme {
@@ -557,7 +562,7 @@
     border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
     background: color-mix(in srgb, var(--danger) 9%, var(--surface));
     border-radius: var(--radius-ctl);
-    color: var(--danger);
+    color: var(--danger-ink);
   }
   .paging-text { display: flex; flex-direction: column; gap: 2px; }
   .paging-sub { font-size: 12px; color: var(--muted); }
@@ -591,7 +596,7 @@
   }
   .tab { display: inline-flex; align-items: center; gap: 6px; }
   .tab:hover:not(.on) { color: var(--ink); }
-  .tab.on { color: var(--teal-700); font-weight: 600; }
+  .tab.on { color: var(--teal-ink); font-weight: 600; }
   .tab:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent);
     outline-offset: -2px;
@@ -658,10 +663,10 @@
   }
   .run-bar-go:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
   /* feeding normally stays quiet: white, only the picture in green */
-  .run-bar.fill { background: var(--fill-bg); border-color: var(--fill-line); color: var(--fill); }
-  .run-bar.warn { background: var(--warn-bg); border-color: var(--warn-line); color: var(--measured); }
+  .run-bar.fill { background: var(--fill-bg); border-color: var(--fill-line); color: var(--fill-ink); }
+  .run-bar.warn { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn-ink); }
   .run-bar.bad {
-    background: var(--danger-bg); color: var(--danger);
+    background: var(--danger-bg); color: var(--danger-ink);
     border-color: color-mix(in srgb, var(--danger) 35%, var(--surface));
   }
 </style>

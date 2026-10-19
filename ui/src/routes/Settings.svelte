@@ -101,7 +101,7 @@
   .item:hover { background: var(--surface-sunken); color: var(--ink); }
   .item.on {
     background: color-mix(in srgb, var(--teal-700) 11%, var(--surface));
-    color: var(--teal-700);
+    color: var(--teal-ink);
     font-weight: 600;
   }
 

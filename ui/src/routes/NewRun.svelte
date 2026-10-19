@@ -845,7 +845,7 @@
   .grow { flex: 1 1 260px; }
   .resp { flex: 0 1 240px; }
   .k { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
-  .k.bad { color: var(--danger); }
+  .k.bad { color: var(--danger-ink); }
   .center { text-align: center; }
   .linkish {
     background: none; border: none; padding: 0; font: inherit;

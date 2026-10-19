@@ -4,7 +4,7 @@
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
   import { bottleWeights } from '../lib/balance.js';
-  import { valueAt, hm, clock, when, bottleEmptyInS, refillDueInS, runState, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
+  import { valueAt, hm, clock, when, bottleEmptyInS, refillDueInS, runState, nextRefill, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
@@ -205,11 +205,14 @@
   const refillMark = $derived(
     refillInS != null ? { t: elapsed + refillInS, label: `refill ${when(now + refillInS * 1000, now)}` } : null
   );
-  // The one thing the operator has to do next, as a clock time.
+  // The one thing the operator has to do next, as a clock time. With
+  // automatic refill there is nothing to do: the band says when it refills.
   const next = $derived.by(() => {
     if (!run) return null;
     if (inHold) return { what: 'Stop the run when you are done', sub: `curve done ${hm(holdS)} ago, pump still feeding` };
-    if (cycle && !cycle.halted) return { what: 'The refill pump tops the bottle up', sub: cycleLine(cycle) };
+    const nr = nextRefill({ cycle, inS: refillInS, nowMs: now });
+    if (nr) return nr;
+    if (cycle && !cycle.halted) return { label: 'Refill', what: 'The refill pump tops the bottle up', sub: cycleLine(cycle) };
     if (dryMs != null && dryMs < endMs)
       return { what: `Refill the feed bottle before ${when(dryMs, now)}`, sub: `in about ${hm(emptyInS)}, ${num(weightG, 1)} g left` };
     if (dryMs != null) return { what: 'Nothing until the run ends', sub: `the bottle lasts past ${when(endMs, now)}` };
@@ -253,6 +256,7 @@
   });
   const gapPct = $derived(lastPt && lastPt[1] > 0 ? (100 * (lastPt[2] - lastPt[1])) / lastPt[1] : null);
   const gapMl = $derived(lastPt ? lastPt[2] - lastPt[1] : null);
+  const delivered = $derived(deliveryFigures(lastPt));
   // The bottle end to end, from the same report: start, refills, weighed out.
   // Weighed out runs on to the live weight: the report's figure at its last
   // point, plus what left the bottle since.
@@ -439,8 +443,7 @@
         <div class="band-text">
           <span class="band-word">{rs.word}</span>
           <div class="band-title">
-            {rs.title}{#if rs.tone === 'ok' && !inHold && liveValue != null},
-            <span class="nowrap">{num(liveValue, digits)} {unit}</span>{/if}
+            {rs.title}
           </div>
           <div class="band-sub">
             {#if rs.detail}{rs.detail}{:else if run}Run {run.id}, {run.name}{/if}
@@ -464,7 +467,7 @@
             <div class="what">{rs.check}</div>
             {#if rs.note}<div class="k">{rs.note}</div>{/if}
           {:else}
-            <div class="k">Next thing for you</div>
+            <div class="k">{next.label ?? 'Next thing for you'}</div>
             <div class="what">{next.what}</div>
             <div class="k">{next.sub}</div>
           {/if}
@@ -574,11 +577,13 @@
               {#if gapPct != null}
                 <div class="mid-line">
                   {#if early}
-                    <span class="mid mono-num">{Math.abs(gapMl) < 0.05 ? '' : gapMl > 0 ? '+' : '−'}{num(Math.abs(gapMl), 1)} mL</span>
-                    <span class="k">tolerance ±{NOISE_ML} mL until {MIN_ASKED_ML} mL asked</span>
+                    <span class="mid mono-num">{gapMl <= -0.05 ? '−' : '+'}{num(Math.abs(gapMl), 1)} mL</span>
+                    <span class="mid-u">vs asked</span>
+                    <span class="k gap-line">tolerance ±{NOISE_ML} mL until {MIN_ASKED_ML} mL asked</span>
                   {:else}
-                    <span class="mid mono-num">{Math.abs(gapPct) < 0.05 ? '' : gapPct > 0 ? '+' : '−'}{num(Math.abs(gapPct), 1)} %</span>
-                    <span class="k">limit ±{TOL * 100} %</span>
+                    <span class="mid mono-num">{num(delivered.deliveredPct, 1)} %</span>
+                    <span class="mid-u">delivered</span>
+                    <span class="k gap-line">{delivered.gapPct <= -0.05 ? '−' : '+'}{num(Math.abs(delivered.gapPct), 1)} % vs asked · limit ±{TOL * 100} %</span>
                   {/if}
                 </div>
                 <dl class="stats">
@@ -708,7 +713,7 @@
   /* a pictogram before the words of a button */
   .opt { display: inline-flex; align-items: center; gap: 6px; }
   /* automatic refill stopped: the button that starts it again stands out */
-  .attn { border-color: var(--danger); color: var(--danger); }
+  .attn { border-color: var(--danger); color: var(--danger-ink); }
   /* Calm persistent glow on the completed-run card: the pump is still
      holding its final speed, so the page keeps a gentle "alive" pulse. */
   .done { animation: done-glow 3.6s ease-in-out infinite alternate; }
@@ -807,7 +812,6 @@
     color: var(--muted); background: color-mix(in srgb, var(--muted) 14%, transparent);
   }
   .band-title { font-family: var(--font-title); font-size: 22px; font-weight: 600; line-height: 1.2; }
-  .band-title .nowrap { white-space: nowrap; }
   .band-sub { color: var(--muted); }
   .fillbar {
     margin-top: var(--s-3); max-width: 420px; height: 8px; border-radius: 999px; overflow: hidden;
@@ -836,22 +840,22 @@
      refilling, orange a look, red an alarm. Read from across the lab. */
   /* Feeding normally is the quiet state: white band, ink title, the green
      kept to the picture and the word. Colour is for what needs an eye. */
-  .band.ok .band-word { color: var(--green-600); background: color-mix(in srgb, var(--green-500) 14%, transparent); }
+  .band.ok .band-word { color: var(--green-ink); background: color-mix(in srgb, var(--green-500) 14%, transparent); }
   .band.fill { background: var(--fill-bg); border-color: var(--fill-line); --si-ring: var(--fill-line); }
-  .band.fill .band-title { color: var(--fill); }
-  .band.fill .band-word { color: var(--fill); background: color-mix(in srgb, var(--fill) 18%, transparent); }
+  .band.fill .band-title { color: var(--fill-ink); }
+  .band.fill .band-word { color: var(--fill-ink); background: var(--surface); }
   .band.fill .band-next { border-left-color: var(--fill-line); }
   .band.warn { background: var(--warn-bg); border-color: var(--warn-line); --si-ring: var(--warn-line); }
-  .band.warn .band-title { color: var(--measured); }
-  .band.warn .band-word { color: var(--measured); background: color-mix(in srgb, var(--measured) 18%, transparent); }
+  .band.warn .band-title { color: var(--warn-ink); }
+  .band.warn .band-word { color: var(--warn-ink); background: var(--surface); }
   .band.warn .band-next { border-left-color: var(--warn-line); }
   .band.bad {
     background: var(--danger-bg);
     border-color: color-mix(in srgb, var(--danger) 35%, var(--surface));
     --si-ring: color-mix(in srgb, var(--danger) 35%, var(--surface));
   }
-  .band.bad .band-title { color: var(--danger); }
-  .band.bad .band-word { color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, transparent); }
+  .band.bad .band-title { color: var(--danger-ink); }
+  .band.bad .band-word { color: var(--danger-ink); background: var(--surface); }
   .band.bad .band-next { border-left-color: color-mix(in srgb, var(--danger) 25%, transparent); }
   .band:not(.idle) .btn-ghost { background: var(--surface); }
 
@@ -902,9 +906,11 @@
 
   .mid-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--s-2); }
   .mid { white-space: nowrap; font-size: 30px; font-weight: 500; letter-spacing: -0.02em; line-height: 1.1; }
+  .mid-u { font-size: 16px; font-weight: 600; }
+  .gap-line { flex-basis: 100%; }
   .tag { font-size: 12.5px; font-weight: 500; color: var(--muted); }
-  .tag.ok { color: var(--green-600); }
-  .tag.bad { color: var(--danger); font-weight: 600; }
+  .tag.ok { color: var(--green-ink); }
+  .tag.bad { color: var(--danger-ink); font-weight: 600; }
   .stats {
     margin: 0; padding-top: var(--s-3); border-top: 1px solid var(--line-soft);
     display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: var(--s-3);
@@ -927,8 +933,8 @@
   .act time { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .act b { font-weight: 500; }
   .act .body { color: var(--muted); overflow-wrap: anywhere; }
-  .act.warn b { color: #a2621c; }
-  .act.error b { color: var(--danger); }
+  .act.warn b { color: var(--warn-ink); }
+  .act.error b { color: var(--danger-ink); }
   .muted { color: var(--muted); }
 
   @media (max-width: 720px) {

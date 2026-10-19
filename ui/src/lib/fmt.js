@@ -1,5 +1,10 @@
 // Small formatting helpers.
 
+/** Dates and times in English like the rest of the UI ("Mon 19 Oct,
+ *  11:04", 24 h), whatever the PC's own language: they came out as
+ *  "lun. 19 oct." on a French Windows. */
+export const LOCALE = 'en-GB';
+
 export function num(x, digits = 1) {
   if (x == null || Number.isNaN(x)) return '–';
   return Number(x).toFixed(digits);
@@ -33,7 +38,7 @@ export function shortTime(iso) {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? '–'
-    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    : d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
 }
 
 /** "4 Sep 10:04", date + time, for run stamps that can span days. */
@@ -42,7 +47,7 @@ export function stamp(iso) {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? '–'
-    : d.toLocaleString(undefined, {
+    : d.toLocaleString(LOCALE, {
         day: 'numeric',
         month: 'short',
         hour: '2-digit',
@@ -56,7 +61,7 @@ export function stampY(iso) {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? '–'
-    : d.toLocaleString(undefined, {
+    : d.toLocaleString(LOCALE, {
         day: 'numeric',
         month: 'short',
         year: 'numeric',
@@ -83,4 +88,17 @@ export const digitsFor = (cv) => (cv === 'ml_min' ? 3 : 1);
 export function vol(ml) {
   if (ml == null || Number.isNaN(ml)) return '–';
   return Math.abs(ml) >= 1000 ? `${num(ml / 1000, 3)} L` : `${num(ml, 1)} mL`;
+}
+
+/** What a run actually ran, for History: `{ ran, of }`, "49 m 22 s" of
+ *  "8 h 0 m". The planned duration alone said 8 h for a run stopped after
+ *  2 minutes. A completed run ran its whole curve, `of` is null; a running
+ *  one counts to `nowMs`. */
+export function ranFor(run, nowMs = Date.now()) {
+  const t0 = Date.parse(run.started_at);
+  const t1 = run.ended_at ? Date.parse(run.ended_at) : nowMs;
+  const ran = Number.isNaN(t0) || Number.isNaN(t1) ? null : Math.max(0, (t1 - t0) / 1000);
+  if (ran == null) return { ran: dur(run.duration_s), of: null };
+  if (run.status === 'completed') return { ran: dur(ran), of: null };
+  return { ran: dur(ran), of: `of ${dur(run.duration_s)}${run.status === 'running' ? ', so far' : ''}` };
 }

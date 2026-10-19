@@ -15,9 +15,17 @@
   --line: #e9efee;
   --line-soft: #f0f4f3;
   --ink: #12292e;
-  --muted: #64797d;
+  /* 5.0:1 on the page background (#64797d gave 3.9:1, WCAG asks 4.5:1). */
+  --muted: #56686c;
   --danger: #d64545;
   --danger-bg: #fbecec;
+  /* Text on a tinted pill or button, each at 4.5:1 or more on its tint. */
+  --danger-ink: #a32f2f;
+  --green-ink: #0b6b4e;
+  --teal-ink: #00616e;
+  --warn-ink: #9a5a12;
+  --fill-ink: #13677f;
+  --on-primary: #ffffff;
   /* Filled destructive buttons: white text stays readable on it. */
   --danger-solid: #c93a3a;
   --danger-solid-hover: #b23030;
@@ -64,6 +72,13 @@
     --muted: #a9bdbc;
     --danger: #f4756f;
     --danger-bg: #4a2b2a;
+    --danger-ink: #f88a84;
+    --green-ink: #57e3b4;
+    --teal-ink: #7fd3dd;
+    --warn-ink: #ffad42;
+    --fill-ink: #8fd8ee;
+    /* the dark theme's teal is light: dark ink on it (white gave 2.4:1) */
+    --on-primary: #0f2a2e;
     --danger-solid: #c4463f;
     --danger-solid-hover: #d4554e;
     --measured: #ffad42;
@@ -93,6 +108,13 @@
   --muted: #a9bdbc;
   --danger: #f4756f;
   --danger-bg: #4a2b2a;
+  --danger-ink: #f88a84;
+  --green-ink: #57e3b4;
+  --teal-ink: #7fd3dd;
+  --warn-ink: #ffad42;
+  --fill-ink: #8fd8ee;
+  /* the dark theme's teal is light: dark ink on it (white gave 2.4:1) */
+  --on-primary: #0f2a2e;
   --danger-solid: #c4463f;
   --danger-solid-hover: #d4554e;
   --measured: #ffad42;
@@ -141,7 +163,7 @@ button, .btn {
   transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: var(--teal-700); color: #fff; }
+.btn-primary { background: var(--teal-700); color: var(--on-primary); }
 .btn-primary:not(:disabled):hover { background: var(--teal-600); }
 .btn-ghost { background: transparent; border-color: var(--line); color: var(--ink); }
 .btn-ghost:not(:disabled):hover { background: var(--surface-sunken); }
@@ -202,7 +224,7 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
   background: color-mix(in srgb, var(--measured) 16%, var(--surface)); color: color-mix(in srgb, var(--measured) 75%, var(--ink));
 }
-.seg button.on { background: color-mix(in srgb, var(--teal-700) 12%, var(--surface)); color: var(--teal-700); font-weight: 600; }
+.seg button.on { background: color-mix(in srgb, var(--teal-700) 12%, var(--surface)); color: var(--teal-ink); font-weight: 600; }
 
 /* card */
 .card {
@@ -225,12 +247,14 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   padding: 2px 8px; border-radius: 6px;
   background: var(--surface-sunken); color: var(--muted);
 }
-.pill.running { background: color-mix(in srgb, var(--green-500) 16%, var(--surface)); color: var(--green-600); }
-.pill.completed { background: color-mix(in srgb, var(--teal-400) 18%, var(--surface)); color: var(--teal-700); }
-.pill.stopped, .pill.aborted { background: var(--danger-bg); color: var(--danger); }
+.pill.running { background: color-mix(in srgb, var(--green-500) 16%, var(--surface)); color: var(--green-ink); }
+.pill.completed { background: color-mix(in srgb, var(--teal-400) 18%, var(--surface)); color: var(--teal-ink); }
+/* Stopping is a normal end: neutral. Red is for a run cut short (aborted). */
+.pill.stopped { background: var(--surface-sunken); color: var(--muted); }
+.pill.aborted { background: var(--danger-bg); color: var(--danger-ink); }
 /* Journal levels (event.level): warnings amber, errors red, info grey. */
-.pill.warn { background: color-mix(in srgb, #d68b45 16%, var(--surface)); color: #a2621c; }
-.pill.error { background: var(--danger-bg); color: var(--danger); }
+.pill.warn { background: color-mix(in srgb, #d68b45 16%, var(--surface)); color: var(--warn-ink); }
+.pill.error { background: var(--danger-bg); color: var(--danger-ink); }
 
 pre {
   font-family: var(--mono); font-size: 12px;
@@ -240,7 +264,7 @@ pre {
 }
 
 .err {
-  color: var(--danger);
+  color: var(--danger-ink);
   background: var(--danger-bg);
   border-radius: var(--radius-ctl);
   padding: var(--s-2) var(--s-3);
@@ -311,3 +335,9 @@ pre {
 .bore-c5 { --c-bg: var(--b5-bg); --c-line: var(--b5-line); --c-ink: var(--b5-ink); }
 .bore-c6 { --c-bg: var(--b6-bg); --c-line: var(--b6-line); --c-ink: var(--b6-ink); }
 .bore-c7 { --c-bg: var(--b7-bg); --c-line: var(--b7-line); --c-ink: var(--b7-ink); }
+
+/* Read by screen readers, not drawn. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}

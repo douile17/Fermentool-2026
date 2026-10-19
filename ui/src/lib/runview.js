@@ -1,3 +1,5 @@
+import { LOCALE } from './fmt.js';
+
 // Delivery tolerance: within ±2 % of what was asked, or ±1 mL while that is
 // less (at the start ±2 % is a fraction of a mL, inside the balance's own
 // noise). Under 50 mL asked the gap reads in mL rather than in %.
@@ -48,13 +50,13 @@ export function clock(seconds) {
 export function when(ms, nowMs = Date.now(), withDate = false) {
   const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return '–';
-  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const time = d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
   if (withDate) {
-    const day = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    const day = d.toLocaleDateString(LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
     return `${day}, ${time}`;
   }
   const sameDay = new Date(nowMs).toDateString() === d.toDateString();
-  return sameDay ? time : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`;
+  return sameDay ? time : `${d.toLocaleDateString(LOCALE, { weekday: 'short' })} ${time}`;
 }
 
 /** Seconds until a feed bottle of `weightG` runs dry, or null when it cannot
@@ -269,4 +271,31 @@ export function stateTitle(rs, value = null) {
   else if (rs.progress) what = `${rs.word} ${Math.round(rs.progress.frac * 100)} %`;
   else if (rs.tone === 'fill') what = rs.word;
   return `${what} · Fermentool`;
+}
+
+/** "in about 35 min" under an hour, "in 2 h 05" past it. */
+export function inAbout(seconds) {
+  const s = Math.max(0, seconds || 0);
+  return s < 3600 ? `in about ${Math.max(1, Math.round(s / 60))} min` : `in ${hm(s)}`;
+}
+
+/** The band's "Next refill" for a run with automatic refill, idle between
+ *  fills: when the bottle reaches the refill level (`inS`, null when the
+ *  balance cannot tell yet) and the levels it refills between. Null while a
+ *  fill is under way or the cycle is stopped: the band says so itself. */
+export function nextRefill({ cycle, inS, nowMs }) {
+  if (!cycle || cycle.halted || cycle.phase !== 'idle') return null;
+  const levels = `at ${kgOf(cycle.low_g)}, back to ${kgOf(cycle.high_g)}`;
+  if (inS == null) return { label: 'Next refill', what: `under ${kgOf(cycle.low_g)}`, sub: `back to ${kgOf(cycle.high_g)}` };
+  return { label: 'Next refill', what: `around ${when(nowMs + inS * 1000, nowMs)}`, sub: `${inAbout(inS)}, ${levels}` };
+}
+const kgOf = (g) => `${(g / 1000).toFixed(2)} kg`;
+
+/** The Delivery panel's figures from the last tracking point
+ *  `[t, asked_ml, weighed_ml]`: the share delivered and the gap, both in %.
+ *  "0.0 %" alone read as nothing delivered; "100.0 % delivered" cannot. */
+export function deliveryFigures(point) {
+  if (!point || !(point[1] > 0)) return null;
+  const pct = (100 * point[2]) / point[1];
+  return { deliveredPct: pct, gapPct: pct - 100 };
 }

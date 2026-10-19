@@ -1,5 +1,6 @@
 <script>
   import { get } from '../../lib/api.js';
+  import { LOCALE } from '../../lib/fmt.js';
   import SettingsCard from './SettingsCard.svelte';
 
   let { group } = $props();
@@ -88,8 +89,8 @@
       <dd>{about.license}</dd>
 
       <dt>Daemon running for</dt>
-      <dd title={new Date(about.started_at_ms).toLocaleString()}>
-        {since(about.started_at_ms)}, since {new Date(about.started_at_ms).toLocaleString()}
+      <dd title={new Date(about.started_at_ms).toLocaleString(LOCALE)}>
+        {since(about.started_at_ms)}, since {new Date(about.started_at_ms).toLocaleString(LOCALE)}
       </dd>
     </dl>
   {/if}
@@ -125,7 +126,7 @@
   dt { color: var(--muted); }
   dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
   .num { font-variant-numeric: tabular-nums; font-weight: 600; }
-  .warn { color: var(--danger); }
+  .warn { color: var(--danger-ink); }
   .path { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
   code { font-size: 12px; overflow-wrap: anywhere; }
   .copy { padding: 2px var(--s-3); font-size: 12px; }
