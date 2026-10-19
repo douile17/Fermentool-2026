@@ -10,6 +10,7 @@
   import PumpHead from '../components/PumpHead.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
   import Icon from '../components/Icon.svelte';
+  import StateIcon from '../components/StateIcon.svelte';
   import { cycleLine } from '../lib/refill.js';
 
   // Overview follows feeding cycles only: a calibration burst is watched
@@ -435,20 +436,26 @@
     <!-- 1. Is everything all right, and what do I do next? -->
     <section class="band {rs.tone}" role={rs.tone === 'bad' ? 'alert' : undefined} aria-label="Run state">
       <div class="band-state">
-        {#if rs.tone === 'bad' || rs.tone === 'warn'}
-          <svg class="tri" viewBox="0 0 28 28" aria-hidden="true">
-            <path d="M14 3 L26 24 H2 Z" />
-            <rect x="12.8" y="10" width="2.4" height="8" rx="1.2" />
-            <circle cx="14" cy="20.6" r="1.4" />
-          </svg>
-        {:else}
-          <span class="state-dot" aria-hidden="true"></span>
-        {/if}
+        <StateIcon icon={rs.icon} moving={app.connected} />
         <div class="band-text">
-          <div class="band-title">{rs.title}</div>
+          <span class="band-word">{rs.word}</span>
+          <div class="band-title">
+            {rs.title}{#if rs.tone === 'ok' && !inHold && liveValue != null},
+            <span class="nowrap">{num(liveValue, digits)} {unit}</span>{/if}
+          </div>
           <div class="band-sub">
             {#if rs.detail}{rs.detail}{:else if run}Run {run.id}, {run.name}{/if}
           </div>
+          {#if rs.progress}
+            {@const p = rs.progress}
+            <div class="fillbar" role="progressbar" aria-label="Bottle refill" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(p.frac * 100)}>
+              <span style="width:{(p.frac * 100).toFixed(1)}%"></span>
+            </div>
+            <div class="fillcap mono">
+              <span>{Math.round(p.weightG)} g → {Math.round(p.toG)} g</span>
+              <span>{Math.round(p.frac * 100)} %{p.leftMin != null ? ` · about ${Math.max(1, Math.round(p.leftMin))} min` : ''}</span>
+            </div>
+          {/if}
         </div>
       </div>
       {#if rs.check || next}
@@ -551,6 +558,7 @@
             {unit}
             {digits}
             refill={refillMark}
+            bands={report?.estimated ?? []}
           />
         </section>
 
@@ -793,20 +801,32 @@
     padding: var(--s-5) var(--s-5);
     background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
   }
-  .band-state { display: flex; align-items: center; gap: var(--s-3); flex: 1 1 280px; min-width: 0; }
-  .state-dot {
-    flex: none; width: 14px; height: 14px; border-radius: 50%;
-    background: var(--green-500);
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--green-500) 16%, transparent);
+  .band-state { display: flex; align-items: center; gap: var(--s-4); flex: 1 1 300px; min-width: 0; }
+  .band-text { min-width: 0; flex: 1; }
+  .band-word {
+    display: inline-block; margin-bottom: 4px; padding: 2px 8px; border-radius: 999px;
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); background: color-mix(in srgb, var(--muted) 14%, transparent);
   }
-  .band.info .state-dot { background: var(--teal-700); box-shadow: 0 0 0 5px color-mix(in srgb, var(--teal-700) 14%, transparent); }
-  .band.idle .state-dot { background: var(--muted); box-shadow: 0 0 0 5px color-mix(in srgb, var(--muted) 16%, transparent); }
-  .tri { flex: none; width: 28px; height: 28px; }
-  .tri path { fill: var(--danger-solid); }
-  .tri rect, .tri circle { fill: #fff; }
-  .band.warn .tri path { fill: var(--measured); }
-  .band-title { font-size: 19px; font-weight: 600; line-height: 1.25; }
+  .band-title { font-family: var(--font-title); font-size: 22px; font-weight: 600; line-height: 1.2; }
+  .band-title .nowrap { white-space: nowrap; }
   .band-sub { color: var(--muted); }
+  .fillbar {
+    margin-top: var(--s-3); max-width: 420px; height: 8px; border-radius: 999px; overflow: hidden;
+    background: color-mix(in srgb, var(--fill) 16%, transparent);
+  }
+  .fillbar span {
+    display: block; height: 100%; border-radius: 999px; background: var(--fill);
+    background-image: linear-gradient(90deg, transparent 0 40%, rgba(255, 255, 255, 0.35) 50%, transparent 60% 100%);
+    background-size: 200% 100%; animation: sheen 2.4s linear infinite;
+    transition: width 0.6s ease;
+  }
+  @keyframes sheen { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+  @media (prefers-reduced-motion: reduce) { .fillbar span { animation: none; transition: none; } }
+  .fillcap {
+    max-width: 420px; display: flex; justify-content: space-between; gap: var(--s-3);
+    margin-top: 4px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums;
+  }
   .band-next {
     flex: 1 1 260px; min-width: 0;
     padding-left: var(--s-4); border-left: 2px solid var(--line);
@@ -814,15 +834,29 @@
   .band-next .what { font-weight: 600; font-size: 15px; }
   .band-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; }
   .band-actions button { min-height: 40px; }
-  /* An alarm: the band, and only the band, turns red. */
+  /* The band takes the state's colour: green feeding, blue refilling,
+     orange a look, red an alarm. Read from across the lab. */
+  .band.ok { background: var(--ok-bg); border-color: var(--ok-line); --si-ring: var(--ok-line); }
+  .band.ok .band-title { color: var(--green-600); }
+  .band.ok .band-word { color: var(--green-600); background: color-mix(in srgb, var(--green-500) 18%, transparent); }
+  .band.ok .band-next { border-left-color: var(--ok-line); }
+  .band.fill { background: var(--fill-bg); border-color: var(--fill-line); --si-ring: var(--fill-line); }
+  .band.fill .band-title { color: var(--fill); }
+  .band.fill .band-word { color: var(--fill); background: color-mix(in srgb, var(--fill) 18%, transparent); }
+  .band.fill .band-next { border-left-color: var(--fill-line); }
+  .band.warn { background: var(--warn-bg); border-color: var(--warn-line); --si-ring: var(--warn-line); }
+  .band.warn .band-title { color: var(--measured); }
+  .band.warn .band-word { color: var(--measured); background: color-mix(in srgb, var(--measured) 18%, transparent); }
+  .band.warn .band-next { border-left-color: var(--warn-line); }
   .band.bad {
     background: var(--danger-bg);
     border-color: color-mix(in srgb, var(--danger) 35%, var(--surface));
+    --si-ring: color-mix(in srgb, var(--danger) 35%, var(--surface));
   }
   .band.bad .band-title { color: var(--danger); }
+  .band.bad .band-word { color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, transparent); }
   .band.bad .band-next { border-left-color: color-mix(in srgb, var(--danger) 25%, transparent); }
-  .band.bad .btn-ghost { background: var(--surface); border-color: color-mix(in srgb, var(--danger) 25%, var(--surface)); }
-  .band.warn { border-color: color-mix(in srgb, var(--measured) 45%, var(--surface)); }
+  .band:not(.idle) .btn-ghost { background: var(--surface); }
 
   .row { display: flex; flex-wrap: wrap; gap: var(--s-4); align-items: stretch; }
   .panel {

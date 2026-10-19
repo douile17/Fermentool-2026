@@ -121,87 +121,152 @@ export function refillDueInS({ cycle, weightG, ...flow }) {
 }
 
 /** The run's state in one line, worst first, with what to check when it
- *  needs someone. tone: 'ok' | 'info' | 'warn' | 'bad' | 'idle'. */
+ *  needs someone. tone: 'ok' (feeding) | 'fill' (the bottle being refilled)
+ *  | 'warn' | 'bad' | 'idle'; the band takes its colour. `word` is the
+ *  state in one word (the pill), `icon` the large picture beside it:
+ *  'pump' | 'fill' | 'full' | 'bottle-warn' | 'alarm' | 'warn' | 'idle'. */
 export function runState(status, connected, inHold) {
   const s = status ?? {};
   const c = s.trim_c != null ? `×${s.trim_c.toFixed(3)}` : 'its last value';
   const trimmed = !!s.active?.gravimetric_trim;
+  const cycle = s.refill?.cycle ?? null;
+  const bad = (o) => ({ tone: 'bad', word: 'Alarm', icon: 'alarm', ...o });
+  const warn = (o) => ({ tone: 'warn', word: 'Check', icon: 'warn', ...o });
   if (!connected)
     return {
       tone: 'idle',
+      word: 'No news',
+      icon: 'idle',
       title: 'No news from the daemon',
       detail: 'What this page shows is the last state it reported.',
       check: 'If it does not come back, start Fermentool again: the run resumes where its curve is.',
     };
   if (s.stop_pending)
-    return {
-      tone: 'bad',
+    return bad({
       title: 'Stop not confirmed',
       detail: 'The Stop did not reach the pump: it may still be running.',
       check: 'Fermentool sends it again as soon as the pump answers. Check the pump, stop it by hand if needed.',
-    };
+    });
   if (s.serial_ok === false)
-    return {
-      tone: 'bad',
+    return bad({
       title: 'Pump not connected',
       detail: 'The pump keeps its last setpoint; the curve is not followed until it answers.',
       check: 'Check power, cable, MODBUS address and baud rate, then Connect.',
-    };
+    });
+  if (cycle?.phase === 'stopping')
+    return bad({
+      title: 'Refill pump did not stop',
+      detail: 'The refill pump did not acknowledge Stop: it may still be filling the bottle.',
+      check: 'Stop the refill pump by hand. Fermentool keeps sending Stop.',
+    });
   if (trimmed && s.tracking?.wrong_side)
-    return {
-      tone: 'bad',
+    return bad({
       title: 'Balance on the other side',
       detail: 'The weight moves the wrong way for where Settings says the balance is.',
       check: 'This run keeps its pump setpoint, uncorrected. Fix "Balance weighs" in Settings for the next run.',
-    };
+    });
   if (trimmed && s.tracking?.alarm === 'feed_stopped')
-    return {
-      tone: 'bad',
+    return bad({
       title: 'Feed stopped',
       detail: 'The pump turns, but the bottle weight has not moved for 3 minutes.',
       check: 'Bottle empty? Line pinched, unplugged, or full of air? Tube seated in the head?',
       note: `Correction held at ${c}. Feed missed meanwhile is not caught up.`,
-    };
+    });
   if (trimmed && (s.tracking?.alarm === 'saturated' || (s.scale_connected !== false && s.scale_ok === false)))
-    return {
-      tone: 'bad',
+    return bad({
       title: 'Correction out of bounds',
       detail: 'For 5 minutes the pump has delivered further from its setpoint than the correction limit can make up.',
       check: 'Check the tube in the head, leaks, the bottle. A wider limit (Settings, Balance) also lifts it.',
       note: `Correction held at ${c}; it resumes by itself once the pump is back within bounds.`,
-    };
+    });
   if (trimmed && s.scale_connected === false)
-    return {
-      tone: 'warn',
+    return warn({
       title: 'Balance not answering',
       detail: 'The pump keeps following the curve, without correction.',
       check: 'Check the balance cable; Fermentool keeps retrying.',
-    };
-  if (s.pump_confirmed === false)
+    });
+  if (cycle?.halted)
     return {
       tone: 'warn',
+      word: 'Refill stopped',
+      icon: 'bottle-warn',
+      title: 'The bottle is not being refilled',
+      detail: 'Automatic refill is stopped, by an alarm or by Stop refill. The feed goes on.',
+      check: 'Reservoir empty, line off or pinched, refill pump not turning? Then Refill now starts it again.',
+    };
+  if (s.pump_confirmed === false)
+    return warn({
       title: 'Pump not tracking the setpoint',
       detail: 'Writes get through but the pump reports a different value.',
       check: 'Check the pump.',
-    };
+    });
   if (s.journal_ok === false)
-    return {
-      tone: 'warn',
+    return warn({
       title: 'Journal stalled',
       detail: 'The pump runs correctly, but the run history is not being saved.',
       check: 'Check free disk space.',
-    };
-  if (trimmed && (s.scale_state === 'refill_pending' || s.scale_state === 'refill_settling'))
+    });
+  if (cycle?.phase === 'filling')
     return {
-      tone: 'info',
+      tone: 'fill',
+      word: 'Refilling',
+      icon: 'fill',
+      title: 'Refill pump filling the bottle',
+      detail: 'The feed goes on; the correction is held until the weight is still.',
+      progress: refillProgress(cycle),
+    };
+  if (cycle?.phase === 'settling' || (trimmed && s.scale_state === 'refill_settling'))
+    return {
+      tone: 'fill',
+      word: 'Settling',
+      icon: 'full',
+      title: 'Bottle full, waiting for the weight to settle',
+      detail: 'The correction resumes once the weight holds still.',
+    };
+  if (trimmed && s.scale_state === 'refill_pending')
+    return {
+      tone: 'fill',
+      word: 'Refilling',
+      icon: 'fill',
       title: 'Refilling the bottle',
       detail: 'Correction held while the bottle is refilled; it resumes once the weight is still.',
     };
   if (inHold)
     return {
       tone: 'ok',
+      word: 'Holding',
+      icon: 'pump',
       title: 'Curve done, holding its end value',
       detail: 'Still regulated and recorded. Stopping now records the run as completed.',
     };
-  return { tone: 'ok', title: 'Running normally' };
+  return { tone: 'ok', word: 'Feeding', icon: 'pump', title: 'Running normally' };
+}
+
+/** How far a refill pump's fill has got, from the refill level `low_g` to
+ *  the full bottle `high_g`: `{ weightG, toG, frac, leftMin }`, or null
+ *  when nothing is filling. `leftMin` takes a gram for a mL (water-like
+ *  feed) and leaves out what the feed pump draws meanwhile: "about". */
+export function refillProgress(cycle) {
+  if (cycle?.phase !== 'filling' || cycle.weight_g == null) return null;
+  const span = cycle.high_g - cycle.low_g;
+  const frac = span > 0 ? Math.max(0, Math.min(1, (cycle.weight_g - cycle.low_g) / span)) : 0;
+  const left = Math.max(0, cycle.high_g - cycle.weight_g);
+  return {
+    weightG: cycle.weight_g,
+    toG: cycle.high_g,
+    frac,
+    leftMin: cycle.flow_ml_min > 0 ? left / cycle.flow_ml_min : null,
+  };
+}
+
+/** The window's title for a run in state `rs`: the state first, so it
+ *  reads in the taskbar or among other tabs ("Refilling 42 % · Fermentool").
+ *  `value` is what the pump is set to, already formatted with its unit. */
+export function stateTitle(rs, value = null) {
+  if (!rs || rs.tone === 'idle') return 'Fermentool';
+  let what = rs.title;
+  if (rs.tone === 'ok') what = value ? `${rs.word} ${value}` : rs.word;
+  else if (rs.progress) what = `${rs.word} ${Math.round(rs.progress.frac * 100)} %`;
+  else if (rs.tone === 'fill') what = rs.word;
+  return `${what} · Fermentool`;
 }

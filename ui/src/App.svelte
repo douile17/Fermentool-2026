@@ -14,6 +14,9 @@
   import FinishModal from './components/FinishModal.svelte';
   import { linkState } from './lib/link.js';
   import { refillView } from './lib/refill.js';
+  import { runState, stateTitle } from './lib/runview.js';
+  import { num, unitFor, digitsFor } from './lib/fmt.js';
+  import StateIcon from './components/StateIcon.svelte';
 
   const pumpLink = $derived(linkState(app.status, app.connected));
 
@@ -95,6 +98,43 @@
   });
 
   const refillLine = $derived(refillView(app.status?.refill));
+
+  // The feeding cycle's state, seen from every page: a pill under Pump
+  // control, and the window's title and icon (the taskbar, other tabs).
+  // A calibration burst is not a cycle: Tubing calibration follows it.
+  const cycleRun = $derived(
+    app.status?.active && app.status.active.kind !== 'calibration' ? app.status.active : null
+  );
+  const runRs = $derived(cycleRun ? runState(app.status, app.connected, !!cycleRun.curve_done) : null);
+  const runValue = $derived(
+    cycleRun?.last_target != null
+      ? `${num(cycleRun.last_target, digitsFor(cycleRun.control_var))} ${unitFor(cycleRun.control_var)}`
+      : null
+  );
+  const runPill = $derived.by(() => {
+    if (!runRs) return null;
+    const p = runRs.progress;
+    if (p) return { label: `${runRs.word} ${Math.round(p.frac * 100)} %`, sub: `${Math.round(p.weightG)} → ${Math.round(p.toG)} g` };
+    if (runRs.tone === 'ok') return { label: runRs.word, sub: runValue ?? '' };
+    return { label: runRs.word, sub: runRs.title };
+  });
+  $effect(() => {
+    document.title = stateTitle(runRs, runValue);
+  });
+  // The tab's icon in the state's colour; the usual one with no cycle.
+  const FAVICON_FILL = { ok: '#10a074', fill: '#1f8fb0', warn: '#e07800', bad: '#d64545' };
+  $effect(() => {
+    const link = document.querySelector('link[rel="icon"]');
+    if (!link) return;
+    const c = runRs ? FAVICON_FILL[runRs.tone] : null;
+    if (!c) {
+      link.setAttribute('href', '/favicon.svg');
+      return;
+    }
+    const text = runRs.tone === 'bad' ? '!' : 'Ft';
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect x="28" y="28" width="456" height="456" rx="48" fill="${c}"/><text x="${text === '!' ? 256 : 242}" y="370" font-family="Helvetica, Arial, sans-serif" font-size="320" font-weight="700" fill="#fff" text-anchor="middle" letter-spacing="-12">${text}</text></svg>`;
+    link.setAttribute('href', `data:image/svg+xml,${encodeURIComponent(svg)}`);
+  });
 
   $effect(() => {
     if (running && app.tab === 'new') app.tab = 'overview';
@@ -286,6 +326,13 @@
       >
         <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} solid /></span>Pump control
       </button>
+      {#if runPill}
+        <button class="run-pill {runRs.tone}" title={runRs.title}
+          onclick={() => go(() => { app.route = 'pump'; app.tab = 'overview'; })}>
+          <StateIcon icon={runRs.icon} size={22} ring={false} moving={app.connected} />
+          <span class="run-pill-text">{runPill.label}<small>{runPill.sub}</small></span>
+        </button>
+      {/if}
     </nav>
 
     <button
@@ -432,6 +479,24 @@
   .word { font-weight: 600; letter-spacing: -0.01em; }
 
   nav { display: flex; flex-direction: column; gap: 1px; }
+  /* The run's state, from every page: its colour, picture and word. */
+  .run-pill {
+    display: flex; align-items: center; gap: var(--s-2);
+    margin-top: var(--s-2); padding: var(--s-2) var(--s-3);
+    border-radius: 10px; border: none; width: 100%; cursor: pointer; text-align: left;
+    font-family: var(--font-title); font-size: 15px; font-weight: 600; line-height: 1.2;
+    background: var(--surface-sunken); color: var(--ink);
+  }
+  .run-pill-text { min-width: 0; display: flex; flex-direction: column; }
+  .run-pill small {
+    font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .run-pill.ok { background: var(--ok-bg); color: var(--green-600); }
+  .run-pill.fill { background: var(--fill-bg); color: var(--fill); }
+  .run-pill.warn { background: var(--warn-bg); color: var(--measured); }
+  .run-pill.bad { background: var(--danger-bg); color: var(--danger); }
+  .run-pill:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
   .nav-item {
     display: flex; align-items: center; gap: var(--s-3);
     padding: var(--s-2) var(--s-3);
@@ -579,6 +644,7 @@
     .brand .word { display: none; }
     nav { flex-direction: row; }
     .nav-item { width: auto; white-space: nowrap; }
+    .run-pill { width: auto; margin-top: 0; }
     .nav-settings { margin-top: 0; }
     .rail-foot {
       margin-top: 0; padding: 0;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { flowWindowS, refillDueInS, weighedFlow } from './runview.js';
+import { flowWindowS, refillDueInS, refillProgress, runState, stateTitle, weighedFlow } from './runview.js';
 
 describe('weighedFlow', () => {
   // Run 184's curve: 13 -> 10 mL/min over 1 h, a point every 2 s.
@@ -63,5 +63,53 @@ describe('refillDueInS', () => {
     expect(refillDueInS({ cycle: { ...cycle, phase: 'filling' }, weightG: 4600, ...flow })).toBeNull();
     expect(refillDueInS({ cycle, weightG: 3990, ...flow })).toBeNull();
     expect(refillDueInS({ cycle, weightG: null, ...flow })).toBeNull();
+  });
+});
+
+describe('runState', () => {
+  const run = { active: { gravimetric_trim: true, auto_refill: true }, scale_state: 'normal', scale_ok: true };
+  const cycle = (o) => ({ refill: { cycle: { phase: 'idle', halted: false, low_g: 3063, high_g: 5063, weight_g: 4000, flow_ml_min: 300, ...o } } });
+
+  it('tells feeding from refilling at a glance: colour, word and picture differ', () => {
+    const feeding = runState({ ...run, ...cycle() }, true, false);
+    const filling = runState({ ...run, ...cycle({ phase: 'filling', weight_g: 3903 }) }, true, false);
+    expect(feeding).toMatchObject({ tone: 'ok', word: 'Feeding', icon: 'pump' });
+    expect(filling).toMatchObject({ tone: 'fill', word: 'Refilling', icon: 'fill' });
+  });
+  it('shows a full bottle settling with its own picture', () => {
+    expect(runState({ ...run, ...cycle({ phase: 'settling' }) }, true, false)).toMatchObject({ tone: 'fill', word: 'Settling', icon: 'full' });
+    expect(runState({ ...run, scale_state: 'refill_settling' }, true, false).icon).toBe('full');
+  });
+  it('a stopped automatic refill needs a look (run 186: the refill pump gained 2 g of 146)', () => {
+    expect(runState({ ...run, ...cycle({ halted: true }) }, true, false)).toMatchObject({ tone: 'warn', word: 'Refill stopped', icon: 'bottle-warn' });
+  });
+  it('an alarm still wins over a refill', () => {
+    const s = { ...run, ...cycle({ phase: 'filling' }), tracking: { alarm: 'feed_stopped' } };
+    expect(runState(s, true, false)).toMatchObject({ tone: 'bad', word: 'Alarm', title: 'Feed stopped' });
+  });
+  it('a silent daemon reads as no news, whatever it said last', () => {
+    expect(runState({ ...run, ...cycle({ phase: 'filling' }) }, false, false).tone).toBe('idle');
+  });
+});
+
+describe('refillProgress', () => {
+  it('goes from the refill level to the full bottle, with the time left at the refill flow', () => {
+    const p = refillProgress({ phase: 'filling', low_g: 3063, high_g: 5063, weight_g: 3903, flow_ml_min: 290 });
+    expect(p.frac).toBeCloseTo(0.42, 2);
+    expect(p.leftMin).toBeCloseTo(4, 0);
+    expect(p.toG).toBe(5063);
+  });
+  it('is nothing when no fill is under way, and stays in 0..1 for a Refill now above the level', () => {
+    expect(refillProgress({ phase: 'idle', low_g: 0, high_g: 1, weight_g: 0.5 })).toBeNull();
+    expect(refillProgress({ phase: 'filling', low_g: 3063, high_g: 5063, weight_g: 2580, flow_ml_min: 0 })).toMatchObject({ frac: 0, leftMin: null });
+  });
+});
+
+describe('stateTitle', () => {
+  it('puts the state first in the window title', () => {
+    expect(stateTitle({ tone: 'ok', word: 'Feeding', title: 'Running normally' }, '8.33 ml/min')).toBe('Feeding 8.33 ml/min · Fermentool');
+    expect(stateTitle({ tone: 'fill', word: 'Refilling', progress: { frac: 0.42 } })).toBe('Refilling 42 % · Fermentool');
+    expect(stateTitle({ tone: 'bad', word: 'Alarm', title: 'Feed stopped' })).toBe('Feed stopped · Fermentool');
+    expect(stateTitle(null)).toBe('Fermentool');
   });
 });

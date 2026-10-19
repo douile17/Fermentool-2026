@@ -16,6 +16,7 @@
    *   actualWidth?: number,
    *   markers?: { t: number, label: string }[],
    *   refill?: { t: number, label: string } | null,
+   *   bands?: [number, number][],
    * }}
    */
   let {
@@ -35,6 +36,9 @@
     markers = [],
     // When the next automatic refill should start: its own line, labelled.
     refill = null,
+    // Stretches of run time shaded behind the curves: the bottle being
+    // refilled (the tracking report's estimated spans), `[from_s, to_s]`.
+    bands = [],
   } = $props();
 
   // Two charts can share a page (a run's curve and its weighed feed): each
@@ -95,6 +99,16 @@
       const clash = labels && labels.sx < 80 && Math.abs(ly - labels.sy) < 12;
       return { gy, ly, text: clash ? null : num(v, tickDigits) };
     })
+  );
+
+  // At least 2 px wide, so a short refill still shows.
+  const bandRects = $derived(
+    (bands ?? [])
+      .filter(([a, b]) => b > a && a < dspan)
+      .map(([a, b]) => {
+        const x0 = x(Math.max(0, a));
+        return { x: x0, w: Math.max(2, x(Math.min(b, dspan)) - x0) };
+      })
   );
 
   const line = $derived(planned.map((p, i) => `${i ? 'L' : 'M'}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' '));
@@ -199,6 +213,10 @@
       {/if}
     {/each}
 
+    {#each bandRects as b}
+      <rect x={b.x} y={padT} width={b.w} height={H - padT - padB} class="band" />
+    {/each}
+
     {#if area}
       <path d={area} fill="url(#{fillId})" />
       <path d={line} fill="none" stroke="var(--teal-400)" stroke-width="2.25" />
@@ -258,6 +276,7 @@
   .tick { font-size: 9.5px; opacity: 0.8; }
   .now-vol { fill: var(--ink); font-weight: 600; }
   .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
+  .band { fill: var(--fill); fill-opacity: 0.16; }
   .refill { stroke: var(--teal-600); stroke-width: 1.5; stroke-dasharray: 6 4; }
   .refill-l { fill: var(--teal-600); font-weight: 600; }
   .badge { fill: var(--surface); stroke: var(--ink); stroke-opacity: 0.55; stroke-width: 1; }

@@ -17,6 +17,9 @@ import '@fontsource/ibm-plex-mono/latin-500.css';
 import '@fontsource/ibm-plex-mono/latin-ext-500.css';
 import '@fontsource/ibm-plex-mono/latin-600.css';
 import '@fontsource/ibm-plex-mono/latin-ext-600.css';
+// Barlow, bundled too: the run state's titles only (Overview band, sidebar).
+import '@fontsource/barlow/latin-600.css';
+import '@fontsource/barlow/latin-ext-600.css';
 import './app.css';
 
 export default mount(App, { target: document.getElementById('app') });

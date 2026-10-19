@@ -443,6 +443,7 @@
         durationS={sel.run.duration_s}
         unit={unitFor(sel.run.control_var)}
         digits={digitsFor(sel.run.control_var)}
+        bands={sel.report?.estimated ?? []}
       />
       <div class="legend">
         <span><i class="sw planned"></i>Requested</span>
@@ -450,6 +451,9 @@
           <span title="Weighed by the balance, averaged over {dur(flowWindow)}; estimated while the bottle was refilled"><i class="sw actual"></i>Delivered, weighed ({dur(flowWindow)} average)</span>
         {:else}
           <span title="No balance on this run: what the pump was told, not what it delivered"><i class="sw actual"></i>Sent to the pump</span>
+        {/if}
+        {#if sel.report?.estimated?.length}
+          <span title="The bottle was refilled or touched: the balance could not weigh the feed, the daemon estimated it"><i class="sw refilled"></i>Bottle refilled</span>
         {/if}
       </div>
       <div class="pv-cap mono">
@@ -609,6 +613,7 @@
   .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
   .sw.planned { background: var(--teal-400); }
   .sw.actual { background: var(--green-500); }
+  .sw.refilled { height: 10px; border-radius: 3px; background: color-mix(in srgb, var(--fill) 35%, transparent); }
 
   .pv-cap {
     font-size: 13px;
