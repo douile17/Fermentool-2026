@@ -32,3 +32,7 @@ Thumbs.db
 
 # Agent-managed git worktrees (isolated implementation workspaces)
 /.worktrees/
+
+# Claude Code skills installed locally (tooling, not part of Fermentool)
+.claude/skills/
+skills-lock.json
