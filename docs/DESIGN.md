@@ -1,69 +1,122 @@
 # Fermentool, design language
 
-Goal: a **modern lab-instrument** UI that people *want* to leave running for days,
-calm, white-forward, legible at a glance from across the bench, honest about state.
+The design direction, settled with the user over the 2026-10-19/20 redesign.
+**Read this before any UI change**, and follow it rather than re-proposing what
+is decided here. Tokens live in [`ui/src/app.css`](../ui/src/app.css).
 
-## Palette
+Goal: a **modern lab instrument** people leave running for days. Calm,
+white-forward, read at a glance from across the bench, honest about state.
 
-| Token | Hex | Role |
+## 1. How a UI change is made
+
+1. **Mockup first, on a separate page** (an artifact), never straight into
+   `ui/`. Iterate on it with the user.
+2. Implement in the app only when the user says so ("mets en place", "on part
+   là-dessus", "go").
+3. Keep the navigation: rail with Pump control (Overview / History / Tubing
+   calibration tabs) and Settings (gear), the light/dark toggle.
+4. Verify on a **local copy** (`vite` dev or `vite preview` on the built
+   bundle) with simulated states injected into `app.status`, never by acting
+   on the real pump: a run may be live.
+5. Done means `npm run check` clean, `npm test`, `npm run build`, deployed
+   when no run is active (see `CLAUDE.md`), `npm run smoke`.
+
+## 2. The governing rule: colour only when it needs an eye
+
+Normal operation is **quiet**. A colour, a tint, a moving thing must mean
+"look here". Green everywhere attracted the eye for nothing and was removed.
+
+| State | Tone | Band / bar | Title, word ink | Picture (`StateIcon`) |
+|---|---|---|---|---|
+| Feeding normally | `ok` | **white** (plain panel) | `--ink`, word `--green-ink` | pump head, rotor turning the run's real way (cw/ccw) |
+| Holding (curve done) | `ok` | white | as above | pump head |
+| Refilling | `fill` | `--fill-bg` blue | `--fill-ink` | bottle filling (level rises, bubbles) |
+| Settling (bottle full) | `fill` | blue | `--fill-ink` | full bottle, bubbles only |
+| Refill stopped / not filling | `warn` | `--warn-bg` orange | `--warn-ink` | bottle with "!" |
+| Alarm | `bad` | `--danger-bg` red | `--danger-ink` | equilateral triangle, centred on its corners |
+| No news from the daemon | `idle` | white | muted | grey dot, frozen |
+
+- The state logic is one pure function, `runState()` in
+  `ui/src/lib/runview.js` (tone, word, icon, title, detail, check). New states
+  go there, with a test.
+- Pictures move **only while something happens**, and freeze when the daemon
+  is silent: a frozen page must look frozen. Respect `prefers-reduced-motion`.
+- One moving pump per screen. A second one beside the feed rate was removed.
+- The state is shown in **one place per page**: the Overview band; on other
+  pages a thin bar above the tabs. **Never a pill inside the nav menu** (it
+  read as a menu entry).
+- Window title and tab icon follow the state ("Refilling 42 % · Fermentool");
+  the icon keeps its usual colour when feeding normally.
+
+## 3. Palette
+
+| Token | Light | Role |
 |---|---|---|
-| `--teal-700` | `#00707F` | Primary. Actions, active nav, key numbers, links, brand. |
-| `--teal-400` | `#5FA4B0` | Secondary accent, focus ring, secondary chart series, muted emphasis. |
-| `--white` | `#FFFFFF` | Card / surface background. |
-| `--lime-300` | `#A4DDC7` (dark `#1F4F3F`) | Soft fills, area under the planned curve, subtle badges/highlights. |
-| `--green-500` | `#10A074` (dark `#37D39B`) | **Live / running** indicator, success, positive deltas. Emerald, chosen 2026-09 to replace the acid yellow-green that clashed with the teal. |
+| `--teal-700` | `#00707F` | Primary: one primary button per view, active nav, brand, links |
+| `--teal-400` | `#5FA4B0` | Requested curve line, secondary accent |
+| `--lime-300` | `#A4DDC7` | Fill only (area under the curve), never text |
+| `--green-500` | `#10A074` | "Live": weighed trace, the turning pump, success |
+| `--fill` | `#1F8FB0` | Refill: icons, progress bar, chart refill bands |
+| `--measured` | `#E07800` | Weighed (measured) feed, warnings |
+| `--danger` | `#D64545` | Stop / abort / alarm |
+| `--bg` / `--surface` | `#E8EEEC` / `#FFFFFF` | Page / cards |
+| `--ink` / `--muted` | `#12292E` / `#56686C` | Text / secondary text |
 
-Neutrals derived for light mode: page `--bg #F4F7F7`, hairline `--line #E1EAE9`,
-text `--ink #0E2A2F`, secondary text `--muted #5C7378`.
+**Text on a tint uses its `*-ink` token**, never the tint's own colour:
+`--danger-ink`, `--green-ink`, `--teal-ink`, `--warn-ink`, `--fill-ink`, and
+`--on-primary` on a filled teal button (white in light, dark ink in dark
+mode, where the teal is light). Every text pair is **WCAG AA, 4.5:1 or more,
+in both themes**; check with axe after a colour change (it went from 67
+failures to none). Every colour is a token defined in all three theme blocks
+of `app.css`; no literal colour in a component.
 
-One deliberate **out-of-palette** functional colour: `--danger #D64545` for
-stop/abort and error states, a pump control must read unambiguously. Nothing
-else leaves the palette.
+## 4. Type
 
-Dark mode: same brand hues, teal lifted for contrast; `--bg #0E1719`, surfaces
-`#16211F`. Driven by `prefers-color-scheme`, overridable with
-`:root[data-theme="light"|"dark"]`.
+- **IBM Plex Sans** for the UI: no 1/l/I or 0/O confusion, made for technical
+  interfaces. Compared on mockups with Manrope, Barlow, Archivo, Recursive.
+- **IBM Plex Mono** for numbers, units, state words, table data.
+- **Barlow 600** (`--font-title`) for **state titles only** (Overview band,
+  the bar over other pages): DIN-like, read from across the lab. Narrower, so
+  a size up (22 px) to read as large as Plex.
+- All fonts are **bundled** (`@fontsource`, imported in `main.js`): the lab PC
+  may be offline. No font from a CDN.
 
-## Usage rules
+## 5. Charts
 
-- **Teal is for the primary path**, not decoration. One primary button per view.
-- **Green means "this is live"**, the running pill, the actual-value trace on the
-  chart, a completed step. Never use green for a neutral accent.
-- **Lime is a fill, not a foreground**, it sits behind things (curve area,
-  badge backgrounds at low opacity), never as text or an icon colour.
-- Charts: planned curve = `--teal-400` line over a faint `--lime-300` area;
-  actual points = `--green-500`; the "now" marker = `--teal-700`.
-- Status dots: grey = idle/unknown, green = running, amber (derived) = attention,
-  `--danger` = fault.
+- The value axis **starts at 0** and ends at a round value just above the
+  data, with **labelled gridlines** (`ui/src/lib/chartscale.js`). Never fitted
+  to the data's min and max: a 1 % wobble filled the whole height (run 186).
+- Requested curve: `--teal-400` line over a faint `--lime-300` area. Weighed /
+  actual trace: `--green-500`. Refills: `--fill` bands behind the curves.
+- Endpoint labels at the curve's start and end; a tick label that would sit
+  on them is hidden.
 
-## Form
+## 6. Numbers and words
 
-- Radius: 12 px cards, 8 px controls. Soft two-layer shadow (`--shadow-sm`).
-- Type: system UI stack; numeric readouts in the mono stack (`--font-mono`).
-  Scale ~ 12 / 14 / 16.8 / 24 px. Tight letter-spacing on headings (-0.01em).
-- Spacing scale: 4 / 8 / 12 / 16 / 24 / 32 / 48 (`--s-1` … `--s-7`).
-- Motion: 150 ms ease on hover/state; no entrance animation on data.
-- Focus is always visible: 2 px `--teal-400` outline, 2 px offset.
+- **UI strings in English**; dates and times in English too, whatever the PC
+  language (`LOCALE = 'en-GB'` in `fmt.js`: "Mon 19 Oct, 11:04", 24 h).
+- **Say each figure once per screen.** The band did not repeat the flow
+  shown by the big figure (two different values, 8.043 and 8.330, confused).
+- Say what a figure means: "100.0 % delivered · +0.0 % vs asked", never a bare
+  "0.0 %" (read as "nothing delivered"). "49 m of 8 h", not a planned "8 h"
+  for a run stopped after 2 minutes.
+- No task where there is none: "Next refill around 15:04", not "Next thing
+  for you" with nothing to do.
+- An estimated figure is labelled as such ("estimated while refilling").
+- **No em dash, and no spaced hyphen as one**: commas, colons, periods.
+- Red is for what went wrong: a "stopped" run is neutral grey, "aborted" red.
+  Destructive actions that are rare and final (Reset history) are a quiet
+  link out of the main action's place, not a red button at the top.
+- Form fields turn orange once left empty, not before anything is typed.
 
-## Layout
+## 7. Form and layout
 
-Reference the user likes: a modern dashboard, left icon **nav rail** (logo top,
-nav middle, status bottom), a top bar (page title · search · meta), and a
-**grid of rounded cards** with soft depth: one hero card with a smooth area
-chart, plus smaller cards for a progress ring, a radar/'spider', a timeline.
-We take that *structure* but render it **light**, in this palette, not the dark
-neon look of the reference.
-
-- Two-pane: 208 px nav rail + fluid content. Collapses to a top strip under 720 px.
-- Cards: `--radius-card` (12 px), 1 px `--line` border, `--shadow-sm`, white surface
-  on the faint `--bg` tint. Generous padding (`--s-5`).
-- Hero area chart: `--teal-700` stroke over a top-down `--lime-300` gradient fill
-  (55% → 0% opacity). Actual-value trace overlaid in `--green-500`.
-- Progress ring: `conic-gradient(--green-500 …, --surface-sunken …)` with a
-  radial-gradient hole, no SVG, no library.
-- The big current setpoint is the largest thing on the Active-run view, readable
-  from across the bench.
-- Active nav item: `color-mix(--teal-700 12%, surface)` tint, teal text.
-
-Tokens live in [`ui/src/app.css`](../ui/src/app.css); the scaffold shell in
-[`ui/src/App.svelte`](../ui/src/App.svelte) already shows the rail + card grid.
+- Radius 14 px cards, 9 px controls; hairline `--line` border, a barely
+  visible shadow. Cards set off by role, not every block.
+- Spacing scale 4 / 8 / 12 / 16 / 24 / 32 / 48 (`--s-1` … `--s-7`).
+- Rail (200 px) + fluid content; collapses to a top strip under 720 px.
+- The big feed rate is the largest thing on the Overview.
+- Focus always visible: 2 px outline, 2 px offset. Screen readers get a page
+  `h1` (visually hidden, `.sr-only`).
+- Text that can wrap keeps its units with it (`white-space: nowrap` on each
+  part): never a lone "g" or "min" on a line.

@@ -23,6 +23,12 @@ UI (`ui/`): `npm run dev` (proxies `/api` to :8730). **After any change under
 `ui/src/`, run `npm run build` from `ui/`, the daemon embeds `ui/dist/`.** Do
 this without being asked.
 
+**Before any UI change, read `docs/DESIGN.md`**: the settled design direction
+(colour only when a state needs an eye, the state system and `StateIcon`,
+Plex / Plex Mono / Barlow, charts from 0, `*-ink` tokens at WCAG AA) and the
+process (mockup on a separate page first, implement on the user's go). Follow
+it instead of re-proposing it; the user should not have to explain it again.
+
 **A UI change is not done until these pass, run from `ui/`, without being
 asked:**
 - `npm run check`: ESLint (a variable read before its declaration ran, an
