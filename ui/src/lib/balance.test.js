@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bottleWeights } from './balance.js';
+import { bottleWeights, weighedOutShown } from './balance.js';
 
 describe('bottleWeights', () => {
   // Run 182: 4394.7 g, refilled at 4094.7 g up to 4388.0 g while the feed
@@ -22,5 +22,34 @@ describe('bottleWeights', () => {
     const b = bottleWeights(old);
     expect(b.weighedOut).toBeCloseTo(313.7, 6);
     expect(b.refills[0].added_g).toBeCloseTo(293.3, 6);
+  });
+});
+
+describe('weighedOutShown', () => {
+  // Run 194, 08:33, mid third refill: two refills journalled, the bottle at
+  // 3978.1 g and rising. The panel's own count read ~2870 g; the carboy
+  // weighed 3219 g, the daemon 3221.9 g.
+  const report = {
+    weight_start_g: 4656.8,
+    weight_end_g: 3983.0,
+    refills: [
+      { t_s: 18819, before_g: 3656.8, after_g: 4655.1, drawn_g: 98.0 },
+      { t_s: 37578, before_g: 3656.7, after_g: 4655.3, drawn_g: 95.9 },
+    ],
+  };
+  const live = 3978.1;
+  const bottleOut = bottleWeights(report).weighedOut + (report.weight_end_g - live);
+
+  it('reproduces the wrong count mid-refill', () => {
+    expect(bottleOut).toBeCloseTo(2869.6, 0);
+  });
+  it("shows the daemon's figure while a refill runs, said estimated", () => {
+    expect(weighedOutShown({ bottleOut, deliveredG: 3221.9, refilling: true })).toEqual({ g: 3221.9, estimated: true });
+  });
+  it("keeps the panel's own count outside a refill", () => {
+    expect(weighedOutShown({ bottleOut: 3305.4, deliveredG: 3305.6, refilling: false })).toEqual({ g: 3305.4, estimated: false });
+  });
+  it('falls back to its own count when the daemon has no figure', () => {
+    expect(weighedOutShown({ bottleOut, deliveredG: null, refilling: true }).estimated).toBe(false);
   });
 });

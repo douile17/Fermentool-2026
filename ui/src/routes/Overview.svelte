@@ -3,7 +3,7 @@
   import { get, post } from '../lib/api.js';
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
-  import { bottleWeights } from '../lib/balance.js';
+  import { bottleWeights, weighedOutShown, REFILL_GRACE_MS } from '../lib/balance.js';
   import { valueAt, hm, clock, when, bottleEmptyInS, refillDueInS, runState, nextRefill, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
@@ -301,6 +301,18 @@
   // a transfer pump); the buttons only make it certain.
   const refilling = $derived(
     app.status?.scale_state === 'refill_pending' || app.status?.scale_state === 'refill_settling'
+  );
+  // When a refill was last seen under way, for the Feed bottle figure's grace.
+  let refillSeenMs = $state(0);
+  $effect(() => {
+    if (refilling) refillSeenMs = now;
+  });
+  const shownOut = $derived(
+    weighedOutShown({
+      bottleOut: bottle?.weighedOut,
+      deliveredG: lastPt?.[2] ?? null,
+      refilling: refilling || now - refillSeenMs < REFILL_GRACE_MS,
+    })
   );
   async function refillCycle(action) {
     refillBusy = true;
@@ -616,8 +628,8 @@
                 </div>
                 <!-- What left the bottle, large; start and the live reading beside. -->
                 <div class="mid-line">
-                  <span class="mid mono-num">{bottle ? `${num(bottle.weighedOut, 1)} g` : '–'}</span>
-                  <span class="k">weighed out</span>
+                  <span class="mid mono-num">{shownOut.g != null ? `${num(shownOut.g, 1)} g` : '–'}</span>
+                  <span class="k">{shownOut.estimated ? 'weighed out, estimated while refilling' : 'weighed out'}</span>
                 </div>
                 {#if dryMs != null}
                   <p class="k">Empty around <b>{when(dryMs, now)}</b>, in about {hm(emptyInS)}.</p>
