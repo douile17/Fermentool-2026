@@ -2,6 +2,43 @@
 
 ## Non publié (depuis 0.1.5)
 
+### État du run et interface (19 et 20 octobre)
+
+- Bandeau de l'Overview coloré selon l'état, seulement quand il faut y
+  regarder : bleu pendant un remplissage, orange pour un remplissage arrêté ou
+  un flacon qui ne se remplit pas, rouge pour une alarme ; la marche normale
+  reste blanche. Grand picto animé (pompe qui tourne dans le sens réel du run,
+  flacon qui se remplit), étiquette d'état, barre de progression du
+  remplissage avec montée en g/min et temps restant.
+- Sur History, Tubing calibration et Settings, une barre fine en haut rappelle
+  l'état du run, avec « Open Overview ». Le titre de la fenêtre et l'icône
+  d'onglet suivent l'état.
+- Graphiques depuis 0 avec un axe gradué : un écart de 1 % ne remplit plus
+  toute la hauteur. Les remplissages sont en bandes bleues, en direct et dans
+  History.
+- Overview : un seul débit affiché, « Next refill around … », Delivery en
+  « 100.0 % delivered · +0.0 % vs asked ». « Feed bottle » ne baisse plus
+  pendant un remplissage (livré estimé par le daemon, marqué « estimated while
+  refilling »).
+- History : numéro du run, durée réellement tournée (« 49 m of 8 h »),
+  « stopped » en gris neutre, « Reset history… » en lien discret sous la liste.
+- Contrastes conformes WCAG AA en clair et en sombre (texte lisible sur les
+  boutons du thème sombre), dates en anglais quel que soit le PC, titres
+  d'état en Barlow.
+
+### Remplissage automatique jugé sur la balance
+
+- Plus de débit attendu pour la pompe de remplissage (non calibrée) : un
+  remplissage est jugé sur la montée du poids. Une pompe lente (tuyau fin,
+  vitesse basse) remplit jusqu'au niveau haut sans fausse alarme ; avant, elle
+  était coupée en « no flow » (runs 186 et 192).
+- Si le poids ne monte pas pendant 30 s : alarme « Refill: the bottle is not
+  filling » sur le téléphone, la pompe continue (amorçage) ; message quand le
+  poids remonte. Seuls le niveau haut, le dépassement de 50 g et un Stop non
+  confirmé arrêtent la pompe de remplissage.
+- Le journal note la vitesse et la montée nette de chaque remplissage.
+  `expected_ml_min` est retiré de la configuration (ignoré s'il reste).
+
 ### Régulation par la balance
 
 - La correction agit dès les premières secondes, autour du facteur de la
