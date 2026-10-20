@@ -1,6 +1,7 @@
 <script>
   import { num, vol } from '../lib/fmt.js';
   import { valueScale } from '../lib/chartscale.js';
+  import { splitEstimated } from '../lib/refill.js';
 
   /**
    * @type {{
@@ -17,6 +18,10 @@
    *   markers?: { t: number, label: string }[],
    *   refill?: { t: number, label: string } | null,
    *   bands?: [number, number][],
+   *   blindBands?: boolean,
+   *   ticks?: { t: number, label: string }[],
+   *   plannedWide?: boolean,
+   *   endpoints?: boolean,
    * }}
    */
   let {
@@ -39,6 +44,15 @@
     // Stretches of run time shaded behind the curves: the bottle being
     // refilled (the tracking report's estimated spans), `[from_s, to_s]`.
     bands = [],
+    // The `actual` trace drawn dashed grey inside the bands: not measured
+    // there (History: the balance cannot weigh the feed during a refill).
+    blindBands = false,
+    // Time-axis labels under the plot, `{ t, label }` (History: clock times).
+    ticks = [],
+    // The planned curve as a wide pale stroke, so a trace on it stays visible.
+    plannedWide = false,
+    // The values at the curve's start and end, by its two dots.
+    endpoints = true,
   } = $props();
 
   // Two charts can share a page (a run's curve and its weighed feed): each
@@ -75,7 +89,7 @@
   // its last step. Correct for rising and falling curves alike.
   const clampY = (py) => Math.max(padT + 9, Math.min(H - 4, py));
   const labels = $derived.by(() => {
-    if (planned.length === 0) return null;
+    if (planned.length === 0 || !endpoints) return null;
     const s = planned[0];
     const e = planned[planned.length - 1];
     const risesFromStart = planned.length > 1 ? planned[1][1] >= s[1] : true;
@@ -177,12 +191,13 @@
   const refillX = $derived(refill && refill.t > 0 && refill.t < dspan ? x(refill.t) : null);
   const refillFlip = $derived(refillX != null && refillX > W - 110);
 
-  // Journalled setpoints drawn as one continuous trace rather than a dot per tick.
-  const actualLine = $derived(
-    actual.length
-      ? actual.map((p, i) => `${i ? 'L' : 'M'}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')
-      : ''
+  // Journalled setpoints drawn as one continuous trace rather than a dot per
+  // tick; cut where it enters and leaves the bands when they are blind.
+  const path = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+  const actualParts = $derived(
+    !actual.length ? [] : blindBands ? splitEstimated(actual, bands).map((p) => ({ est: p.est, d: path(p.pts) })) : [{ est: false, d: path(actual) }]
   );
+  const tickMarks = $derived(ticks.filter((k) => k.t >= 0 && k.t <= dspan).map((k) => ({ ...k, x: x(k.t) })));
 
   // Live "travelled" trace: the planned curve clipped to `nowS`, ending exactly
   // on the marker. Driven by the same smooth clock as the marker, so the green
@@ -219,7 +234,8 @@
 
     {#if area}
       <path d={area} fill="url(#{fillId})" />
-      <path d={line} fill="none" stroke="var(--teal-400)" stroke-width="2.25" />
+      <path d={line} fill="none" stroke="var(--teal-400)" stroke-width={plannedWide ? 7 : 2.25}
+            stroke-opacity={plannedWide ? 0.4 : 1} stroke-linecap="round" stroke-linejoin="round" />
     {/if}
 
     {#if labels}
@@ -232,10 +248,21 @@
     {#if nowS != null && progressLine}
       <path class="progress" d={progressLine} fill="none" stroke="var(--green-500)"
             stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" />
-    {:else if actualLine}
-      <path d={actualLine} fill="none" stroke={actualColor} stroke-opacity={actualOpacity} stroke-width={actualWidth}
-            stroke-linejoin="round" stroke-linecap="round" />
+    {:else}
+      {#each actualParts as part}
+        {#if part.est}
+          <path d={part.d} class="blind" />
+        {:else}
+          <path d={part.d} fill="none" stroke={actualColor} stroke-opacity={actualOpacity} stroke-width={actualWidth}
+                stroke-linejoin="round" stroke-linecap="round" />
+        {/if}
+      {/each}
     {/if}
+
+    {#each tickMarks as k, i}
+      <text x={k.x} y={H - 6} class="axl"
+            text-anchor={i === tickMarks.length - 1 && k.x > W - 30 ? 'end' : k.x < 20 ? 'start' : 'middle'}>{k.label}</text>
+    {/each}
 
     <!-- Markers: a dashed line and a numbered badge in the top margin, out of
          the curves' way; the caller explains the numbers under the chart. -->
@@ -277,6 +304,7 @@
   .now-vol { fill: var(--ink); font-weight: 600; }
   .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
   .band { fill: var(--fill); fill-opacity: 0.16; }
+  .blind { fill: none; stroke: var(--muted); stroke-width: 1.75; stroke-dasharray: 4 4; stroke-linecap: round; }
   .refill { stroke: var(--teal-600); stroke-width: 1.5; stroke-dasharray: 6 4; }
   .refill-l { fill: var(--teal-600); font-weight: 600; }
   .badge { fill: var(--surface); stroke: var(--ink); stroke-opacity: 0.55; stroke-width: 1; }

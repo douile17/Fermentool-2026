@@ -3,11 +3,15 @@
   import { get, post, del } from '../lib/api.js';
   import { num, dur, shortTime, stampY, unitFor, digitsFor, ranFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
-  import TrackingPanel from '../components/TrackingPanel.svelte';
+  import GapChart from '../components/GapChart.svelte';
   import Icon from '../components/Icon.svelte';
   import { bottleWeights } from '../lib/balance.js';
   import { downloadSettings } from '../lib/runfile.js';
   import { weighedFlow, flowWindowS } from '../lib/runview.js';
+  import {
+    TOLERANCE, alarmCount, atClock, clockTicks, curveLine, gapExtremes, grouped, journalLines, mins,
+    refillRows, regulationFigures, verdict, whenLine,
+  } from '../lib/rundetail.js';
 
   let runs = $state([]);
   let err = $state(null);
@@ -18,7 +22,10 @@
     return () => clearInterval(id);
   });
 
-  let sel = $state(null); // { run, planned, ticks, events }
+  let sel = $state(null); // { run, planned, ticks, events, report, cal }
+  // The journal's events fetched for a detail: enough for any run's.
+  const EVENTS_MAX = 1000;
+  let rawJournal = $state(false);
   let q = $state('');
 
   let confirmClear = $state(false);
@@ -130,10 +137,17 @@
       // A sample for the chart: the full journal (up to ~360k rows for a
       // 100 h run) is only fetched for the CSV export.
       const ticks = await get(`/api/runs/${id}/ticks?sample=3000`);
-      const events = await get(`/api/runs/${id}/events?limit=100`);
+      const events = await get(`/api/runs/${id}/events?limit=${EVENTS_MAX}`);
       // Runs without the balance trim have no report (404): no summary then.
       const report = await get(`/api/runs/${id}/tracking`).catch(() => null);
-      sel = { run, planned: p.series, ticks, events, report };
+      // The tube, for Settings: the calibration the run used, if still listed.
+      const cal = run.tubing_calibration_id == null
+        ? null
+        : await get('/api/calibrations')
+            .then((cs) => cs.find((c) => c.id === run.tubing_calibration_id) ?? null)
+            .catch(() => null);
+      rawJournal = false;
+      sel = { run, planned: p.series, ticks, events, report, cal };
     } catch (e) {
       err = e.message;
     }
@@ -221,6 +235,22 @@
     out.push([last.elapsed_s, last.target]);
     return out;
   });
+
+  const startMs = $derived(sel ? Date.parse(sel.run.started_at) : 0);
+  const spans = $derived(sel?.report?.estimated ?? []);
+  // A run goes on past its curve (the hold): both charts span all of it.
+  const reportSpanS = $derived(
+    Math.max(sel?.run.duration_s ?? 0, sel?.report?.points?.at(-1)?.[0] ?? 0, sel?.ticks?.at(-1)?.elapsed_s ?? 0),
+  );
+  const verdictOf = $derived(verdict(sel?.report));
+  const alarms = $derived(alarmCount(sel?.events));
+  const bottle = $derived(bottleWeights(sel?.report));
+  const refills = $derived(refillRows(bottle, spans));
+  const nRefills = $derived(sel?.report?.refills?.length ?? 0);
+  const journal = $derived(sel ? journalLines(sel.events, sel.run) : []);
+  const reg = $derived(regulationFigures(sel?.events));
+  const extremes = $derived(gapExtremes(sel?.report?.points, spans));
+  const trimStartS = $derived(sel?.report?.markers?.find((m) => m.kind === 'trim_start')?.t_s ?? null);
 
   const warnCount = $derived(
     sel ? sel.events.filter((e) => e.level === 'warn' || e.level === 'error').length : 0,
@@ -420,95 +450,219 @@
 {/if}
 
 {#if sel}
+  {@const rf = ranFor(sel.run, now)}
   <button class="backdrop" aria-label="Close" onclick={closeSel}></button>
   <div class="layer">
     <div class="modal card detail" role="dialog" aria-modal="true" aria-labelledby="ft-run-detail">
-      <!-- Sticky head: the run's identity and its main actions stay in reach
-           however far the journal below is scrolled. -->
+      <!-- Sticky head: who and when, and what to do next, in reach however
+           far the journal below is scrolled. -->
       <div class="card-head detail-head">
-        <div>
-          <span class="pill {sel.run.status}">{sel.run.status}</span>
-          <div class="eyebrow id-line">Run #{sel.run.id} | {unitFor(sel.run.control_var)}</div>
+        <div class="who">
+          <div class="idrow"><span class="pill {sel.run.status}">{sel.run.status}</span><span class="rid mono">#{sel.run.id}</span></div>
           <h2 id="ft-run-detail">{sel.run.name}</h2>
-          <div class="sub mono">
-            {stampY(sel.run.started_at)}{sel.run.ended_at ? ` → ${stampY(sel.run.ended_at)}` : ''}
-            {sel.run.responsible ? ` | ${sel.run.responsible}` : ''}
+          <div class="when">
+            <span class="nw">{whenLine(sel.run.started_at, sel.run.ended_at)}</span>
+            <span class="sep">·</span><span class="nw">ran {rf.ran}{rf.of ? ` ${rf.of}` : ''}</span>
+            {#if sel.run.responsible}<span class="sep">·</span><span class="nw">{sel.run.responsible}</span>{/if}
           </div>
         </div>
         <div class="hd-actions">
-          <button class="btn-ghost" disabled={exporting} onclick={exportCsv}
-            title="Download the run's journal (one row per second)">
-            {exporting ? 'Exporting…' : 'Export CSV'}
-          </button>
-          <button class="btn-primary" disabled={!replayable} onclick={runAgain}
-            title={replayable ? "Open New run with this run's settings" : notReplayable}>
-            Run again
-          </button>
+          <div class="again">
+            <button class="btn-primary" disabled={!replayable} onclick={runAgain}>Run again</button>
+            {#if !replayable}<small>{notReplayable}</small>{/if}
+          </div>
+          <button class="x" aria-label="Close" title="Close (Esc)" onclick={closeSel}><Icon name="x" size={18} /></button>
         </div>
       </div>
 
-      <Chart
-        planned={sel.planned}
-        actual={chartActual}
-        actualWidth={chartWeighed.length ? 1.75 : 2.5}
-        nowS={null}
-        durationS={sel.run.duration_s}
-        unit={unitFor(sel.run.control_var)}
-        digits={digitsFor(sel.run.control_var)}
-        bands={sel.report?.estimated ?? []}
-      />
-      <div class="legend">
-        <span><i class="sw planned"></i>Requested</span>
-        {#if chartWeighed.length}
-          <span title="Weighed by the balance, averaged over {dur(flowWindow)}; estimated while the bottle was refilled"><i class="sw actual"></i>Delivered, weighed ({dur(flowWindow)} average)</span>
-        {:else}
-          <span title="No balance on this run: what the pump was told, not what it delivered"><i class="sw actual"></i>Sent to the pump</span>
-        {/if}
-        {#if sel.report?.estimated?.length}
-          <span title="The bottle was refilled or touched: the balance could not weigh the feed, the daemon estimated it"><i class="sw refilled"></i>Bottle refilled</span>
-        {/if}
-      </div>
-      <div class="pv-cap mono">
-        {dur(sel.run.duration_s)} | {sel.run.curve.params.kind} |
-        {num(sel.run.curve.start, digitsFor(sel.run.control_var))} → {num(sel.run.curve.end, digitsFor(sel.run.control_var))}
-        {unitFor(sel.run.control_var)}
-      </div>
-
-      <!-- Detail sections start folded: the chart answers "how did it go",
-           the regulation and the journal are there for when it went wrong. -->
-      <TrackingPanel runId={sel.run.id} durationS={sel.run.duration_s} collapsible />
-
-      {#if sel.events.length}
-        <details class="fold">
-          <summary>
-            <Icon name="chevron-right" size={16} />
-            <span class="eyebrow">Events</span>
-            <span class="peek mono">
-              {sel.events.length}{sel.events.length >= 100 ? '+' : ''}
-              {#if warnCount}| <b class="off">{warnCount} warning{warnCount === 1 ? '' : 's'}</b>{/if}
-            </span>
-          </summary>
-          <div class="acts">
-            {#each sel.events as e (e.id)}
-              <div class="act">
-                <time class="mono">{shortTime(e.wall_time)}</time>
-                <span class="pill {e.level}">{e.kind}</span>
-                <span class="body">{e.detail ?? ''}</span>
-              </div>
-            {/each}
-          </div>
-        </details>
+      <!-- The answer first: did it feed what was asked? -->
+      {#if verdictOf?.wrongSide}
+        <p class="say"><b class="off">Balance on the wrong side.</b> The weighed figures are mirrored.</p>
+      {:else if verdictOf}
+        <p class="say">
+          {#if verdictOf.onTarget}<b class="ok">On target.</b>{:else}<b class="off">Off target.</b>{/if}
+          {#if verdictOf.onTarget && verdictOf.worstPct != null}
+            Delivered stayed within {num(Math.max(verdictOf.worstPct, 0.1), 1)} % of the request after the first 15 min.
+          {:else if verdictOf.onTarget}
+            Delivered within ±{TOLERANCE * 100} % of the request.
+          {:else}
+            Delivered {num(Math.abs(verdictOf.gap), 1)} mL {verdictOf.gap < 0 ? 'short of' : 'over'} the request.
+          {/if}
+          Tolerance ±{TOLERANCE * 100} %.
+        </p>
+        <div class="figs">
+          <div class="fig"><div class="v mono">{grouped(verdictOf.delivered)}<small>mL</small></div><div class="k">delivered, weighed</div></div>
+          <div class="fig"><div class="v mono" class:off={!verdictOf.onTarget}>{num(verdictOf.pct, 1)}<small>%</small></div><div class="k">of {grouped(verdictOf.requested)} mL requested</div></div>
+          <div class="fig"><div class="v mono">{nRefills}</div><div class="k">refill{nRefills === 1 ? '' : 's'}{nRefills ? (sel.run.auto_refill ? ', automatic' : ', by hand') : ''}</div></div>
+          <div class="fig"><div class="v mono" class:off={alarms > 0}>{alarms}</div><div class="k">alarm{alarms === 1 ? '' : 's'}</div></div>
+        </div>
+      {:else}
+        <p class="say">Not weighed: this run had no balance correction.</p>
       {/if}
 
+      <div class="block">
+        <div class="ctitle">
+          <h3>Feed rate, {unitFor(sel.run.control_var)}</h3>
+          <div class="legend">
+            <span><i class="sw planned"></i>Requested</span>
+            {#if chartWeighed.length}
+              <span><i class="sw actual"></i>Weighed, {Math.round(flowWindow / 60)} min average</span>
+            {:else}
+              <span><i class="sw actual"></i>Sent to the pump</span>
+            {/if}
+            {#if spans.length}<span><i class="sw refilled"></i><i class="sw blind"></i>Refill, not weighed</span>{/if}
+          </div>
+        </div>
+        <Chart
+          planned={sel.planned}
+          actual={chartActual}
+          actualWidth={chartWeighed.length ? 1.75 : 2.5}
+          nowS={null}
+          durationS={reportSpanS}
+          unit={unitFor(sel.run.control_var)}
+          digits={digitsFor(sel.run.control_var)}
+          bands={spans}
+          blindBands={chartWeighed.length > 0}
+          ticks={clockTicks(startMs, reportSpanS)}
+          plannedWide
+          endpoints={false}
+        />
+      </div>
+
+      {#if verdictOf && !verdictOf.wrongSide && sel.report.points.length > 1}
+        <div class="block">
+          <div class="ctitle">
+            <h3>Running total vs requested</h3>
+            <div class="legend"><span>delivered − requested, mL</span></div>
+          </div>
+          <GapChart points={sel.report.points} {spans} spanS={reportSpanS} ticks={clockTicks(startMs, reportSpanS)} />
+        </div>
+      {/if}
+
+      {#if bottle}
+        <div class="block">
+          <h3>Feed bottle</h3>
+          <div class="tblwrap">
+            <table class="bottle">
+              <thead><tr><th>On the balance</th><th>Before</th><th>After</th><th>Poured</th><th>Fed during refill <span class="est-h">≈ est.</span></th></tr></thead>
+              <tbody>
+                <tr><td>Start <span class="t">{atClock(startMs, 0)}</span></td><td class="dim">·</td><td>{grouped(bottle.start)} g</td><td class="dim">·</td><td class="dim">·</td></tr>
+                {#each refills as r, i}
+                  <tr>
+                    <td>Refill {i + 1} <span class="t">{atClock(startMs, r.from_s)}{r.took_s != null ? `, ${mins(r.took_s)}` : ''}</span></td>
+                    <td>{grouped(r.before_g)} g</td><td>{grouped(r.after_g)} g</td>
+                    <td>{grouped(r.added_g)} g</td><td class="dim">≈ {grouped(r.drawn_g)} g</td>
+                  </tr>
+                {/each}
+                <tr><td>End <span class="t">{atClock(startMs, reportSpanS)}</span></td><td>{grouped(bottle.end)} g</td><td class="dim">·</td><td class="dim">·</td><td class="dim">·</td></tr>
+              </tbody>
+              {#if refills.length}
+                <tfoot><tr>
+                  <td>{refills.length} refill{refills.length === 1 ? '' : 's'}</td><td></td><td></td>
+                  <td>{grouped(refills.reduce((a, r) => a + r.added_g, 0))} g</td>
+                  <td class="dim">≈ {grouped(refills.reduce((a, r) => a + r.drawn_g, 0))} g</td>
+                </tr></tfoot>
+              {/if}
+            </table>
+          </div>
+        </div>
+      {/if}
+
+      <!-- For when it went wrong, or to look closer: folded. -->
+      <div class="folds">
+        <details class="fold">
+          <summary>
+            <Icon name="chevron-right" size={16} /><span class="lbl">Settings</span>
+            <span class="peek">{sel.run.curve.params.kind} · {dur(sel.run.duration_s)} · {sel.run.direction}</span>
+          </summary>
+          <dl>
+            <dt>Curve</dt><dd>{curveLine(sel.run)}</dd>
+            <dt>Direction</dt><dd>{sel.run.direction === 'ccw' ? 'Counter-clockwise' : 'Clockwise'}</dd>
+            {#if sel.cal}
+              <dt>Tube</dt>
+              <dd>{[sel.cal.brand, sel.cal.product_ref].filter(Boolean).join(' ') || 'Tube'}{sel.cal.inner_diameter_mm != null ? `, ${sel.cal.inner_diameter_mm} mm ID` : ''}{sel.cal.tubing_lot_id ? `, lot ${sel.cal.tubing_lot_id}` : ''}</dd>
+            {/if}
+            {#if sel.run.tubing_calibration_id != null}
+              <dt>Calibration</dt>
+              <dd>#{sel.run.tubing_calibration_id}{#if sel.cal}, in {unitFor(sel.cal.control_var)}{sel.run.control_var === 'ml_min' && sel.cal.control_var === 'rpm' ? ', driven in rpm' : ''}{/if}</dd>
+            {/if}
+            <dt>Balance correction</dt>
+            <dd>{sel.run.gravimetric_trim ? `On, density ${num(sel.run.density_g_per_ml ?? 1, 2)} g/mL` : 'Off'}</dd>
+            {#if sel.run.gravimetric_trim}
+              <dt>Refill</dt>
+              <dd>{sel.run.auto_refill ? `Automatic${sel.run.refill_draw_g ? `, after ${grouped(sel.run.refill_draw_g, 0)} g` : ''}` : 'By hand'}</dd>
+            {/if}
+            {#if sel.run.app_version}<dt>App</dt><dd class="mono">{sel.run.app_version}</dd>{/if}
+          </dl>
+        </details>
+
+        {#if sel.report}
+          <details class="fold">
+            <summary>
+              <Icon name="chevron-right" size={16} /><span class="lbl">Regulation</span>
+              <span class="peek">{[reg.ratio && `pump ratio ${reg.ratio}`, reg.correction && `correction ×${reg.correction}`].filter(Boolean).join(' · ')}</span>
+            </summary>
+            <dl>
+              {#if trimStartS != null}
+                <dt>Correction on</dt>
+                <dd>{atClock(startMs, trimStartS)}, after {dur(trimStartS)}{reg.correction ? `, at ×${reg.correction}` : ''}</dd>
+              {/if}
+              {#if reg.ratio}<dt>Pump ratio</dt><dd class="mono">{reg.ratio}</dd>{/if}
+              <dt>Largest gap</dt>
+              <dd><span class="mono">+{num(extremes.ahead, 1)} mL</span> ahead, <span class="mono">−{num(Math.abs(extremes.behind), 1)} mL</span> behind</dd>
+              <dt>Fit, R²</dt><dd class="mono">{sel.report.r_squared != null ? sel.report.r_squared.toFixed(4) : '·'}</dd>
+              {#if sel.report.mu_requested != null}
+                <dt>µ requested</dt><dd class="mono">{sel.report.mu_requested.toFixed(4)} h⁻¹</dd>
+                <dt>µ delivered</dt><dd class="mono">{sel.report.mu_delivered != null ? `${sel.report.mu_delivered.toFixed(4)} h⁻¹` : '·'}</dd>
+              {/if}
+            </dl>
+          </details>
+        {/if}
+
+        {#if sel.events.length}
+          <details class="fold">
+            <summary>
+              <Icon name="chevron-right" size={16} /><span class="lbl">Journal</span>
+              <span class="peek">
+                {journal.length} moment{journal.length === 1 ? '' : 's'} ·
+                {#if warnCount}<b class="off">{warnCount} warning{warnCount === 1 ? '' : 's'}</b>{:else}no warning{/if}
+              </span>
+            </summary>
+            {#if rawJournal}
+              {#each sel.events as e (e.id)}
+                <div class="act">
+                  <time class="mono">{shortTime(e.wall_time)}</time>
+                  <span class="pill {e.level}">{e.kind}</span>
+                  <span class="body">{e.detail ?? ''}</span>
+                </div>
+              {/each}
+            {:else}
+              {#each journal as l}
+                <div class="jr {l.tone}">
+                  <span class="d mono">{l.day}</span><span class="tm mono">{l.time}</span>
+                  <span class="w"><b>{l.title}</b> <span>{l.detail}</span></span>
+                </div>
+              {/each}
+            {/if}
+            <button class="btn-ghost raw-btn" onclick={() => (rawJournal = !rawJournal)}>
+              {rawJournal ? 'Show in words' : `Show all ${sel.events.length}${sel.events.length >= EVENTS_MAX ? '+' : ''} entries`}
+            </button>
+          </details>
+        {/if}
+      </div>
+
       <div class="modal-foot">
-        <button class="btn-danger del" disabled={sel.run.status === 'running'} onclick={() => { deleteErr = null; confirmDelete = true; }}>
-          Delete run
+        <button class="link-danger del" disabled={sel.run.status === 'running'} onclick={() => { deleteErr = null; confirmDelete = true; }}>
+          Delete run…
         </button>
         <button class="btn-ghost" disabled={!replayable} onclick={() => downloadSettings(settingsOf(sel.run))}
           title={replayable ? "Save this run's settings to a file, to import later in New run" : notReplayable}>
           Export settings
         </button>
-        <button class="btn-ghost" onclick={closeSel}>Close</button>
+        <button class="btn-ghost" disabled={exporting} onclick={exportCsv}
+          title="Download the run's journal (one row per second)">
+          {exporting ? 'Exporting…' : 'Export CSV'}
+        </button>
       </div>
     </div>
   </div>
@@ -575,35 +729,97 @@
   .tr span { font-size: 13px; }
   .muted { color: var(--muted); padding: var(--s-3) var(--s-2); }
 
-  .hd-actions { display: flex; align-items: center; gap: var(--s-3); flex: none; }
-  .id-line { margin-top: var(--s-3); }
+  .hd-actions { display: flex; align-items: flex-start; gap: var(--s-2); flex: none; }
   /* No top padding on the detail: the sticky head is the top edge itself. */
-  .modal.detail { padding-top: 0; }
-  .detail-head { align-items: center;
+  .modal.detail { padding-top: 0; max-width: 760px; }
+  .detail-head { align-items: flex-start;
     position: sticky; top: 0; z-index: 2;
     margin: 0 calc(var(--s-7) * -1) var(--s-5);
-    padding: var(--s-7) var(--s-7) var(--s-4); /* top = the card's bottom padding */
+    padding: var(--s-5) var(--s-7) var(--s-4);
     background: var(--surface);
-    border-bottom: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line);
   }
+  .who { flex: 1; min-width: 0; }
+  .idrow { display: flex; align-items: center; gap: var(--s-2); }
+  .idrow .rid { font-size: 12px; color: var(--muted); }
+  .detail-head h2 { margin: 4px 0 2px; font-size: 22px; text-wrap: balance; overflow-wrap: anywhere; }
+  .when { display: flex; flex-wrap: wrap; column-gap: var(--s-2); font-size: 13px; color: var(--muted); }
+  .when .sep { opacity: 0.6; }
+  .nw { white-space: nowrap; }
+  .again { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+  /* grey, not a paler teal: that read as "loading" */
+  .again .btn-primary:disabled { background: var(--surface-sunken); border-color: var(--line); color: var(--muted); }
+  .again small { font-size: 11px; color: var(--muted); max-width: 160px; text-align: right; line-height: 1.35; }
+  .x {
+    width: 36px; height: 36px; display: grid; place-items: center; flex: none;
+    border: none; background: none; color: var(--muted); border-radius: var(--radius-ctl); cursor: pointer;
+  }
+  .x:hover { background: var(--surface-sunken); color: var(--ink); }
+  .x:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
 
-  .fold {
-    margin-top: var(--s-5); padding-top: var(--s-5);
-    border-top: 1px solid color-mix(in srgb, var(--muted) 32%, transparent);
+  /* the verdict */
+  .say { margin: 0 0 var(--s-4); font-size: 15px; max-width: 62ch; }
+  .say .ok { color: var(--green-ink); }
+  .say .off, .fig .off { color: var(--danger-ink); }
+  .figs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius); }
+  .fig { padding: var(--s-3) var(--s-4); min-width: 0; }
+  .fig + .fig { border-left: 1px solid var(--line); }
+  .fig .v { font-size: 22px; font-weight: 600; line-height: 1.2; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .fig .v small { font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 3px; letter-spacing: 0; }
+  .fig .k { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+
+  .block { margin-top: var(--s-5); }
+  .block h3 { margin: 0 0 var(--s-2); font-size: 14px; font-weight: 600; }
+  .ctitle { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-2); }
+  .ctitle h3 { margin: 0; }
+
+  /* the bottle */
+  .tblwrap { overflow-x: auto; }
+  .bottle { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .bottle th {
+    text-align: right; font-weight: 500; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); padding: 0 var(--s-3) var(--s-2); white-space: nowrap;
   }
+  .bottle td {
+    text-align: right; padding: 7px var(--s-3); border-top: 1px solid var(--line-soft);
+    font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .bottle th:first-child, .bottle td:first-child { text-align: left; padding-left: 0; font-family: inherit; }
+  .bottle th:last-child, .bottle td:last-child { padding-right: 0; }
+  .bottle .t { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: 6px; }
+  .bottle .dim { color: var(--muted); }
+  .bottle tfoot td { border-top: 1px solid var(--line); font-weight: 600; }
+  .est-h { text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+  /* folded sections */
+  .folds { margin-top: var(--s-5); }
+  .lbl { font-weight: 600; }
+  dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--s-5); margin: 0 0 var(--s-4) 24px; font-size: 13px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  .jr { display: grid; grid-template-columns: 34px 46px minmax(0, 1fr); gap: var(--s-3); padding: 6px 0 6px 24px; font-size: 13px; align-items: baseline; }
+  .jr + .jr { border-top: 1px solid var(--line-soft); }
+  .jr .d { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; }
+  .jr .tm { font-size: 12px; color: var(--muted); }
+  .jr .w b { font-weight: 600; }
+  .jr .w span { color: var(--muted); }
+  .jr.refill .w b { color: var(--fill-ink); }
+  .jr.bad .w b { color: var(--danger-ink); }
+  .raw-btn { margin: var(--s-2) 0 var(--s-4) 24px; padding: 4px 10px; font-size: 12px; }
+
+  .fold { border-top: 1px solid var(--line); }
+  .fold:last-child { border-bottom: 1px solid var(--line); }
   .fold summary {
-    display: flex; align-items: center; gap: var(--s-2);
+    display: flex; align-items: center; gap: var(--s-2); padding: var(--s-3) 0;
     cursor: pointer; list-style: none; border-radius: var(--radius-ctl);
   }
   .fold summary::-webkit-details-marker { display: none; }
   .fold summary :global(.icon) { color: var(--muted); transition: transform 0.15s ease; }
   .fold[open] summary :global(.icon) { transform: rotate(90deg); }
-  .fold summary .eyebrow { color: var(--ink); }
   .fold summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--teal-700) 45%, transparent); outline-offset: 2px; }
-  .peek { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .peek { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; }
   .peek .off { color: var(--danger-ink); font-weight: 600; }
   @media (prefers-reduced-motion: reduce) { .fold summary :global(.icon) { transition: none; } }
-  .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
   .search {
     align-self: center;
@@ -623,28 +839,13 @@
   .confirm h2 { font-size: 17px; margin: 6px 0 var(--s-3); }
   .confirm .lede { margin: 0; color: var(--muted); font-size: 13px; }
   .confirm .err { margin-top: var(--s-3); }
-  .legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--s-1) var(--s-4);
-    margin-top: var(--s-2);
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
-  .sw.planned { background: var(--teal-400); }
+  .legend { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .sw { display: inline-block; width: 16px; height: 3px; border-radius: 2px; }
+  .sw.planned { background: var(--teal-400); height: 6px; opacity: 0.45; }
   .sw.actual { background: var(--green-500); }
-  .sw.refilled { height: 10px; border-radius: 3px; background: color-mix(in srgb, var(--fill) 35%, transparent); }
-
-  .pv-cap {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--ink);
-    margin-top: var(--s-3);
-    padding: var(--s-2) var(--s-3);
-    background: var(--surface-sunken);
-    border-radius: var(--radius-ctl);
-  }
+  .sw.refilled { width: 12px; height: 12px; border-radius: 3px; background: color-mix(in srgb, var(--fill) 16%, transparent); }
+  .sw.blind { background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 7px); }
 
   .backdrop {
     position: fixed; inset: 0; border: none; padding: 0;
@@ -672,10 +873,9 @@
   .layer.over { z-index: 63; }
   @media (prefers-reduced-motion: reduce) { .modal { animation: none; } }
 
-  .acts { margin-top: var(--s-3); display: flex; flex-direction: column; }
   .act {
-    display: grid; grid-template-columns: 60px 96px 1fr; gap: var(--s-3);
-    align-items: baseline; padding: var(--s-2) 0; font-size: 12px;
+    display: grid; grid-template-columns: 60px 120px 1fr; gap: var(--s-3);
+    align-items: baseline; padding: var(--s-2) 0 var(--s-2) 24px; font-size: 12px;
     color: var(--muted);
   }
   .act + .act { border-top: 1px solid var(--line-soft); }
@@ -683,9 +883,15 @@
   .act .body { color: var(--muted); }
 
   @media (max-width: 720px) {
-    /* No top padding on the detail: the sticky head is the top edge itself. */
-  .modal.detail { padding-top: 0; }
-  .detail-head { align-items: center; flex-wrap: wrap; }
+    .detail-head { flex-wrap: wrap; }
+    .hd-actions { width: 100%; justify-content: space-between; }
+    .again { align-items: flex-start; }
+    /* grey, not a paler teal: that read as "loading" */
+  .again .btn-primary:disabled { background: var(--surface-sunken); border-color: var(--line); color: var(--muted); }
+  .again small { text-align: left; }
+    .figs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .fig:nth-child(3) { border-left: none; }
+    .fig:nth-child(n + 3) { border-top: 1px solid var(--line); }
     .tr { grid-template-columns: 0.5fr 1.4fr 0.9fr 0.9fr; }
     .tr > span:nth-child(4), .tr > span:nth-child(6) { display: none; }
   }

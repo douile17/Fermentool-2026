@@ -237,6 +237,29 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   `parse_refill` must stay in step), `refill_cancelled`, `trim_limit`, `scale_lost`,
   `scale_recovered`.
 
+## History run detail (`History.svelte`, `lib/rundetail.js`)
+
+Redesigned 2026-10-20 (UX audit, mockup on run 194). Order: name and
+`when · ran · person` with a close cross, then the **verdict** (On / Off
+target at ±2 %, worst gap after the first 15 min, 4 figures said once),
+Feed rate (clock-time axis), Running total vs requested (`GapChart`), the
+Feed bottle table, then folded Settings / Regulation / Journal. Logic lives
+in `rundetail.js` as tested plain functions, not in the component.
+- **A refill is not weighed**: its stretch (`report.estimated`) is drawn
+  dashed grey on both charts (`Chart` `blindBands`), and on the gap chart as
+  a straight line between the weighed points around it (the raw estimate
+  zigzagged into a scribble once dashed).
+- **"Fed during refill" is an estimate**, `k × commanded` over the stretch,
+  kept as is after the refill (`settle_anchor`, never corrected by the
+  weight): shown `≈`, grey. Poured = gained + that, good to ~1 g, shown plain.
+- The gap chart is a **5 min average**, not a median: a median of the 0.1 g
+  balance alternation still flips point to point.
+- Journal in words (`journalLines`): one line per refill, the correction and
+  its first ratio merged; same-second events ordered by `id`. Raw entries
+  behind "Show all N entries". Events fetched up to 1000.
+- Explanations (the `≈`, the smoothing, the tolerance) belong in the
+  technical documentation, not as sentences in the popup.
+
 ## Notifications (`notify.rs`)
 
 A `notifier` thread follows the `events` table through its **own** SQLite

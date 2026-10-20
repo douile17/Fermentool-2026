@@ -151,6 +151,15 @@ try {
       await js(`document.querySelector('button.tr').click()`);
       await sleep(2500);
       check('a past run opens', await js(`!!document.querySelector('.modal.detail')`));
+      // The verdict comes first: "On target" / "Off target", or not weighed.
+      check('the run detail says how it went first', await js(`/On target|Off target|Not weighed|wrong side/.test(document.querySelector('.modal.detail .say')?.textContent ?? '')`));
+      check('the run detail shows the feed rate chart', await js(`!!document.querySelector('.modal.detail .block svg')`));
+      if (await js(`!!document.querySelector('.modal.detail .jr')`)) {
+        check('the journal is in words, not event kinds', await js(`![...document.querySelectorAll('.modal.detail .jr b')].some((b) => /_/.test(b.textContent))`));
+      }
+      check('the close button closes the run detail', await js(`(() => { document.querySelector('.modal.detail .x')?.click(); return true; })()`) && (await sleep(400), await js(`!document.querySelector('.modal.detail')`)));
+      await js(`document.querySelector('button.tr').click()`);
+      await sleep(2500);
       const canReplay = await js(`(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('Run again')); return !!b && !b.disabled; })()`);
       if (canReplay) {
         await click('button', 'Run again');
