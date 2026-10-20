@@ -825,10 +825,13 @@
   }
   @keyframes sheen { from { background-position: 100% 0; } to { background-position: -100% 0; } }
   @media (prefers-reduced-motion: reduce) { .fillbar span { animation: none; transition: none; } }
+  /* Each half stays whole: short of room, the right one goes under the
+     left, never a lone "g" or "min" on a line of its own. */
   .fillcap {
-    max-width: 420px; display: flex; justify-content: space-between; gap: var(--s-3);
+    max-width: 420px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px var(--s-3);
     margin-top: 4px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums;
   }
+  .fillcap span { white-space: nowrap; }
   .band-next {
     flex: 1 1 260px; min-width: 0;
     padding-left: var(--s-4); border-left: 2px solid var(--line);
