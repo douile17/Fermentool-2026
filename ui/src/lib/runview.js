@@ -59,15 +59,18 @@ export function when(ms, nowMs = Date.now(), withDate = false) {
   return sameDay ? time : `${d.toLocaleDateString(LOCALE, { weekday: 'short' })} ${time}`;
 }
 
-/** Seconds until a feed bottle of `weightG` runs dry, or null when it cannot
- *  be told. Integrates the curve forward from `elapsedS` (it holds its end
- *  value past `durationS`, as the run does), times the correction `c`, times
- *  `gPerUnit`: grams per minute for one unit of setpoint, measured by the
- *  balance, so it holds for rpm and ml/min runs alike. Gives up past 14 days. */
-export function bottleEmptyInS({ weightG, gPerUnit, planned, elapsedS, durationS, c = 1 }) {
-  if (!(weightG > 0) || !(gPerUnit > 0) || !planned?.length) return null;
+/** Seconds until the feed has drawn `grams` more from the bottle, or null
+ *  when it cannot be told. Integrates the curve forward from `elapsedS` (it
+ *  holds its end value past `durationS`, as the run does), times the
+ *  correction `c`, times `gPerUnit`: grams per minute for one unit of
+ *  setpoint, measured by the balance, so it holds for rpm and ml/min runs
+ *  alike. Gives up past 14 days. A difference of weights only: the balance
+ *  also weighs the bottle and its tubing, so "until it runs dry" from the
+ *  reading alone came out too late, and is no longer shown. */
+export function drawnInS({ grams, gPerUnit, planned, elapsedS, durationS, c = 1 }) {
+  if (!(grams > 0) || !(gPerUnit > 0) || !planned?.length) return null;
   const step = 60;
-  let left = weightG;
+  let left = grams;
   for (let s = 0; s < 14 * 86400; s += step) {
     const t = Math.min(elapsedS + s, durationS);
     const gPerMin = (valueAt(planned, t) ?? 0) * c * gPerUnit;
@@ -112,14 +115,14 @@ export function weighedFlow(points, planned, windowS = 600, maxPoints = 150) {
 }
 
 /** Seconds until an automatic refill starts: the bottle down to the cycle's
- *  `low_g`, the curve integrated forward as in `bottleEmptyInS`. Null when
+ *  `low_g`, the curve integrated forward as in `drawnInS`. Null when
  *  no refill is waiting (none set up, stopped, one under way, or already
  *  under the level). */
 export function refillDueInS({ cycle, weightG, ...flow }) {
   if (!cycle || cycle.halted || cycle.phase !== 'idle' || weightG == null) return null;
   const left = weightG - cycle.low_g;
   if (!(left > 0)) return null;
-  return bottleEmptyInS({ weightG: left, ...flow });
+  return drawnInS({ grams: left, ...flow });
 }
 
 /** The run's state in one line, worst first, with what to check when it

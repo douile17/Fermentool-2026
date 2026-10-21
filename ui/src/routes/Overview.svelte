@@ -4,7 +4,7 @@
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
   import { bottleWeights, weighedOutShown, REFILL_GRACE_MS } from '../lib/balance.js';
-  import { valueAt, hm, clock, when, bottleEmptyInS, refillDueInS, runState, nextRefill, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
+  import { valueAt, hm, clock, when, refillDueInS, runState, nextRefill, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
@@ -184,8 +184,11 @@
       .catch(() => {});
   });
 
-  // When the bottle runs dry: the curve integrated forward, at the grams per
-  // minute the balance measures for one unit of setpoint now.
+  // The grams per minute the balance measures for one unit of setpoint now,
+  // and the curve forward: when the automatic refill should start. No "runs
+  // dry" time any more: the balance weighs the bottle and its tubing too,
+  // whose weight changes from one bottle to the next, so it counted them as
+  // feed and gave an empty time too late (2026-10-21).
   const weightG = $derived(app.status?.scale_weight_g ?? null);
   // A run with automatic refill: the refill pump's cycle (status frame).
   const cycle = $derived(app.status?.refill?.cycle ?? null);
@@ -198,8 +201,6 @@
     if (!(rate > 0) || !(target > 0)) return null;
     return { gPerUnit: rate / target, planned, elapsedS: elapsed, durationS: run.duration_s, c: s?.trim_c ?? 1 };
   });
-  const emptyInS = $derived(flow ? bottleEmptyInS({ weightG, ...flow }) : null);
-  const dryMs = $derived(emptyInS != null ? now + emptyInS * 1000 : null);
   // When the automatic refill should start, for the line on the chart.
   const refillInS = $derived(flow ? refillDueInS({ cycle, weightG, ...flow }) : null);
   const refillMark = $derived(
@@ -213,9 +214,6 @@
     const nr = nextRefill({ cycle, inS: refillInS, nowMs: now });
     if (nr) return nr;
     if (cycle && !cycle.halted) return { label: 'Refill', what: 'The refill pump tops the bottle up', sub: cycleLine(cycle) };
-    if (dryMs != null && dryMs < endMs)
-      return { what: `Refill the feed bottle before ${when(dryMs, now)}`, sub: `in about ${hm(emptyInS)}, ${num(weightG, 1)} g left` };
-    if (dryMs != null) return { what: 'Nothing until the run ends', sub: `the bottle lasts past ${when(endMs, now)}` };
     return { what: `Run ends ${when(endMs, now, true)}`, sub: `in ${hm(run.duration_s - elapsed)}` };
   });
 
@@ -627,9 +625,7 @@
                   <span class="mid mono-num">{shownOut.g != null ? `${num(shownOut.g, 1)} g` : '–'}</span>
                   <span class="k">{shownOut.estimated ? 'weighed out, estimated while refilling' : 'weighed out'}</span>
                 </div>
-                {#if dryMs != null}
-                  <p class="k">Empty around <b>{when(dryMs, now)}</b>, in about {hm(emptyInS)}.</p>
-                {:else if app.status?.tracking?.alarm === 'feed_stopped'}
+                {#if app.status?.tracking?.alarm === 'feed_stopped'}
                   <p class="k">The pump turns but this weight does not fall: look at the line first.</p>
                 {/if}
                 <dl class="stats">
@@ -682,8 +678,6 @@
             nowS={elapsed}
             {startedAtMs}
             {limitPct}
-            {feedSide}
-            {emptyInS}
             live={{
               c: app.status?.trim_c,
               weightG,

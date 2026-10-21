@@ -21,8 +21,6 @@
     nowS,
     startedAtMs,
     limitPct = null,
-    feedSide = true,
-    emptyInS = null,
     // The run's tracking report, loaded by the page (it states the totals too).
     report = null,
     // The latest values from the status frame, every second: appended to the
@@ -166,9 +164,6 @@
   const wMax = $derived(Math.max(100, ...wPts.map((p) => p[1])) * 1.08);
   const wy = (w) => tops[2] + PH * (1 - Math.max(0, w) / wMax);
   const wNow = $derived(wPts.at(-1)?.[1] ?? null);
-  // Straight dashed line to the moment it runs dry, when that is on the chart.
-  const emptyAt = $derived(feedSide && emptyInS != null ? nowS + emptyInS : null);
-  const emptyOnChart = $derived(emptyAt != null && emptyAt <= span);
 
   // What the regulation did, in time order, numbered like the chart badges.
   const LABELS = {
@@ -252,10 +247,6 @@
       {#if wPts.length > 1}
         <path class="w" d={line(wPts.map(([t, w]) => [x(t), wy(w)]))} />
       {/if}
-      {#if wNow != null && emptyOnChart}
-        <path class="w proj" d={line([[xNow, wy(wNow)], [x(emptyAt), wy(0)]])} />
-        <circle class="empty" cx={x(emptyAt)} cy={wy(0)} r="4" />
-      {/if}
 
       <!-- events, through all three panels -->
       {#each marks as m, i}
@@ -286,7 +277,7 @@
       {/if}
     </svg>
 
-    {#if marks.length || emptyAt != null || estSpans.length}
+    {#if marks.length || estSpans.length}
       <ol class="key">
         {#if estSpans.length}
           <li class="est"><i></i>estimated, bottle being refilled</li>
@@ -294,9 +285,6 @@
         {#each marks as m, i}
           <li><i>{i + 1}</i>{m.label}<span class="mono">{when(startedAtMs + m.t * 1000)}</span></li>
         {/each}
-        {#if emptyAt != null}
-          <li class="dry"><i></i>runs dry<span class="mono">{when(startedAtMs + emptyAt * 1000)}</span></li>
-        {/if}
       </ol>
     {/if}
     {#if report?.points.length && report.points.at(-1)[0] > durationS + 1}
@@ -323,8 +311,6 @@
   .reg { --est: #4f7fd9; }
   .key .est i { border: none; width: 14px; height: 0; border-top: 2px dashed var(--est); border-radius: 0; }
   .w { fill: none; stroke: var(--ink); stroke-width: 1.6; opacity: 0.75; }
-  .w.proj { stroke-dasharray: 4 4; opacity: 0.4; }
-  .empty { fill: var(--measured); }
   .mark { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.6; }
   .badge { fill: var(--surface); stroke: var(--muted); stroke-width: 1; }
   .badge-n { font-family: var(--mono); font-size: 9.5px; font-weight: 600; fill: var(--ink); }
@@ -346,7 +332,6 @@
     width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--muted);
     display: inline-grid; place-items: center;
   }
-  .key .dry i { border: none; background: var(--measured); width: 8px; height: 8px; }
   .key .mono { color: var(--ink); }
   .held { margin: 0; font-size: 12px; color: var(--muted); }
 </style>

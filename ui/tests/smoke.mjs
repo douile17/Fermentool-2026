@@ -94,6 +94,9 @@ try {
   await cmd('Page.navigate', { url: URL });
   await sleep(2500);
   check('the app loads', await js(`!!document.querySelector('.tab')`));
+  // No "runs dry" time: the balance weighs the bottle and its tubing too,
+  // so it came out too late (removed 2026-10-21).
+  check('the Overview gives no time the bottle runs dry', await js(`!/Empty around|runs dry/i.test(document.body.innerText)`));
 
   if (!idle) {
     console.log(`skip  New run and History: run ${status.active.run_id} is active`);
