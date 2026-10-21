@@ -2,6 +2,7 @@
   import { num, vol } from '../lib/fmt.js';
   import { valueScale } from '../lib/chartscale.js';
   import { splitEstimated } from '../lib/refill.js';
+  import { textBox, placeLabel, besideLine } from '../lib/chartlabels.js';
 
   /**
    * @type {{
@@ -187,9 +188,34 @@
   });
 
   // The next refill, drawn only inside the chart (past its end it would sit
-  // on the end and lie about the time). Label on the side with room.
+  // on the end and lie about the time). Its label takes the first place
+  // beside the line clear of every other text and of the curve
+  // (lib/chartlabels.js): it once printed over the end value. With no
+  // clear place it is left out; the line stays.
   const refillX = $derived(refill && refill.t > 0 && refill.t < dspan ? x(refill.t) : null);
-  const refillFlip = $derived(refillX != null && refillX > W - 110);
+  const takenBoxes = $derived.by(() => {
+    const out = grid.filter((g) => g.text != null).map((g) => textBox(padL + 2, g.ly, g.text, 'start', 9.5));
+    if (labels) {
+      out.push(textBox(clampX(labels.sx) + 6, labels.sy, `${num(labels.sVal, digits)} ${unit}`, 'start'));
+      out.push(textBox(clampX(labels.ex) - 6, labels.ey, `${num(labels.eVal, digits)} ${unit}`, 'end'));
+    }
+    for (const m of markerBadges) out.push({ x: m.bx - BADGE_R, y: 1, w: 2 * BADGE_R, h: 2 * BADGE_R });
+    return out;
+  });
+  const curveYAt = (px) => {
+    const v = curveValueAt(((px - padL) / (W - padL - padR)) * dspan);
+    return v == null ? null : y(v);
+  };
+  const refillLabel = $derived(
+    refillX == null
+      ? null
+      : placeLabel(besideLine(refillX, refill.label, { top: padT + 10, bottom: H - padB - 4, W }), {
+          taken: takenBoxes,
+          yAt: curveYAt,
+          W,
+          H,
+        }),
+  );
 
   // Journalled setpoints drawn as one continuous trace rather than a dot per
   // tick; cut where it enters and leaves the bands when they are blind.
@@ -274,8 +300,9 @@
 
     {#if refillX != null}
       <line x1={refillX} x2={refillX} y1={padT} y2={H - padB} class="refill" />
-      <text x={refillX + (refillFlip ? -5 : 5)} y={padT + 10} text-anchor={refillFlip ? 'end' : 'start'}
-            class="axl refill-l">{refill.label}</text>
+      {#if refillLabel}
+        <text x={refillLabel.x} y={refillLabel.y} text-anchor={refillLabel.anchor} class="axl refill-l">{refill.label}</text>
+      {/if}
     {/if}
 
     {#if nowX != null && nowS < dspan}
