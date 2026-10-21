@@ -144,7 +144,8 @@ vraies données), puis mise en place.
 | `d2d3754` | Menu « Feeding profile » |
 | `9ff778e` | Étiquette « refill » sans chevauchement |
 | `cbcffb5` | Plus d'heure « runs dry » |
-| (suivant) | Vitesse de remplissage en direct, balance plus tolérante, documentation |
+| `09c2b69` | Vitesse de remplissage en direct, balance plus tolérante |
+| `fad63ac` | Notes de session, changelog, règles dans CLAUDE.md |
 
 Les commits `build(ui)` qui les suivent portent le bundle.
 
