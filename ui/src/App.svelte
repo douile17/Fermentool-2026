@@ -119,7 +119,7 @@
     return { label: runRs.word, sub: runRs.title };
   });
   const PAGE_TITLES = { overview: 'Overview', history: 'History', calibration: 'Tubing calibration', new: 'New run' };
-  const pageTitle = $derived(app.route === 'settings' ? 'Settings' : (PAGE_TITLES[app.tab] ?? 'Pump control'));
+  const pageTitle = $derived(app.route === 'settings' ? 'Settings' : (PAGE_TITLES[app.tab] ?? 'Feeding profile'));
 
   // The Overview's band says it already, in full.
   const onOverview = $derived(app.route === 'pump' && app.tab === 'overview');
@@ -330,7 +330,7 @@
         class:running
         onclick={() => go(() => (app.route = 'pump'))}
       >
-        <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} direction={app.status?.active?.direction ?? 'cw'} solid /></span>Pump control
+        <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} direction={app.status?.active?.direction ?? 'cw'} solid /></span>Feeding profile
       </button>
     </nav>
 

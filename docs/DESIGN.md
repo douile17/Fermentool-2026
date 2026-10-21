@@ -13,7 +13,7 @@ white-forward, read at a glance from across the bench, honest about state.
    `ui/`. Iterate on it with the user.
 2. Implement in the app only when the user says so ("mets en place", "on part
    là-dessus", "go").
-3. Keep the navigation: rail with Pump control (Overview / History / Tubing
+3. Keep the navigation: rail with Feeding profile (Overview / History / Tubing
    calibration tabs) and Settings (gear), the light/dark toggle.
 4. Verify on a **local copy** (`vite` dev or `vite preview` on the built
    bundle) with simulated states injected into `app.status`, never by acting

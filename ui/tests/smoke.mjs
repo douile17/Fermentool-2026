@@ -186,7 +186,7 @@ try {
   );
 
   // --- Tubing calibration last: it is only looked at, its draft untouched
-  await click('button', 'Pump control');
+  await click('button', 'Feeding profile');
   await sleep(500);
   check('Tubing calibration opens', await click('.tab', 'Tubing calibration'));
   await sleep(1800);
