@@ -751,10 +751,6 @@ pub struct TrackingReport {
     /// Required minus delivered at the last point, positive = behind.
     pub deficit_ml: f64,
     pub deficit_pct: Option<f64>,
-    /// Exponential curves only: the µ asked for, and the µ that best fits
-    /// the delivered volume (per hour).
-    pub mu_requested: Option<f64>,
-    pub mu_delivered: Option<f64>,
     /// When the regulation acted, for the chart: `trim_start` (c first
     /// moved) and `trim_ratio` (pump ratio first measured).
     pub markers: Vec<TrackMarker>,
@@ -1977,15 +1973,6 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
     let delivered_ml: Vec<f64> = sampled.iter().map(|&(_, d)| d / rho).collect();
     let req_end = required_ml.last().copied().unwrap_or(0.0);
     let del_end = delivered_ml.last().copied().unwrap_or(0.0);
-    let mu_requested = tracking::requested_mu_per_hour(&run.curve);
-    let mu_delivered = mu_requested.and_then(|mu| {
-        let pts: Vec<(f64, f64)> = sampled
-            .iter()
-            .zip(&delivered_ml)
-            .map(|(&(t, _), &v)| (t / 3600.0, v))
-            .collect();
-        tracking::fit_exponential_mu(&pts, mu)
-    });
     let events = store.events_of_kinds(run_id, MARKER_KINDS)?;
     let at = |e: &EventRow| e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0);
     let markers = events.iter().map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() }).collect();
@@ -2018,8 +2005,6 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
         r_squared: tracking::r_squared(&required_ml, &delivered_ml),
         deficit_ml: req_end - del_end,
         deficit_pct: (req_end > 0.0).then(|| 100.0 * (req_end - del_end) / req_end),
-        mu_requested,
-        mu_delivered,
     }))
 }
 
@@ -4889,8 +4874,6 @@ mod tests {
         }
         let r = e.tracking_report(id).unwrap().expect("report");
         assert!(r.r_squared.unwrap() > 0.999, "R² {:?}", r.r_squared);
-        assert!((r.mu_requested.unwrap() - 0.15).abs() < 1e-9);
-        assert!((r.mu_delivered.unwrap() - 0.15).abs() < 0.01, "µ {:?}", r.mu_delivered);
         assert!(r.points.len() <= 2000);
     }
 

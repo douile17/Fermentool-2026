@@ -611,10 +611,6 @@
               <dt>Largest gap</dt>
               <dd><span class="mono">+{num(extremes.ahead, 1)} mL</span> ahead, <span class="mono">−{num(Math.abs(extremes.behind), 1)} mL</span> behind</dd>
               <dt>Fit, R²</dt><dd class="mono">{sel.report.r_squared != null ? sel.report.r_squared.toFixed(4) : '·'}</dd>
-              {#if sel.report.mu_requested != null}
-                <dt>µ requested</dt><dd class="mono">{sel.report.mu_requested.toFixed(4)} h⁻¹</dd>
-                <dt>µ delivered</dt><dd class="mono">{sel.report.mu_delivered != null ? `${sel.report.mu_delivered.toFixed(4)} h⁻¹` : '·'}</dd>
-              {/if}
             </dl>
           </details>
         {/if}

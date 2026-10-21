@@ -248,7 +248,7 @@
     };
   });
   // Asked and weighed totals off the status frame, every second, as the old
-  // page did; the 10 s report is only for R², µ and the charts.
+  // page did; the 10 s report is only for R² and the charts.
   const lastPt = $derived.by(() => {
     const tr = app.status?.tracking;
     if (trimmed && tr) return [elapsed, tr.required_ml, tr.delivered_ml];
@@ -600,10 +600,6 @@
                 </div>
                 <dl class="stats">
                   <div><dt>R²</dt><dd class="mono">{report?.r_squared != null ? report.r_squared.toFixed(5) : '·'}</dd></div>
-                  {#if report?.mu_requested != null}
-                    <div><dt>µ asked</dt><dd class="mono">{report.mu_requested.toFixed(4)} h⁻¹</dd></div>
-                    <div><dt>µ delivered</dt><dd class="mono">{report.mu_delivered != null ? report.mu_delivered.toFixed(4) : '·'} h⁻¹</dd></div>
-                  {/if}
                 </dl>
                 <p class="k">{vol(lastPt[2])} weighed out of {vol(lastPt[1])} asked since the start.</p>
                 {#if missedMl > 0.05}

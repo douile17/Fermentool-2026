@@ -355,55 +355,6 @@ pub fn r_squared(required: &[f64], delivered: &[f64]) -> Option<f64> {
     (ss_tot > 0.0).then(|| 1.0 - ss_res / ss_tot)
 }
 
-/// µ (per hour) of the exponential feed that best explains a cumulative
-/// delivered volume: least squares on `V(t) = F0/µ (e^(µt) - 1)`, F0 in
-/// closed form for each µ, µ by golden-section search on `ln µ` over
-/// `[guess/4, guess*4]`. `points` are `(t_hours, delivered_ml)`.
-pub fn fit_exponential_mu(points: &[(f64, f64)], mu_guess: f64) -> Option<f64> {
-    if points.len() < 3 || mu_guess.is_nan() || mu_guess <= 0.0 {
-        return None;
-    }
-    let sse = |mu: f64| {
-        let g: Vec<f64> = points.iter().map(|(t, _)| ((mu * t).exp() - 1.0) / mu).collect();
-        let gg: f64 = g.iter().map(|x| x * x).sum();
-        if gg <= 0.0 {
-            return f64::INFINITY;
-        }
-        let f0 = points.iter().zip(&g).map(|((_, v), x)| v * x).sum::<f64>() / gg;
-        points.iter().zip(&g).map(|((_, v), x)| (v - f0 * x).powi(2)).sum::<f64>()
-    };
-    let phi = (5f64.sqrt() - 1.0) / 2.0;
-    // e^(µt) overflows past µt ~ 709: search no higher than that over the
-    // run, or every sum is NaN and the search wanders.
-    let t_max = points.iter().map(|(t, _)| *t).fold(0.0, f64::max);
-    let hi = if t_max > 0.0 { (mu_guess * 4.0).min(700.0 / t_max) } else { mu_guess * 4.0 };
-    let lo = mu_guess / 4.0;
-    if hi <= lo {
-        return None;
-    }
-    let (mut a, mut b) = (lo.ln(), hi.ln());
-    for _ in 0..100 {
-        let c = b - phi * (b - a);
-        let d = a + phi * (b - a);
-        if sse(c.exp()) < sse(d.exp()) {
-            b = d;
-        } else {
-            a = c;
-        }
-    }
-    let mu = ((a + b) / 2.0).exp();
-    (mu.is_finite() && sse(mu).is_finite()).then_some(mu)
-}
-
-/// The µ an exponential curve asks for, whatever its parameter mode.
-pub fn requested_mu_per_hour(spec: &fermentool_curves::CurveSpec) -> Option<f64> {
-    if spec.kind() != fermentool_curves::CurveKind::Exponential {
-        return None;
-    }
-    let (s, e, h) = (spec.start, spec.effective_end(), spec.duration_hours());
-    (s > 0.0 && e > 0.0 && h > 0.0).then(|| (e / s).ln() / h)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,41 +568,6 @@ mod tests {
         assert!((r_squared(&req, &req).unwrap() - 1.0).abs() < 1e-12);
         let off: Vec<f64> = req.iter().map(|v| v * 0.9).collect();
         assert!(r_squared(&req, &off).unwrap() < 0.99);
-    }
-
-    #[test]
-    fn fits_the_mu_of_an_exponential_cumulative_volume() {
-        // F(t) = 2 e^(0.15 t) mL/h, so V(t) = 2/0.15 (e^(0.15 t) - 1).
-        let pts: Vec<(f64, f64)> = (0..=200)
-            .map(|i| {
-                let t = i as f64 * 0.1;
-                (t, 2.0 / 0.15 * ((0.15 * t).exp() - 1.0))
-            })
-            .collect();
-        let mu = fit_exponential_mu(&pts, 0.1).unwrap();
-        assert!((mu - 0.15).abs() < 1e-4, "got {mu}");
-    }
-
-    #[test]
-    fn a_long_fast_run_does_not_overflow_the_fit() {
-        // µ 2/h over 100 h: e^(4µ·t) is far past f64. The fit must not
-        // wander on NaN sums: it answers within its bounds, or not at all.
-        let pts: Vec<(f64, f64)> = (0..=100).map(|i| (i as f64, (0.002 * i as f64).exp())).collect();
-        if let Some(mu) = fit_exponential_mu(&pts, 2.0) {
-            assert!(mu.is_finite() && mu <= 7.0, "got {mu}");
-        }
-    }
-
-    #[test]
-    fn requested_mu_for_both_exponential_modes_and_none_otherwise() {
-        use fermentool_curves::CurveSpec;
-        use std::time::Duration;
-        let d = Duration::from_secs(10 * 3600);
-        let physio = CurveSpec::exponential_physio(1.0, 0.15, d);
-        assert!((requested_mu_per_hour(&physio).unwrap() - 0.15).abs() < 1e-9);
-        let ends = CurveSpec::exponential_endpoints(1.0, (1.5f64).exp(), d);
-        assert!((requested_mu_per_hour(&ends).unwrap() - 0.15).abs() < 1e-9);
-        assert_eq!(requested_mu_per_hour(&CurveSpec::linear(1.0, 2.0, d)), None);
     }
 
     #[test]
