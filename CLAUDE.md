@@ -174,6 +174,17 @@ seconds to load with the balance off). Hence:
   reopened port is `scale_unconfirmed` until a weight arrives: an open COM
   port is not a connected balance, and counting it as one made a switched-off
   balance flap lost/recovered every 20 s.
+- **A busy PC delays the balance, it does not break it.** The weight request
+  (3 bytes) may wait up to `SCALE_WRITE_WITHIN` (800 ms) for the port to take
+  it (`scale::write_within`, retried past the port's own 200 ms timeout).
+  With 200 ms, "failed to write whole buffer" came 170 times in October,
+  163 of them during a Claude Code session (a compile, `npm run build`, Vite,
+  headless Edge), and cut run 210's refill on 21 Oct. Keep `SCALE_WRITE_WITHIN`
+  + the read timeout (1.5 s) under `SCALE_MAX_AGE` (2.5 s), a test checks it,
+  or a slow good reading reads as a stuck thread.
+- **A fill is cut only after `REFILL_BLIND_S` (3 s) without a reading**
+  (`refill_cycle_read_failed`), not at the first one missed; any reading
+  restarts that grace. A dozen grams over the level at worst.
 - The API reads the journal on its own SQLite connection (`api::ApiDb`, via
   `spawn_blocking`): runs, ticks, events, tracking, calibrations and the
   calibration draft never go through the control thread. Only what needs the
@@ -237,6 +248,13 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   20 s, then 10 s. A slow rise rewinds the count to the lowest Normal read
   (`rewind_slow_rise`). The ratio history survives a refill, except under an
   alarm (dry bottle). No gain over the weight before = a lift, not a refill.
+- The refill pump's speed (`[refill] speed_rpm`) is written at each fill's
+  start, and **at once when Settings changes it mid-fill**
+  (`refill_speed_now`, event `refill_speed`); a direction change waits for
+  the next fill (reversed mid-fill it would empty the bottle).
+- No "runs dry" time anywhere: the balance weighs the bottle, its cap and its
+  tubing too, whose weight changes per bottle. Only differences of weight are
+  projected (`drawnInS`: the next refill).
 - Events journalled for the chart markers and notifications: `trim_start`,
   `trim_ratio`, `alarm_*`, `alarm_cleared`, `refill` (`refill_detail` /
   `parse_refill` must stay in step), `refill_cancelled`, `trim_limit`, `scale_lost`,
@@ -304,11 +322,18 @@ template only targets group chats), which is why ntfy is the default.
   --release`, start the exe, check `/api/status` and that the served bundle
   contains the change; tell the user to Ctrl+F5 (an open tab keeps the old UI
   in memory).
+- **During an active run, run heavy work at low priority**, so Windows
+  serves the daemon first: `cmd /c '"...vcvars64.bat" >nul 2>&1 && start "" /b
+  /low /wait cargo test ...'` (same for `cargo build`, `npm run build`, Vite,
+  headless Edge). A saturated PC made the balance miss reads (see Serial I/O
+  above). Two full test runs at low priority during run 210: no balance error.
+  Tell the user before heavy work if a refill is under way.
 - Rewriting a file through PowerShell `Get-Content`/`Set-Content` mangles its
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
-- The session log, findings on the hardware and the to-do list:
-  `docs/notes-de-session-2026-09-30.md`.
+- The session logs, findings on the hardware and the to-do list:
+  `docs/notes-de-session-*.md` (latest: `2026-10-21`, its section 8 is the
+  open list). User-facing changes: `CHANGELOG.md`.
 
 ## Curve engine (`crates/fermentool-curves`)
 

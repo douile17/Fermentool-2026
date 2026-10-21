@@ -2,6 +2,35 @@
 
 ## Non publié (depuis 0.1.5)
 
+### History, calibration, remplissage (20 et 21 octobre)
+
+- Fiche d'un run dans History refaite : le nom et les dates d'abord, puis le
+  verdict (On / Off target à ±2 %, livré, % du demandé, remplissages,
+  alarmes), le débit sur un axe en heures, l'écart cumulé au demandé, un
+  tableau du flacon, et repliés les réglages, la régulation et un journal en
+  mots. Pendant un remplissage, non pesé, les courbes passent en pointillés
+  gris.
+- Courbe Step : la fin s'affiche en marche, plus en pente. L'Overview ne
+  montre plus un débit qui descend alors que la pompe tourne encore.
+- Le µ du débit (« µ asked / µ delivered ») n'est plus affiché ni calculé :
+  il se lisait comme un taux de croissance de la biomasse. Le µ saisi en mode
+  Physio reste.
+- Calibration du tuyau : « measurements » au lieu de « bursts », chaque
+  mesure s'ouvre (poids, débit, pente, courbe de la balance), « Redo » sur
+  chaque carte à tout moment, « Redo all 3 » qui garde le tube et le réglage,
+  pesée sur la moyenne des lectures stables (5 s) au lieu d'une seule.
+- Le menu s'appelle « Feeding profile ».
+- L'étiquette « refill » du graphique ne s'écrit plus sur un autre texte ni
+  sur la courbe.
+- Plus d'heure « Empty around » ni de « runs dry » : la balance pèse aussi le
+  flacon et ses tuyaux, l'heure était fausse.
+- Une vitesse de pompe de remplissage changée pendant un remplissage
+  s'applique aussitôt (avant : au remplissage suivant).
+- Balance plus tolérante à un PC chargé : une demande de poids peut attendre
+  0,8 s (avant 0,2 s), et un remplissage n'est coupé qu'après 3 s sans
+  lecture. Un remplissage du run 210 avait été coupé par une seule lecture
+  manquée pendant une compilation.
+
 ### État du run et interface (19 et 20 octobre)
 
 - Bandeau de l'Overview coloré selon l'état, seulement quand il faut y
