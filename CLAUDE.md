@@ -112,6 +112,11 @@ else to install:
   labels. (We swept the whole repo for this twice, once wrong, replacing `—`
   with `, `, which is itself the anglicism to avoid, then again with real
   punctuation. Don't reintroduce either.)
+- **The UI says "measurement", never "burst"** (decided 2026-10-20): a
+  tubing calibration is three *measurements*. The code, the API and the
+  draft keep `burst` (`d.bursts`, `burstRunning`); every string a user can
+  read, daemon errors included, says measurement. The smoke test fails on
+  "burst" in the calibration page. Not "run" either: a run is a feed run.
 - **Pump is driven by rpm or ml/min only.** Never write the pump's head /
   tubing registers. An ml/min run given an **rpm** tubing calibration is
   *driven in rpm* (`Engine::drive_ml_per_rpm`): curve, journal, volume and

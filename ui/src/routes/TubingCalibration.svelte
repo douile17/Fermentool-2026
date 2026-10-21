@@ -17,6 +17,10 @@
   import PumpHead from '../components/PumpHead.svelte';
   import Icon from '../components/Icon.svelte';
   import Steps from '../components/Steps.svelte';
+  import MeasurementChart from '../components/MeasurementChart.svelte';
+  import {
+    measurementProfile, defaultMeasurement, pushStable, stableMean, redoAllSummary, withoutMeasurements, SKIP_START_S, SKIP_END_S,
+  } from '../lib/measurement.js';
   import { expectedMlMin, stallCheckAtS, burstTrouble } from '../lib/stall.js';
   import { inches, sizeParts, boreClass, parseSize, COMMON_SIZES, MM_PER_IN, KNOWN_BRANDS } from '../lib/tubesize.js';
 
@@ -74,6 +78,7 @@
   let working = $state(false);
   let saved = $state(null); // the stored row, authoritative
   let durations = $state({}); // run_id -> minutes, from the run rows
+  let runStarts = $state({}); // run_id -> started_at, for the detail
   let history = $state([]);
 
   let pumpAddr = $state(1);
@@ -210,7 +215,8 @@
     const n = slot + 1;
     const setpoint = Number(d.setpoint);
     const lim = d.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS;
-    const startG = scaleW; // before the pump moves
+    // before the pump moves: the mean of the stable readings, as at the end
+    const startG = avgW ? Number(avgW.g.toFixed(2)) : scaleW;
     try {
       const r = await post('/api/runs', {
         name: `calibration ${d.tubing_lot_id.trim()} ${n}/3`,
@@ -289,8 +295,8 @@
   }
 
   async function saveBalanceReading() {
-    if (!(collectedG > 0)) return;
-    current.weight_g = Number(collectedG.toFixed(2));
+    if (!(weighG > 0)) return;
+    current.weight_g = Number(weighG.toFixed(2));
     weightInput = '';
     await persist();
   }
@@ -336,13 +342,30 @@
   const steadyS = $derived(
     stableSince == null ? 0 : (tick - Math.max(stableSince, (stoppedAt ?? 0) + AFTER_STOP_S * 1000)) / 1000,
   );
+  // The weighing is the mean of the last 5 s of stable readings
+  // (lib/measurement.js), at the start as at the end: one reading on a
+  // balance flickering 27.4 / 27.5 / 27.6 g was whichever came at the click.
+  // Nothing while a measurement pumps, nor in the AFTER_STOP_S after it.
+  let stableBuf = $state([]);
+  $effect(() => {
+    const s = app.status; // every status pushed, about once a second
+    if (!s) return;
+    untrack(() => {
+      const t = Date.now();
+      if (burstRunning || (stoppedAt != null && t < stoppedAt + AFTER_STOP_S * 1000)) stableBuf = [];
+      else stableBuf = pushStable(stableBuf, { t, w: s.scale_weight_g, stable: s.scale_stable === true });
+    });
+  });
+  const avgW = $derived(stableMean(stableBuf));
+  // What a weighing now would record: the mean against the start weight.
+  const weighG = $derived(current?.start_g != null && avgW ? Math.abs(avgW.g - current.start_g) : collectedG);
   const canAuto = $derived(scaleW != null && !complete && !otherRunActive && (current == null || current.start_g != null || current.weight_g != null));
   const autoStep = $derived(
     burstRunning
-      ? `burst ${(current?.slot ?? 0) + 1}/3 pumping`
+      ? `measurement ${(current?.slot ?? 0) + 1}/3 pumping`
       : needsWeight
         ? 'settling, then weighing'
-        : `burst ${(freeSlot ?? 0) + 1}/3 starts when the balance is still`,
+        : `measurement ${(freeSlot ?? 0) + 1}/3 starts when the balance is still`,
   );
 
   async function setAuto(on) {
@@ -370,8 +393,8 @@
       } else {
         markAlarm('dry');
         err = {
-          message: `The balance moved by ${num(collectedG ?? 0, 2)} g over the burst: automatic mode stopped.`,
-          hint: 'Is the feed bottle on the balance, and the line drawing from it? Pump this burst again once it is.',
+          message: `The balance moved by ${num(collectedG ?? 0, 2)} g over the measurement: automatic mode stopped.`,
+          hint: 'Is the feed bottle on the balance, and the line drawing from it? Redo this measurement once it is.',
         };
         d.auto = false;
         d.auto_owner = null;
@@ -389,9 +412,9 @@
     if (d.auto || working || burstRunning || !needsWeight || current.alarm) return;
     if (steadyS < STEADY_S) return;
     if (current.run_id === startedHere && !seenRunning.has(current.run_id)) return;
-    if (collectedG != null && collectedG >= MIN_COLLECTED_G) {
+    if (weighG != null && weighG >= MIN_COLLECTED_G) {
       if (weighMode === 'auto') saveBalanceReading();
-    } else if (collectedG != null) {
+    } else if (weighG != null) {
       markAlarm('dry');
     }
   });
@@ -452,14 +475,30 @@
     if (weighMode === 'auto' && autoAvailable && !alarmed) await setAuto(true);
   }
 
+  // Redo all 3: every measurement dropped, the tube and the pump setup kept
+  // (Abandon clears those too). Asked first; never while one pumps. Their
+  // runs stay in the journal, as with one measurement redone.
+  let confirmAll = $state(false);
+  const allSummary = $derived(redoAllSummary(d.bursts));
+  async function redoAll() {
+    if (burstRunning || !d.bursts.length) return;
+    confirmAll = false;
+    confirmRedo = null;
+    editing = null;
+    picked = 0;
+    Object.assign(d, withoutMeasurements(d));
+    await persist();
+    // In automatic weighing the sequence starts over from measurement 1.
+    if (weighMode === 'auto' && autoAvailable) await setAuto(true);
+  }
+
   // Two-step, in-page: a native confirm() dialog is not something the
   // desktop webview can be relied on to show.
   let confirmDiscard = $state(false);
   // Something typed or pumped worth asking before clearing.
   const abandonable = $derived(locked || !!d.tubing_lot_id?.trim());
-  // Pump again: on every burst once all three are done, before that only on
-  // a burst that raised an alarm. Never while one pumps.
-  const redoable = (i) => !burstRunning && !!bySlot(i) && (complete || !!bySlot(i).alarm);
+  // Redo: any measurement pumped, at any time, never while one pumps.
+  const redoable = (i) => !burstRunning && !!bySlot(i);
   async function discard() {
     confirmDiscard = false;
     err = null;
@@ -498,9 +537,9 @@
       get lines() {
         const n = d.bursts.length;
         return [
-          ...(burstRunning ? ['The burst in progress stops the pump.'] : []),
-          n ? `The tube, the setpoint and the ${n} burst${n === 1 ? '' : 's'} so far are cleared.` : 'What you entered is cleared.',
-          ...(n ? ['The bursts already pumped stay in History.'] : []),
+          ...(burstRunning ? ['The measurement in progress stops the pump.'] : []),
+          n ? `The tube, the setpoint and the ${n} measurement${n === 1 ? '' : 's'} so far are cleared.` : 'What you entered is cleared.',
+          ...(n ? ['The measurements already pumped stay in the journal.'] : []),
         ];
       },
       leave: () => discard(),
@@ -517,65 +556,28 @@
     return `${Math.floor(tenths / 600)} min ${num((tenths % 600) / 10, 1)} s`;
   };
 
-  // The balance every second across each burst (journalled by the daemon):
-  // the flow as a slope over the steady middle (start and stop transients
-  // left out), and how much it changed from the first half to the second.
+  // The balance every second across each measurement (journalled by the
+  // daemon): its curve, the flow as a slope over the steady middle and how
+  // it changed from the first half to the second (lib/measurement.js).
   // Diagnostic only; the recorded weight stays the before/after difference.
-  const SKIP_START_S = 15;
-  const SKIP_END_S = 3;
-  let profiles = $state({}); // run_id -> { gPerMin, driftPct } | null
-  function slope(pts) {
-    const n = pts.length;
-    if (n < 5) return null;
-    const mx = pts.reduce((a, p) => a + p[0], 0) / n;
-    const my = pts.reduce((a, p) => a + p[1], 0) / n;
-    let sxy = 0;
-    let sxx = 0;
-    for (const [x, y] of pts) {
-      sxy += (x - mx) * (y - my);
-      sxx += (x - mx) ** 2;
-    }
-    return sxx > 0 ? sxy / sxx : null;
-  }
+  let profiles = $state({}); // run_id -> measurementProfile | null
   $effect(() => {
     for (const b of d.bursts) {
       if (b.weight_g == null || b.run_id in profiles) continue;
       profiles[b.run_id] = null;
       get(`/api/runs/${b.run_id}/ticks?from=0&to=100000`)
-        .then((ticks) => {
-          const end = Math.max(...ticks.map((t) => t.elapsed_s));
-          const pts = ticks
-            .filter((t) => t.weight_g != null && t.elapsed_s >= SKIP_START_S && t.elapsed_s <= end - SKIP_END_S)
-            .map((t) => [t.elapsed_s, t.weight_g]);
-          // A burst from before the balance was read mid-burst journals one
-          // stale weight throughout: nothing to show.
-          if (new Set(pts.map((p) => p[1])).size < 3) return;
-          const all = slope(pts);
-          if (all == null) return;
-          const mid = pts.length >> 1;
-          const first = pts.slice(0, mid);
-          const second = pts.slice(mid);
-          const a = slope(first);
-          const z = slope(second);
-          // A half that moved only a few balance steps has no slope to compare:
-          // dividing by its near-zero one gave "+1.98e+28 %" on a dry burst.
-          const span = (h) => (h.length > 1 ? h[h.length - 1][0] - h[0][0] : 0);
-          const enough = (k, h) => k != null && Math.abs(k) * span(h) >= 5 * resG;
-          profiles[b.run_id] = {
-            gPerMin: Math.abs(all) * 60,
-            driftPct: enough(a, first) && enough(z, second) ? (100 * (Math.abs(z) - Math.abs(a))) / Math.abs(a) : null,
-          };
-        })
+        .then((ticks) => (profiles[b.run_id] = measurementProfile(ticks, resG)))
         .catch(() => {});
     }
   });
 
-  // Real burst durations, for the preview only.
+  // Real measurement durations, and when each started.
   $effect(() => {
     for (const b of d.bursts) {
       if (b.weight_g == null || durations[b.run_id] != null) continue;
       get(`/api/runs/${b.run_id}`)
         .then((run) => {
+          if (run?.started_at) runStarts[b.run_id] = run.started_at;
           if (run?.ended_at) {
             durations[b.run_id] =
               (Date.parse(run.ended_at) - Date.parse(run.started_at)) / 60000;
@@ -705,8 +707,8 @@
       // green as soon as its own fields are filled, not once a burst ran
       done: (directionOk && Number(d.setpoint) > 0 && Number(d.target_min) > 0 && Number(d.density_g_per_ml) > 0) || !!saved,
     },
-    { n: 3, label: 'Bursts', sub: `${d.bursts.filter((b) => b.weight_g != null).length} of 3 weighed`, reach: formOk, done: complete || !!saved },
-    { n: 4, label: 'Result', sub: saved ? `recorded, #${saved.id}` : complete ? 'ready to record' : 'after the bursts', reach: complete || !!saved, done: !!saved },
+    { n: 3, label: 'Measurements', sub: `${d.bursts.filter((b) => b.weight_g != null).length} of 3 weighed`, reach: formOk, done: complete || !!saved },
+    { n: 4, label: 'Result', sub: saved ? `recorded, #${saved.id}` : complete ? 'ready to record' : 'after the measurements', reach: complete || !!saved, done: !!saved },
   ]);
 
 
@@ -914,14 +916,14 @@
     }
   }
   const ALARM_TEXT = {
-    still: 'The balance did not move during this burst.',
-    stopped: 'The balance stopped moving during this burst.',
-    reversed: 'The weight went back the wrong way during this burst.',
-    dry: 'This burst came out with almost nothing on the balance.',
+    still: 'The balance did not move during this measurement.',
+    stopped: 'The balance stopped moving during this measurement.',
+    reversed: 'The weight went back the wrong way during this measurement.',
+    dry: 'This measurement came out with almost nothing on the balance.',
     slow: 'The flow was far below what this tube should give.',
   };
   const TROUBLE = {
-    still: 'The balance has not moved since the burst started',
+    still: 'The balance has not moved since the measurement started',
     stopped: 'The balance has stopped moving',
     reversed: 'The weight is going back the wrong way',
     slow: 'The flow is far below what this tube should give',
@@ -951,14 +953,17 @@
       };
     }),
   );
-  // The burst being dealt with now: the first one not weighed yet (pumping,
-  // to weigh, or next to start). Done ones step back, the coming ones wait.
+  // The measurement being dealt with now: the first one not weighed yet
+  // (pumping, to weigh, or next to start). Done ones step back.
   const curIdx = $derived(cards.findIndex((c) => !c.weighed));
+  // The one whose detail is open: picked by a click, else the current one.
+  let picked = $state(null);
+  const selIdx = $derived(picked ?? defaultMeasurement(cards));
   const headline = $derived.by(() => {
-    if (curIdx < 0) return { t: 'All 3 bursts weighed', s: 'See the result.' };
+    if (curIdx < 0) return { t: 'All 3 measurements weighed', s: 'See the result.' };
     const c = cards[curIdx];
-    const n = `Burst ${curIdx + 1} of 3`;
-    if (c.b?.alarm) return { t: `${n}: needs a look`, s: `${ALARM_TEXT[c.b.alarm]} Pump it again.` };
+    const n = `Measurement ${curIdx + 1} of 3`;
+    if (c.b?.alarm) return { t: `${n}: needs a look`, s: `${ALARM_TEXT[c.b.alarm]} Redo it.` };
     if (c.pumping) return { t: `${n}: pumping`, s: remainingS != null ? `${dur(remainingS)} left` : '' };
     if (c.toWeigh) return { t: `${n}: weigh it`, s: d.auto ? 'the balance settles, then it is weighed' : 'take the balance reading or type the weight' };
     if (d.auto) return { t: `${n}: starting`, s: 'when the balance is still' };
@@ -993,7 +998,7 @@
     <div>
       <h2>Tubing calibration</h2>
       <p class="sub">
-        The tube's real flow, from three weighed bursts.<Hint label="How the calibration works">
+        The tube's real flow, from three weighed measurements.<Hint label="How the calibration works">
           Weighed by the balance under the feed bottle, or manually. Calibrate the tube before
           autoclaving it.
         </Hint>
@@ -1102,7 +1107,7 @@
             </p>
           {/if}
           {#if diaBad}<p class="warn">The outer Ø must be larger than the inner Ø.</p>{/if}
-          {#if locked}<p class="k">Locked after the first burst.</p>{/if}
+          {#if locked}<p class="k">Locked after the first measurement.</p>{/if}
           <div class="nav-row">
             {@render abandonLink()}
             <button class="btn-primary" disabled={!tubeOk} onclick={() => (step = 2)}>Next: pump setup →</button>
@@ -1125,7 +1130,7 @@
               <input type="number" step="0.1" min="0" bind:value={d.setpoint} disabled={locked} placeholder="e.g. 100"
                 class:missing={!(Number(d.setpoint) > 0)} onchange={() => { d.setpoint_set = true; persist(); }} />
             </label>
-            <label class="field" id="cal-burst"><span>Each burst lasts, min<Hint label="About the burst time">
+            <label class="field" id="cal-burst"><span>Each measurement lasts, min<Hint label="About the measurement time">
                 The pump stops by itself after this time, or when you stop it. The flow uses the real
                 pumping time.
               </Hint></span>
@@ -1144,7 +1149,7 @@
               step under {STEP_LIMIT_PCT} %.
             </p>
           {/if}
-          <p class="k">Three bursts: {totalMin >= 60 ? `${Math.floor(totalMin / 60)} h ${Math.round(totalMin % 60)} min` : `${num(totalMin, 0)} min`} in all.</p>
+          <p class="k">Three measurements: {totalMin >= 60 ? `${Math.floor(totalMin / 60)} h ${Math.round(totalMin % 60)} min` : `${num(totalMin, 0)} min`} in all.</p>
           <div class="field" id="cal-weighing">
             <span>Weighing</span>
             <div class="modes">
@@ -1159,7 +1164,7 @@
                 <span class="mode-ic"><Icon name="hand" size={18} /></span>
                 <span class="mode-t">
                   <b>Manual</b>
-                  <span class="k">Start each burst, enter its weight.</span>
+                  <span class="k">Start each measurement, enter its weight.</span>
                 </span>
               </button>
             </div>
@@ -1167,25 +1172,45 @@
           <label class="field narrow"><span>Operator (optional)</span>
             <input type="text" bind:value={d.operator} onchange={persist} />
           </label>
-          {#if locked}<p class="k">Locked after the first burst.</p>{/if}
+          {#if locked}<p class="k">Locked after the first measurement.</p>{/if}
           <div class="nav-row">
             {@render abandonLink()}
             <span class="acts">
               <button class="btn-ghost" onclick={() => (step = 1)}>← Tube</button>
-              <button class="btn-primary" disabled={!formOk} onclick={() => (step = 3)}>Next: bursts →</button>
+              <button class="btn-primary" disabled={!formOk} onclick={() => (step = 3)}>Next: measurements →</button>
             </span>
           </div>
         {:else if step === 3}
           <div class="p-title row">
             <div>
-              <h3>Three bursts</h3>
+              <h3>Three measurements</h3>
               <p class="k">
-                {weighMode === 'auto'
-                  ? 'Leave the bottle on the balance.'
-                  : 'Start each burst, then weigh it.'}
+                {weighMode === 'auto' ? 'Leave the bottle on the balance.' : 'Start each measurement, then weigh it.'}
+                Click a measurement to see it, or to redo it.
               </p>
             </div>
+            {#if d.bursts.length}
+              <button class="ghost-redo" type="button" disabled={burstRunning || working} aria-expanded={confirmAll}
+                onclick={() => { confirmAll = !confirmAll; confirmRedo = null; }}
+                title={burstRunning ? 'A measurement is pumping' : 'Drop every measurement and pump the three again, same tube and setup'}>
+                <Icon name="refresh-cw" size={16} />Redo all 3
+              </button>
+            {/if}
           </div>
+          {#if confirmAll && d.bursts.length}
+            <div class="confirm all">
+              <p>
+                <b>Redo all 3 measurements?</b>
+                {#if allSummary.weights.length}{allSummary.weights.map((w) => `${num(w, wDig)} g`).join(', ')} {allSummary.weights.length === 1 ? 'is' : 'are'} dropped.{/if}
+                The tube and the pump setup stay; measurement 1 is pumped next.
+                Run{allSummary.runs.length === 1 ? '' : 's'} {allSummary.runs.map((r) => `#${r}`).join(', ')} stay in the journal.
+              </p>
+              <span class="acts">
+                <button class="btn-danger small" disabled={working || burstRunning} onclick={redoAll}>Drop them, start over</button>
+                <button class="btn-ghost small" onclick={() => (confirmAll = false)}>Keep them</button>
+              </span>
+            </div>
+          {/if}
 
           {#if autoBlocked && !burstRunning}
             {#key nudges}
@@ -1206,7 +1231,7 @@
           {#if otherRunActive}
             <p class="warn">
               {active.kind === 'calibration'
-                ? `Burst run #${active.run_id} is still pumping, outside this session.`
+                ? `Measurement run #${active.run_id} is still pumping, outside this session.`
                 : 'Another run is active: stop it first.'}
               {#if active.kind === 'calibration'}
                 <button class="btn-ghost small" disabled={working} onclick={stopOther}>Stop it</button>
@@ -1237,18 +1262,22 @@
                     : 'Is the bottle on the balance, the line on the pump head and in the liquid, the pump drawing?'}
               </span>
               <span class="acts">
-                <button class="btn-danger small" disabled={working} onclick={stopStalled}>Stop the burst</button>
+                <button class="btn-danger small" disabled={working} onclick={stopStalled}>Stop the measurement</button>
                 <button class="btn-ghost small" onclick={keepGoing}>Keep going</button>
               </span>
             </div>
           {/if}
-          <div class="cards">
+          <!-- Each measurement a card; the one picked opens its detail below. -->
+          <div class="cards" role="tablist" aria-label="Measurements">
             {#each cards as c (c.i)}
+              <!-- The card picks the measurement; its Redo is a button of its own
+                   beside it (a button cannot hold another). -->
               <div class="bcard" class:current={c.i === curIdx} class:done={c.weighed} class:next={!c.weighed && c.i !== curIdx}
-                class:alarm={!!c.b?.alarm}
-                aria-current={c.i === curIdx ? 'step' : undefined} title={c.b ? `Run #${c.b.run_id}` : undefined}>
-                <div class="bc-head">
-                  <b>{c.b?.alarm ? '✗ ' : c.weighed ? '✓ ' : ''}Burst {c.i + 1}</b>
+                class:alarm={!!c.b?.alarm} class:sel={c.i === selIdx}>
+              <button type="button" role="tab" class="bc-pick" id="m-tab-{c.i}" aria-selected={c.i === selIdx} aria-controls="m-detail"
+                onclick={() => { picked = c.i; if (confirmRedo !== c.i) confirmRedo = null; }}>
+                <span class="bc-head">
+                  <b>{c.b?.alarm ? '✗ ' : c.weighed ? '✓ ' : ''}Measurement {c.i + 1}</b>
                   {#if c.b?.alarm}
                     <span class="btag t-alarm" title={ALARM_TEXT[c.b.alarm]}>check</span>
                   {:else}
@@ -1256,79 +1285,126 @@
                       {c.weighed ? 'done' : c.i === curIdx ? 'now' : 'next'}
                     </span>
                   {/if}
-                </div>
-                <div class="bc-mid">
+                </span>
+                <span class="bc-mid">
                   {#if c.pumping}<PumpHead direction={d.direction} frac={0.6} size={38} />{/if}
-                  <div>
-                    {#if editing === c.i}
-                      <span class="edit">
-                        <input class="edit-w" type="number" step="0.01" min="0" bind:value={editInput}
-                          onkeydown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') editing = null; }} />
-                        g
-                      </span>
-                    {:else}
-                      <div class="bc-big mono">
-                        {c.weighed ? `${num(c.b.weight_g, wDig)} g` : (c.pumping || c.toWeigh) && collectedG != null ? `${num(collectedG, wDig)} g` : '–'}
-                      </div>
-                    {/if}
-                    <div class="k">
+                  <span>
+                    <span class="bc-big mono">
+                      {c.weighed ? `${num(c.b.weight_g, wDig)} g` : (c.pumping || c.toWeigh) && collectedG != null ? `${num(collectedG, wDig)} g` : '–'}
+                    </span>
+                    <span class="k">
                       {#if c.weighed}
                         {c.flow != null ? `${num(c.flow, sig(c.flow, c.b.weight_g))} ml/min` : 'weighed'}{durations[c.b.run_id] ? `, in ${minSec(durations[c.b.run_id])}` : ''}
                       {:else if c.pumping}
                         drawn{remainingS != null ? `, ${dur(remainingS)} left` : ''}
                       {:else if c.b?.alarm}
-                        pump it again
+                        redo it
                       {:else if c.toWeigh}
                         {c.b.start_g != null ? (weighMode === 'auto' ? 'weighed once the balance is still' : 'take the balance reading') : 'weigh the collected feed'}
                       {:else}
                         {d.target_min} min at {d.setpoint} {unit}
                       {/if}
-                    </div>
-                  </div>
-                </div>
-                <div class="bar"><span style="width:{c.b?.alarm ? 100 : c.frac * 100}%" class:full={c.weighed} class:bad={!!c.b?.alarm}></span></div>
-                {#if c.weighed && profiles[c.b.run_id]}
-                  {@const pr = profiles[c.b.run_id]}
-                  <div class="k mono" title="Balance read every second during the burst: flow from the slope (first {SKIP_START_S} s and last {SKIP_END_S} s left out), and its change from the first half of the burst to the second.">
-                    slope {num(pr.gPerMin, 3)} g/min{pr.driftPct != null ? `, ${pr.driftPct >= 0 ? '+' : ''}${num(pr.driftPct, 1)} % within` : ''}
-                  </div>
-                {/if}
-                {#if (c.weighed && !d.auto) || redoable(c.i)}
-                  <div class="bc-acts">
-                    {#if editing === c.i}
-                      <button class="btn-ghost small" disabled={!(Number(editInput) > 0)} onclick={saveEdit}>Save</button>
-                      <button class="btn-ghost small" onclick={() => (editing = null)}>Cancel</button>
-                    {:else}
-                      {#if c.weighed && c.b.start_g == null && !d.auto}
-                        <!-- a weight typed by hand (no balance) can be corrected; one read off the balance is pumped again -->
-                        <button class="btn-ghost small" disabled={working} onclick={() => startEdit(c.i)}>Edit weight</button>
-                      {/if}
-                      {#if redoable(c.i)}
-                        {#if confirmRedo === c.i}
-                          <span class="redo-ask">Redo burst {c.i + 1}? Its {num(c.b.weight_g, wDig)} g is dropped.</span>
-                          <button class="btn-danger small" disabled={working} onclick={() => redoBurst(c.i)}>Redo it</button>
-                          <button class="btn-ghost small" onclick={() => (confirmRedo = null)}>Cancel</button>
-                        {:else}
-                          <button class="redo-btn" disabled={working} onclick={() => redoBurst(c.i)}
-                            title="Drops this burst and pumps it again: after air, a leak or a lost drop.">↻ Pump again</button>
-                        {/if}
-                      {/if}
-                    {/if}
-                  </div>
-                {/if}
+                    </span>
+                  </span>
+                </span>
+                <span class="bar"><span style="width:{c.b?.alarm ? 100 : c.frac * 100}%" class:full={c.weighed} class:bad={!!c.b?.alarm}></span></span>
+                <!-- short: the card's Redo shares the line -->
+                <span class="see">{c.i === selIdx ? 'Shown below' : 'Details'}</span>
+              </button>
+              {#if redoable(c.i)}
+                <!-- picks the measurement and asks in its detail (a bad one, with
+                     an alarm or never weighed, is dropped at once) -->
+                <button class="card-redo" type="button" disabled={working} aria-expanded={confirmRedo === c.i}
+                  aria-label="Redo measurement {c.i + 1}" title="Drops this measurement and pumps it again: after air, a leak or a lost drop."
+                  onclick={() => { picked = c.i; confirmAll = false; if (confirmRedo === c.i) confirmRedo = null; else redoBurst(c.i); }}>
+                  <Icon name="refresh-cw" size={14} />Redo
+                </button>
+              {/if}
               </div>
             {/each}
           </div>
+
+          {#if cards[selIdx]}
+            {@const c = cards[selIdx]}
+            {@const pr = c.b ? profiles[c.b.run_id] : null}
+            <div class="detail" role="tabpanel" id="m-detail" aria-labelledby="m-tab-{c.i}">
+              <div class="d-head">
+                <div class="d-id">
+                  <h4>Measurement {c.i + 1}</h4>
+                  {#if c.b}<span class="k mono">{runStarts[c.b.run_id] ? `${stamp(runStarts[c.b.run_id])} · ` : ''}run #{c.b.run_id}</span>{/if}
+                </div>
+                <span class="d-acts">
+                  {#if c.weighed && c.b.start_g == null && !d.auto && editing !== c.i}
+                    <!-- a weight typed by hand (no balance) can be corrected; one read off the balance is redone -->
+                    <button class="btn-ghost small" disabled={working} onclick={() => startEdit(c.i)}>Edit weight</button>
+                  {/if}
+                </span>
+              </div>
+
+              {#if confirmRedo === c.i && c.b}
+                <div class="confirm">
+                  <p><b>Redo measurement {c.i + 1}?</b> Its {num(c.b.weight_g, wDig)} g is dropped and measurement {c.i + 1} is pumped next.</p>
+                  <span class="acts">
+                    <button class="btn-danger small" disabled={working} onclick={() => redoBurst(c.i)}>Drop it, redo</button>
+                    <button class="btn-ghost small" onclick={() => (confirmRedo = null)}>Keep it</button>
+                  </span>
+                </div>
+              {/if}
+
+              {#if editing === c.i}
+                <span class="acts edit">
+                  <input class="edit-w" type="number" step="0.01" min="0" bind:value={editInput} aria-label="Collected weight, g"
+                    onkeydown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') editing = null; }} /> g
+                  <button class="btn-ghost small" disabled={!(Number(editInput) > 0)} onclick={saveEdit}>Save</button>
+                  <button class="btn-ghost small" onclick={() => (editing = null)}>Cancel</button>
+                </span>
+              {/if}
+
+              {#if c.weighed}
+                <div class="figs">
+                  <div class="fig"><div class="v mono">{num(c.b.weight_g, wDig)}<small>g</small></div><div class="l">collected</div></div>
+                  <div class="fig"><div class="v mono">{c.flow != null ? num(c.flow, sig(c.flow, c.b.weight_g)) : '·'}<small>ml/min</small></div><div class="l">flow</div></div>
+                  <div class="fig"><div class="v mono">{durations[c.b.run_id] ? minSec(durations[c.b.run_id]) : '·'}</div><div class="l">pumped</div></div>
+                  <div class="fig" title="Balance read every second: flow from the slope (first {SKIP_START_S} s and last {SKIP_END_S} s left out), and its change from the first half to the second.">
+                    <div class="v mono">{pr ? num(pr.gPerMin, 3) : '·'}<small>g/min</small></div>
+                    <div class="l">slope{pr?.driftPct != null ? `, ${pr.driftPct >= 0 ? '+' : '−'}${num(Math.abs(pr.driftPct), 1)} % 2nd half` : ''}</div>
+                  </div>
+                </div>
+                {#if pr}
+                  <div>
+                    <div class="ctitle">
+                      <b>On the balance, every second</b>
+                      <span class="legend"><span><i class="sw w"></i>collected, g</span><span><i class="sw fit"></i>slope</span><span><i class="sw skip"></i>left out</span></span>
+                    </div>
+                    <MeasurementChart profile={pr} label="Weight collected during measurement {c.i + 1}" />
+                  </div>
+                {/if}
+              {:else if c.b?.alarm}
+                <p class="warn">{ALARM_TEXT[c.b.alarm]} Redo it.</p>
+              {:else if c.pumping}
+                <p class="k">Pumping{remainingS != null ? `, ${dur(remainingS)} left` : ''}{collectedG != null ? `, ${num(collectedG, wDig)} g so far` : ''}.</p>
+              {:else if c.toWeigh}
+                <p class="k">Pumped: {c.b.start_g != null ? (weighMode === 'auto' ? 'weighed once the balance is still.' : 'take the balance reading below.') : 'weigh the collected feed below.'}</p>
+              {:else}
+                <p class="k">
+                  Not pumped yet: {d.target_min} min at {d.setpoint} {unit}.
+                  {c.i === freeSlot ? 'It is pumped next.' : `Measurement ${(freeSlot ?? 0) + 1} comes first.`}
+                </p>
+              {/if}
+            </div>
+          {/if}
 
           <!-- a burst with an alarm is pumped again, not weighed -->
           {#if needsWeight && !d.auto && !current.alarm}
             <div class="weigh-row">
               {#if collectedG != null}
-                <button class="btn-primary" disabled={!scaleStable || !(collectedG > 0)} onclick={saveBalanceReading}>
-                  Take balance reading: {num(collectedG, wDig)} g
+                <button class="btn-primary" disabled={!scaleStable || !avgW || !(weighG > 0)} onclick={saveBalanceReading}>
+                  Take balance reading: {num(weighG, 2)} g
                 </button>
                 <span class="live" class:settling={!scaleStable}>
-                  {scaleStable ? 'stable' : 'settling…'}, {num(scaleW, 2)} g now, {num(current.start_g, 2)} g before
+                  {scaleStable && avgW
+                    ? `mean of ${avgW.n} stable reading${avgW.n === 1 ? '' : 's'} (${num(avgW.g, 2)} g), ${num(current.start_g, 2)} g before`
+                    : `settling…, ${num(scaleW, 2)} g now, ${num(current.start_g, 2)} g before`}
                 </span>
               {/if}
               <!-- With the balance reading, the weight is the balance's alone: a
@@ -1369,17 +1445,17 @@
                   <button class="btn-danger" onclick={() => setAuto(false)}>Stop automatic</button>
                 {:else if burstRunning}
                   <button class="btn-danger" disabled={working} onclick={restartBurst}
-                    title="Stops the pump and pumps this burst again from the start: a part burst is never weighed">↻ Restart this burst</button>
+                    title="Stops the pump and pumps this measurement again from the start: a part measurement is never weighed">↻ Restart this measurement</button>
                 {:else if alarmed}
-                  <span class="held">Burst {(alarmed.slot ?? 0) + 1} needs a look: pump it again first.</span>
+                  <span class="held">Measurement {(alarmed.slot ?? 0) + 1} needs a look: redo it first.</span>
                 {:else if !needsWeight && d.bursts.length < 3 && !autoBlocked}
                   {#if weighMode === 'auto' && canAuto}
                     <button class="btn-primary" disabled={!formOk || working} onclick={() => setAuto(true)}>
-                      Run {d.bursts.length ? 'the remaining bursts' : 'all 3 bursts'}
+                      Run {d.bursts.length ? 'the remaining measurements' : 'all 3 measurements'}
                     </button>
                   {:else}
                     <button class="btn-primary" disabled={!canStartBurst} onclick={startBurst}>
-                      {working ? 'Starting…' : `Start burst ${(freeSlot ?? 0) + 1}/3`}
+                      {working ? 'Starting…' : `Start measurement ${(freeSlot ?? 0) + 1}/3`}
                     </button>
                   {/if}
                 {/if}
@@ -1440,29 +1516,34 @@
             </div>
 
             <div class="flows">
-              <span class="lbl">Each burst</span>
+              <div class="fl-head">
+                <span class="lbl">Each measurement</span>
+                {#if !saved}
+                  <!-- back to the measurements, "drop them all?" already asked;
+                       one measurement is redone from its card there -->
+                  <button class="ghost-redo" type="button" onclick={() => { confirmAll = true; confirmRedo = null; step = 3; }}>
+                    <Icon name="refresh-cw" size={16} />Redo all 3
+                  </button>
+                {/if}
+              </div>
               {#each shown.measured_ml_min as m, i}
                 {@const mean = shown.mean_measured_ml_min}
                 <div class="f-row">
-                  <span>Burst {i + 1}</span>
+                  <span>Measurement {i + 1}</span>
                   <span class="f-track"><span style="width:{pos(m, mean * 0.95, mean * 1.05)}%"></span></span>
                   <span class="mono">{num(m, sig(m, ws[i]))} ml/min</span>
-                  {#if !saved}
-                    <!-- back to the bursts, this one's "drop its weighing?" already asked -->
-                    <button class="redo-btn" type="button" onclick={() => { confirmRedo = i; step = 3; }}>↻ Pump again</button>
-                  {:else}<span></span>{/if}
                 </div>
               {/each}
             </div>
 
             {#if stepPct >= STEP_LIMIT_PCT * 2}
               <p class="warn">
-                One balance step ({resG} g) is {num(stepPct, 1)} % of a burst: the spread and the flow are only
-                known to about that. Longer bursts make it finer.
+                One balance step ({resG} g) is {num(stepPct, 1)} % of a measurement: the spread and the flow are only
+                known to about that. Longer measurements make it finer.
               </p>
             {/if}
             {#if cvBad(shown.cv_pct)}
-              <p class="warn">Bursts differ by over {CV_WARN_PCT} %: check for air, a leak or a missed drop, then redo.</p>
+              <p class="warn">Measurements differ by over {CV_WARN_PCT} %: check for air, a leak or a missed drop, then redo.</p>
             {/if}
             {#if c0Bad(cvar, shown.c0)}
               <p class="warn">c₀ outside ×{C0_MIN} to ×{C0_MAX}: the trim starts clamped there.</p>
@@ -1489,7 +1570,7 @@
               </div>
             {/if}
           {:else}
-            <p class="muted">Loading burst times…</p>
+            <p class="muted">Loading measurement times…</p>
           {/if}
         {/if}
 
@@ -1505,7 +1586,7 @@
           <dt>Tube</dt>
           <dd>{sum.tubing_lot_id?.trim() ? `${sum.tubing_lot_id}, ${num(sum.inner_diameter_mm, 1)} / ${num(sum.outer_diameter_mm, 1)} mm` : 'not set yet'}</dd>
           <dt>Setpoint</dt><dd class="mono">{Number(sum.setpoint) > 0 ? `${sum.setpoint} ${unitFor(sum.control_var)}` : 'to set'}{saved ? '' : `, ${d.direction ?? 'direction to choose'}`}</dd>
-          {#if !saved}<dt>Bursts</dt><dd class="mono">{d.target_min} min each</dd>{/if}
+          {#if !saved}<dt>Measurements</dt><dd class="mono">{d.target_min} min each</dd>{/if}
           <dt>Density</dt><dd class="mono">{num(sum.density_g_per_ml, 2)} g/mL</dd>
           {#if !saved}
             <dt>Weighing</dt><dd>{weighMode === 'auto' ? 'automatic' : 'manual'}{autoBlocked ? ', no balance' : ''}</dd>
@@ -1599,13 +1680,13 @@
     <div class="modal card confirm" role="alertdialog" aria-modal="true" aria-labelledby="ab-title">
       <h2 id="ab-title">Abandon this calibration?</h2>
       <ul class="lede">
-        {#if burstRunning}<li><b>The burst in progress stops the pump.</b></li>{/if}
+        {#if burstRunning}<li><b>The measurement in progress stops the pump.</b></li>{/if}
         <li>
           {#if pumped}The tube, the setpoint and the {pumped} burst{pumped === 1 ? '' : 's'} so far are cleared.
           {:else}The tube details typed so far are cleared.{/if}
         </li>
         <li>You start again at step 1, Tube.</li>
-        <li>Nothing is recorded as a calibration.{pumped ? ' The bursts already pumped stay in History.' : ''}</li>
+        <li>Nothing is recorded as a calibration.{pumped ? ' The measurements already pumped stay in the journal.' : ''}</li>
       </ul>
       <div class="modal-foot">
         <button class="btn-ghost" disabled={working} onclick={() => (confirmDiscard = false)}>Keep calibrating</button>
@@ -1747,9 +1828,37 @@
   .now-t { font-size: 19px; font-weight: 600; }
   .now-s { color: var(--muted); }
   .bcard {
-    display: flex; flex-direction: column; gap: var(--s-2);
+    position: relative; display: flex; flex-direction: column;
     padding: var(--s-4); border-radius: var(--radius-ctl); border: 1px solid var(--line); background: var(--surface);
   }
+  .bcard:hover { border-color: var(--teal-400); }
+  /* the whole card picks; its content is the pick button */
+  .bc-pick {
+    display: flex; flex-direction: column; gap: var(--s-2); width: 100%; padding: 0; margin: 0;
+    font: inherit; color: inherit; text-align: left; background: none; border: none; cursor: pointer; border-radius: 4px;
+  }
+  .bc-pick:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 6px; }
+  /* the card's own Redo, in the corner of the "See" line */
+  .card-redo {
+    position: absolute; right: var(--s-4); bottom: var(--s-3);
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: var(--radius-ctl);
+    border: 1.5px solid var(--teal-700); background: var(--surface); color: var(--teal-700);
+    font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .card-redo:not(:disabled):hover { background: var(--teal-700); color: var(--on-primary); }
+  .card-redo:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
+  .card-redo:disabled { opacity: 0.5; cursor: default; }
+  .card-redo[aria-expanded="true"] { background: var(--surface-sunken); border-color: var(--line); color: var(--muted); }
+  .bc-pick .k { display: block; }
+  /* picked: the card the detail below is about, joined to it by a notch */
+  .bcard.sel { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .bcard.sel::after {
+    content: ""; position: absolute; left: 50%; bottom: -15px; width: 14px; height: 14px;
+    transform: translateX(-50%) rotate(45deg);
+    background: var(--surface); border-left: 1px solid var(--line); border-top: 1px solid var(--line);
+  }
+  .see { min-height: 28px; display: flex; align-items: center; font-size: 12px; font-weight: 600; color: var(--teal-700); }
+  .bcard.sel .see { color: var(--ink); }
   /* now: the strongest thing on the screen */
   .bcard.current {
     border: 2px solid var(--teal-700);
@@ -1769,24 +1878,59 @@
   .held { font-size: 13px; font-weight: 600; color: var(--danger-ink); }
   .btag.t-alarm { background: var(--danger-bg); color: var(--danger-ink); text-transform: uppercase; letter-spacing: 0.06em; }
   .bc-mid { display: flex; align-items: center; gap: var(--s-3); min-height: 52px; }
-  .bc-big { font-size: 24px; font-weight: 500; line-height: 1.15; }
-  .bar { height: 6px; border-radius: 999px; background: var(--surface-sunken); overflow: hidden; }
+  .bc-big { display: block; font-size: 24px; font-weight: 500; line-height: 1.15; }
+  .bar { display: block; height: 6px; border-radius: 999px; background: var(--surface-sunken); overflow: hidden; }
   .bar span { display: block; height: 100%; border-radius: 999px; background: var(--teal-700); transition: width 0.5s linear; }
   .bar span.full { background: var(--green-500); }
   .bar span.bad { background: var(--danger); }
-  /* a burst with an alarm: red cross, red bar, red ground, until pumped again */
+  /* a measurement with an alarm: red cross, red bar, red ground, until redone */
   .bcard.alarm { background: var(--danger-bg); border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--surface)); }
   .bcard.alarm .bc-head b { color: var(--danger-ink); }
-  .bc-acts { display: flex; flex-wrap: wrap; gap: var(--s-2); }
-  /* redoing a burst: a real button, in the page's teal, easy to find */
-  .redo-btn {
-    display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: var(--radius-ctl);
-    border: 1px solid var(--teal-700); background: var(--surface); color: var(--teal-700);
-    font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  /* redo all 3: quieter than one redo, it undoes more */
+  .ghost-redo {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius-ctl);
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap;
   }
-  .redo-btn:not(:disabled):hover { background: var(--teal-700); color: var(--on-primary); }
-  .redo-btn:disabled { opacity: 0.5; cursor: default; }
-  .redo-ask { flex-basis: 100%; font-size: 12.5px; color: var(--ink); }
+  .ghost-redo:not(:disabled):hover { border-color: var(--teal-700); color: var(--teal-700); }
+  .ghost-redo:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
+  .ghost-redo:disabled { opacity: 0.5; cursor: default; }
+  .ghost-redo[aria-expanded="true"] { background: var(--surface-sunken); color: var(--muted); }
+  .confirm.all { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-radius: var(--radius-ctl); background: var(--surface-sunken); }
+  .confirm.all p { margin: 0; font-size: 13px; }
+  .confirm.all .acts { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+
+  /* the picked measurement */
+  .detail { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--s-5); display: flex; flex-direction: column; gap: var(--s-4); }
+  .d-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+  .d-id { display: flex; flex-direction: column; }
+  .d-id h4 { margin: 0; font-size: 16px; }
+  .d-id .k { font-size: 12.5px; }
+  .d-acts { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+  .detail .confirm { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-radius: var(--radius-ctl); background: var(--surface-sunken); }
+  .detail .confirm p { margin: 0; font-size: 13px; }
+  .detail .acts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+  .detail > p { margin: 0; }
+  .figs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-ctl); }
+  .fig { padding: var(--s-2) var(--s-3); min-width: 0; }
+  .fig + .fig { border-left: 1px solid var(--line); }
+  .fig .v { font-size: 18px; font-weight: 600; line-height: 1.25; }
+  .fig .v small { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+  .fig .l { font-size: 12px; color: var(--muted); }
+  .ctitle { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: var(--s-1); }
+  .ctitle b { color: var(--ink); font-size: 13px; }
+  .legend { display: flex; gap: var(--s-4); flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .sw { display: inline-block; width: 16px; height: 3px; border-radius: 2px; }
+  .sw.w { background: var(--green-500); }
+  .sw.fit { background: repeating-linear-gradient(90deg, var(--ink) 0 4px, transparent 4px 7px); opacity: 0.6; }
+  .sw.skip { width: 12px; height: 12px; border-radius: 3px; background: var(--surface-sunken); border: 1px solid var(--line); }
+  @media (max-width: 720px) {
+    .bcard.sel::after { display: none; }
+    .figs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .fig:nth-child(3) { border-left: none; }
+    .fig:nth-child(n + 3) { border-top: 1px solid var(--line); }
+  }
   .edit { display: inline-flex; align-items: center; gap: var(--s-1); }
   .edit-w { width: 100px; }
   .btn-ghost.small, .btn-danger.small { padding: 2px var(--s-2); font-size: 12px; }
@@ -1821,8 +1965,10 @@
   .g-scale.at { position: relative; height: 1.4em; }
   .g-scale.at span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
   .flows { display: grid; gap: var(--s-2); }
-  .f-row { display: grid; grid-template-columns: 64px 1fr 120px 120px; gap: var(--s-3); align-items: center; font-size: 13px; }
-  .f-row .redo-btn { justify-self: end; }
+  /* the label sized to its text: "Measurement 1" wrapped in the 64 px "Burst 1" had */
+  .fl-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); }
+  .f-row { display: grid; grid-template-columns: max-content 1fr 120px; gap: var(--s-3); align-items: center; font-size: 13px; }
+  .f-row > span:first-child { white-space: nowrap; }
   .f-row .mono { text-align: right; }
   .f-track { height: 8px; border-radius: 999px; background: var(--surface-sunken); overflow: hidden; }
   .f-track span { display: block; height: 100%; border-radius: 999px; background: var(--teal-700); }

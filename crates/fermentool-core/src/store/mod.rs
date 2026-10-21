@@ -569,7 +569,7 @@ impl Store {
         )?;
         if used {
             return Err(StoreError::Invalid(
-                "this run is a burst of a tubing calibration, it is kept with it".into(),
+                "this run is a measurement of a tubing calibration, it is kept with it".into(),
             ));
         }
         let tx = self.conn.unchecked_transaction()?;
@@ -623,7 +623,7 @@ impl Store {
         }
         let [a, b, d] = c.run_ids;
         if a == b || a == d || b == d {
-            return Err(invalid("the three bursts must be three different runs".into()));
+            return Err(invalid("the three measurements must be three different runs".into()));
         }
 
         let mut samples = [(0.0, 0.0); 3];
@@ -632,7 +632,7 @@ impl Store {
                 .run(run_id)?
                 .ok_or_else(|| invalid(format!("run {run_id} does not exist")))?;
             if run.kind != RunKind::Calibration {
-                return Err(invalid(format!("run {run_id} is not a calibration burst")));
+                return Err(invalid(format!("run {run_id} is not a calibration measurement")));
             }
             if run.control_var != c.control_var {
                 return Err(invalid(format!(

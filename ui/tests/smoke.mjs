@@ -191,6 +191,8 @@ try {
   check('Tubing calibration opens', await click('.tab', 'Tubing calibration'));
   await sleep(1800);
   check('the calibration shows its four steps', (await js(`document.querySelectorAll('.steps .step').length`)) === 4);
+  // "burst" is the code's word; the page says measurement (2026-10-20)
+  check('the calibration says measurement, never burst', await js(`!/burst/i.test(document.querySelector('main')?.innerText ?? document.body.innerText)`));
   if (await js(`!!document.querySelector('.panel h3')`)) {
     // leaving with a calibration under way asks first; Stay keeps everything
     await click('.tab', 'Overview');

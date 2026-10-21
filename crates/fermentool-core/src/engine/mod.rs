@@ -1804,7 +1804,7 @@ impl<T: Transport> Engine<T> {
                 wall_time: now,
                 level: EventLevel::Info,
                 kind: "curve_done".into(),
-                detail: Some("calibration burst done, pump stopped".into()),
+                detail: Some("calibration measurement done, pump stopped".into()),
             });
             self.active = None;
             return Ok(TickOutcome::Finished { seq, target });
@@ -2849,7 +2849,7 @@ impl<T: Transport> Engine<T> {
         // its end is over: its weighing window is gone.
         if run.kind == RunKind::Calibration && elapsed_s > run.duration_s as f64 + grace.as_secs_f64() {
             return Err(EngineError::Config(
-                "calibration burst is past its end plus grace; finish or abort instead".into(),
+                "calibration measurement is past its end plus grace; finish or abort instead".into(),
             ));
         }
         // `trim_c` was restored from `app_state` by `Engine::new`; the rpm
