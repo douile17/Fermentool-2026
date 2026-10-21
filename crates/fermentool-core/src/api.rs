@@ -105,6 +105,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/about", get(about))
+        .route("/api/about/open", post(open_location))
         .route("/api/status", get(status))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/preview", post(preview))
@@ -298,6 +299,58 @@ async fn about(State(s): State<AppState>) -> Response {
         "log_dir": a.log_dir.display().to_string(),
     }))
     .into_response()
+}
+
+/// One of the daemon's own locations, as Settings > About names it, never a
+/// path from the request: `(path, select)`, `select` for a file (its folder
+/// opens with it picked), a folder opening as itself.
+fn about_location(which: &str, a: &About, config: &std::path::Path) -> Option<(PathBuf, bool)> {
+    match which {
+        "data" => Some((a.data_dir.clone(), false)),
+        "logs" => Some((a.log_dir.clone(), false)),
+        "db" => Some((a.db.clone(), true)),
+        "config" => Some((config.to_path_buf(), true)),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct OpenReq {
+    which: String,
+}
+
+/// Opens one of those locations in the PC's file manager (Explorer), on the
+/// desktop of the user the daemon runs as: Settings > About's "Open" buttons.
+async fn open_location(State(s): State<AppState>, Json(req): Json<OpenReq>) -> ApiResult<Response> {
+    let (path, select) = about_location(&req.which, &s.about, &s.config_path)
+        .ok_or_else(|| ApiError::Bad(format!("unknown location `{}`", req.which)))?;
+    if !path.exists() {
+        return Err(ApiError::Conflict(format!("{} does not exist yet", path.display())));
+    }
+    open_in_file_manager(&path, select)
+        .map_err(|e| ApiError::Conflict(format!("could not open the file manager: {e}")))?;
+    Ok(Json(json!({ "opened": path.display().to_string() })).into_response())
+}
+
+/// Explorer, not waited on (it exits with 1 even when it opened the window).
+/// `/select,` takes the path quoted as it is: Rust's own quoting of the whole
+/// argument made Explorer open the Documents folder instead.
+#[cfg(windows)]
+fn open_in_file_manager(path: &std::path::Path, select: bool) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new("explorer.exe");
+    if select {
+        c.raw_arg(format!("/select,\"{}\"", path.display()));
+    } else {
+        c.raw_arg(format!("\"{}\"", path.display()));
+    }
+    c.spawn().map(|_| ())
+}
+
+#[cfg(not(windows))]
+fn open_in_file_manager(path: &std::path::Path, select: bool) -> std::io::Result<()> {
+    let dir = if select { path.parent().unwrap_or(path) } else { path };
+    std::process::Command::new("xdg-open").arg(dir).spawn().map(|_| ())
 }
 
 async fn status(State(s): State<AppState>) -> ApiResult<Response> {
@@ -1071,6 +1124,33 @@ mod tests {
 
     fn test_state() -> AppState {
         test_state_at(&test_db())
+    }
+
+    #[test]
+    fn about_opens_its_own_four_locations_and_nothing_else() {
+        let a = About {
+            data_dir: "D:/data".into(),
+            db: "D:/data/fermentool.sqlite".into(),
+            log_dir: "D:/data/logs".into(),
+            ..About::default()
+        };
+        let cfg = std::path::Path::new("D:/data/config.toml");
+        assert_eq!(about_location("data", &a, cfg), Some(("D:/data".into(), false)));
+        assert_eq!(about_location("logs", &a, cfg), Some(("D:/data/logs".into(), false)));
+        assert_eq!(about_location("db", &a, cfg), Some(("D:/data/fermentool.sqlite".into(), true)));
+        assert_eq!(about_location("config", &a, cfg), Some(("D:/data/config.toml".into(), true)));
+        assert_eq!(about_location("C:/Windows", &a, cfg), None);
+        assert_eq!(about_location("../data", &a, cfg), None);
+    }
+
+    #[tokio::test]
+    async fn opening_an_unknown_location_is_refused() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(post_json("/api/about/open", json!({ "which": "C:/Windows/System32" })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     fn test_state_at(db: &std::path::Path) -> AppState {

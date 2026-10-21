@@ -102,3 +102,18 @@ export function ranFor(run, nowMs = Date.now()) {
   if (run.status === 'completed') return { ran: dur(ran), of: null };
   return { ran: dur(ran), of: `of ${dur(run.duration_s)}${run.status === 'running' ? ', so far' : ''}` };
 }
+
+/** Where `path` sits inside `folder`, as it would be written there
+ *  ("fermentool.sqlite", "logs\"): null when it is not inside it. Either
+ *  separator, any case (Windows paths). `isFolder` adds the separator. */
+export function insideFolder(path, folder, isFolder = false) {
+  if (!path || !folder) return null;
+  const sep = path.includes('\\') ? '\\' : '/';
+  const norm = (p) => p.replace(/[\\/]+$/, '');
+  const f = norm(folder);
+  const p = norm(path);
+  if (p.length <= f.length || p.slice(0, f.length).toLowerCase() !== f.toLowerCase()) return null;
+  if (!/[\\/]/.test(p[f.length])) return null;
+  const rest = p.slice(f.length + 1);
+  return rest ? rest + (isFolder ? sep : '') : null;
+}
