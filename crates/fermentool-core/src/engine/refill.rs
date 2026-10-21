@@ -64,6 +64,9 @@ pub(super) struct RefillLink {
     pub(super) resume_fill: bool,
     /// What the balance saw of the fill under way.
     pub(super) fill: super::refill_cycle::FillTrack,
+    /// The first balance read missed in a row during a fill: the fill is
+    /// cut only once they have been missing for `REFILL_BLIND_S`.
+    pub(super) blind_since: Option<jiff::Timestamp>,
 }
 
 /// The refill pump's part of the status frame. `None` there while nothing
@@ -87,10 +90,16 @@ impl<T: Transport> Engine<T> {
     /// refill pump asks the new address at once.
     pub fn set_refill(&mut self, cfg: RefillConfig, now: Instant) {
         let moved = self.refill.cfg.pump_address != cfg.pump_address;
+        let new_speed = (self.refill.cfg.speed_rpm != cfg.speed_rpm).then_some(cfg.speed_rpm);
         if moved && self.refill.stop_owed && self.refill_line_up() {
             self.refill_stop(now);
         }
         self.refill.cfg = cfg;
+        // The speed is written at each fill's start: a change during a fill
+        // goes to the pump now, or the fill ran on at the old one (run 210).
+        if let (false, Some(rpm)) = (moved, new_speed) {
+            self.refill_speed_now(rpm);
+        }
         if moved {
             self.refill.responding = None;
             self.refill.test_until = None;

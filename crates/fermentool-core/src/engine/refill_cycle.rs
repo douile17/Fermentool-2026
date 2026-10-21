@@ -76,6 +76,11 @@ pub(super) struct Plan {
     pub overfilled: bool,
 }
 
+/// How long a fill goes on without a balance reading before it is cut,
+/// seconds. At the refill pump's top speed (~4 g/s into a bottle) that is a
+/// dozen grams past the level at worst, far from overflowing it.
+pub(super) const REFILL_BLIND_S: f64 = 3.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(super) enum Phase {
     #[default]
@@ -298,6 +303,22 @@ impl<T: Transport> Engine<T> {
         true
     }
 
+    /// A new speed from Settings while the refill pump fills: written to it
+    /// at once (it is otherwise written at each fill's start). Never starts
+    /// it; a direction change waits for the next fill (reversed mid-fill, it
+    /// would pump the bottle back into the reservoir).
+    pub(super) fn refill_speed_now(&mut self, rpm: f64) {
+        if !matches!(self.refill.phase, Phase::Filling { .. }) {
+            return;
+        }
+        let res = self.pump.with_address(self.refill.cfg.pump_address, |p| p.set_speed_rpm(rpm as f32));
+        let (level, detail) = match res {
+            Ok(()) => (EventLevel::Info, format!("refill pump set to {rpm} rpm during the fill")),
+            Err(e) => (EventLevel::Warn, format!("the refill pump did not take {rpm} rpm ({e}); the next fill starts at it")),
+        };
+        self.refill_event(Timestamp::now(), level, "refill_speed", detail);
+    }
+
     /// Stop the refill pump at the end of a fill (or on a guard).
     fn refill_stop_fill(&mut self, t: f64, start_g: f64) {
         if self.refill_stop(Instant::now()) {
@@ -321,9 +342,18 @@ impl<T: Transport> Engine<T> {
         self.refill_event(now, EventLevel::Error, alarm.kind(), detail);
     }
 
-    /// A balance read failed during a fill: no filling blind.
+    /// A balance read failed during a fill: no filling blind for long. A
+    /// read or two missed (a PC busy for a moment, the balance's USB link
+    /// slow to take a request) is ridden through; the fill is cut once no
+    /// reading has come for `REFILL_BLIND_S`. Run 210 lost one read to a PC
+    /// compiling, and its fill stopped 42 g short.
     pub(super) fn refill_cycle_read_failed(&mut self, now: Timestamp) {
         if let Phase::Filling { since_t, start_g } = self.refill.phase {
+            let since = *self.refill.blind_since.get_or_insert(now);
+            if now.duration_since(since).as_secs_f64() < REFILL_BLIND_S {
+                return;
+            }
+            self.refill.blind_since = None;
             self.refill_stop_fill(since_t, start_g);
             if matches!(self.refill.phase, Phase::Settling { .. }) {
                 self.refill.phase = Phase::Idle;
@@ -336,6 +366,8 @@ impl<T: Transport> Engine<T> {
     /// One balance read of a run that drives the refill pump: `weight_g` in
     /// the bottle at run time `t`.
     pub(super) fn refill_cycle_step(&mut self, weight_g: f64, t: f64, now: Timestamp) {
+        // A reading: the balance answers, a gap in a fill is over.
+        self.refill.blind_since = None;
         let Some(plan) = self.refill.plan.clone() else {
             return;
         };
@@ -627,6 +659,83 @@ mod tests {
     }
 
     #[test]
+    fn a_speed_changed_during_a_fill_reaches_the_refill_pump_at_once() {
+        // Run 210: the speed went from 55 to 350 rpm in Settings mid-fill;
+        // the refill pump went on at 55 until the next fill.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let mut i = 1;
+        while !b.refill_running() {
+            b.second(i);
+            i += 1;
+            assert!(i < 3000, "no fill started");
+        }
+        assert!((b.e.pump.transport().get(2).unwrap().speed_rpm() - 350.0).abs() < 1e-3);
+        b.e.set_refill(RefillConfig { pump_address: 2, speed_rpm: 120.0, ..RefillConfig::default() }, Instant::now());
+        let p = b.e.pump.transport().get(2).unwrap();
+        assert!(p.running(), "the fill goes on");
+        assert!((p.speed_rpm() - 120.0).abs() < 1e-3, "still at {} rpm", p.speed_rpm());
+        assert!(b.kinds().iter().any(|k| k == "refill_speed"), "{:?}", b.kinds());
+    }
+
+    /// Fill until the refill pump runs, then `blind` seconds without a
+    /// balance reading (the reads fail), then readings again.
+    fn fill_with_a_gap(blind: i64) -> Bench {
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let mut i = 1;
+        while !b.refill_running() {
+            b.second(i);
+            i += 1;
+            assert!(i < 3000, "no fill started");
+        }
+        for k in 0..blind {
+            b.e.refill_cycle_read_failed(t0() + jiff::SignedDuration::from_secs(i + k));
+        }
+        b
+    }
+
+    #[test]
+    fn a_read_or_two_lost_mid_fill_does_not_stop_it() {
+        // Run 210: one failed write to the balance (the PC busy compiling)
+        // stopped the fill 42 g short, and it was finished as a second refill.
+        let b = fill_with_a_gap(2);
+        assert!(b.refill_running(), "the fill goes on through a 2 s gap");
+        assert!(!b.kinds().iter().any(|k| k == "refill_interrupted"), "{:?}", b.kinds());
+    }
+
+    #[test]
+    fn a_balance_silent_past_the_grace_still_stops_the_fill() {
+        let b = fill_with_a_gap(REFILL_BLIND_S as i64 + 2);
+        assert!(!b.refill_running(), "no filling blind for long");
+        assert!(b.kinds().iter().any(|k| k == "refill_interrupted"), "{:?}", b.kinds());
+    }
+
+    #[test]
+    fn a_reading_back_in_time_restarts_the_grace() {
+        // Two short gaps, a good read between them: neither stops the fill.
+        let mut b = fill_with_a_gap(2);
+        let now = t0() + jiff::SignedDuration::from_secs(5000);
+        b.e.attach_scale_for_test(Box::new(Reading(b.w)));
+        b.e.scale_tick(now);
+        for k in 1..3 {
+            b.e.refill_cycle_read_failed(now + jiff::SignedDuration::from_secs(k));
+        }
+        assert!(b.refill_running());
+    }
+
+    #[test]
+    fn a_speed_changed_between_fills_waits_for_the_next_one() {
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        b.second(1);
+        assert!(!b.refill_running());
+        b.e.set_refill(RefillConfig { pump_address: 2, speed_rpm: 120.0, ..RefillConfig::default() }, Instant::now());
+        assert!(!b.e.pump.transport().get(2).is_some_and(|p| p.running()), "a speed change never starts the pump");
+        assert!(!b.kinds().iter().any(|k| k == "refill_speed"));
+    }
+
+    #[test]
     fn the_bottle_is_refilled_twice_and_the_regulation_rides_through() {
         let mut b = Bench::new(Store::open_in_memory().unwrap());
         b.start();
@@ -817,12 +926,19 @@ mod tests {
             b.second(i);
             i += 1;
         }
+        // The balance silent past the grace (REFILL_BLIND_S): the pump fills
+        // on blind meanwhile, then stops.
+        for _ in 0..=(REFILL_BLIND_S as i64) {
+            let now = t0() + jiff::SignedDuration::from_secs(i);
+            b.e.attach_scale_for_test(Box::new(LostRead));
+            b.e.scale_tick(now);
+            if b.refill_running() {
+                b.w += b.refill_ml_min / 60.0;
+            }
+            i += 1;
+        }
         let cut_at = b.w;
-        let now = t0() + jiff::SignedDuration::from_secs(i);
-        b.e.attach_scale_for_test(Box::new(LostRead));
-        b.e.scale_tick(now);
-        assert!(!b.refill_running(), "no filling blind");
-        i += 1;
+        assert!(!b.refill_running(), "no filling blind for long");
         let mut high_seen: f64 = 0.0;
         for _ in 0..120 {
             b.second(i);

@@ -30,7 +30,46 @@ pub const SCALE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A result older than this is not handed out: the poll thread is stuck in a
 /// syscall, and the caller must see a miss, not the last weight forever.
+/// One transaction takes at most `SCALE_WRITE_WITHIN` + the read timeout
+/// (`SCALE_OPEN_TIMEOUT`), 2.3 s: under this, or a slow but good reading
+/// would read as a stuck thread.
 const SCALE_MAX_AGE: Duration = Duration::from_millis(2500);
+
+/// How long a weight request may wait for the port to take it. The port's
+/// own timeout is 200 ms; a write it times out on is tried again until this.
+/// With the PC busy (a compile, a build, a headless browser) Windows took
+/// over 200 ms to hand 3 bytes to the balance's USB adapter: "failed to
+/// write whole buffer", 170 times over October, nearly all during a
+/// development session, and on 21 Oct (run 210) it cut a refill short.
+pub const SCALE_WRITE_WITHIN: Duration = Duration::from_millis(800);
+
+/// Writes `buf` whole within `within`: a write the port times out on, or
+/// takes nothing of, is tried again (20 ms apart) until then. Any other
+/// error is returned at once.
+pub(crate) fn write_within<W: Write + ?Sized>(w: &mut W, buf: &[u8], within: Duration) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    let end = Instant::now() + within;
+    let mut off = 0;
+    while off < buf.len() {
+        match w.write(&buf[off..]) {
+            Ok(n) if n > 0 => {
+                off += n;
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            Err(e) => return Err(e),
+        }
+        if Instant::now() >= end {
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                format!("the port took {off} of {} bytes in {} ms", buf.len(), within.as_millis()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
 
 /// Open the configured scale behind its own poll thread ([`PolledScale`]).
 /// `None` when the port does not open within [`OPEN_WAIT`]: unlike the pump
@@ -161,8 +200,7 @@ impl Transport for SicsScale {
         self.port
             .clear(serialport::ClearBuffer::Input)
             .map_err(|e| TransportError::Io(e.to_string()))?;
-        self.port
-            .write_all(request)
+        write_within(&mut *self.port, request, SCALE_WRITE_WITHIN)
             .map_err(|e| TransportError::Io(e.to_string()))?;
         self.port
             .flush()
@@ -262,6 +300,48 @@ pub fn parse_sics_weight(reply: &[u8]) -> Result<SicsReading, ScaleError> {
 
 #[cfg(test)]
 mod tests {
+    /// A port that times out on its first `slow` writes, then takes 1 byte
+    /// a write.
+    struct SlowPort {
+        slow: usize,
+        got: Vec<u8>,
+    }
+    impl std::io::Write for SlowPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.slow > 0 {
+                self.slow -= 1;
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "busy"));
+            }
+            self.got.push(buf[0]);
+            Ok(1)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_port_slow_to_take_a_request_is_waited_for() {
+        // Run 210: one write timed out under load and the refill stopped.
+        let mut p = SlowPort { slow: 3, got: vec![] };
+        super::write_within(&mut p, super::SICS_IMMEDIATE, std::time::Duration::from_millis(800)).unwrap();
+        assert_eq!(p.got, super::SICS_IMMEDIATE);
+    }
+
+    #[test]
+    fn a_port_that_never_takes_it_fails_within_the_deadline() {
+        let mut p = SlowPort { slow: usize::MAX, got: vec![] };
+        let t = std::time::Instant::now();
+        let e = super::write_within(&mut p, super::SICS_IMMEDIATE, std::time::Duration::from_millis(100)).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        assert!(t.elapsed() < std::time::Duration::from_millis(400), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_reading_is_never_judged_stale_for_being_slow() {
+        assert!(super::SCALE_WRITE_WITHIN + super::SCALE_OPEN_TIMEOUT < super::SCALE_MAX_AGE);
+    }
+
     use super::*;
 
     #[test]
