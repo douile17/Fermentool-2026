@@ -372,15 +372,39 @@ impl CurveSpec {
 
     /// Sample the curve into `(elapsed_seconds, value)` pairs for the UI preview
     /// chart. `samples` is the point count including both endpoints (min 2).
+    ///
+    /// The UI joins the points straight (the chart, and the Overview's big
+    /// figure in between ticks), so a jump between two regular samples read
+    /// as a slope: run 194's step to 0 at its end showed the feed falling
+    /// for ~5 min while the pump ran on. Each jump of a step (or held custom)
+    /// curve therefore gets two points at its time, the value just before
+    /// and the value from it on: a vertical edge.
     pub fn preview(&self, samples: usize) -> Vec<(f64, f64)> {
         let n = samples.max(2);
         let total = self.duration.as_secs_f64();
-        (0..n)
-            .map(|i| {
-                let t = total * (i as f64) / ((n - 1) as f64);
-                (t, self.value_at(Duration::from_secs_f64(t)))
-            })
-            .collect()
+        let at = |t: f64| self.value_at(Duration::from_secs_f64(t.clamp(0.0, total)));
+        let jumps: Vec<f64> = match &self.params {
+            CurveParams::Step { segments } => segments.iter().map(|s| s.at_seconds).collect(),
+            CurveParams::Custom { points, interp: Interp::Hold } => points.iter().map(|p| p.at_seconds).collect(),
+            _ => Vec::new(),
+        }
+        .into_iter()
+        .filter(|&t| t.is_finite() && t > 0.0 && t <= total)
+        .collect();
+        let is_jump = |t: f64| jumps.iter().any(|&j| (j - t).abs() < 1e-6);
+        let mut pts: Vec<(f64, f64)> = (0..n)
+            .map(|i| total * (i as f64) / ((n - 1) as f64))
+            .filter(|&t| !is_jump(t))
+            .map(|t| (t, at(t)))
+            .collect();
+        for &j in &jumps {
+            pts.push((j, at(j - 1e-6)));
+            pts.push((j, at(j)));
+        }
+        // Stable: the two points of a jump keep their before / after order.
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        pts.dedup_by(|b, a| a.0 == b.0 && a.1 == b.1);
+        pts
     }
 
     /// Structural validation. Returns a human-readable message on the first problem.
@@ -844,6 +868,50 @@ mod tests {
         assert_eq!(pts.len(), 11);
         assert!(close(pts.first().unwrap().1, 10.0));
         assert!(close(pts.last().unwrap().1, 100.0));
+    }
+
+    /// Value of a preview polyline at `t`, joined straight like the UI does
+    /// (`valueAt` in runview.js: the last point before `t`, the first at or
+    /// after it).
+    fn polyline_at(pts: &[(f64, f64)], t: f64) -> f64 {
+        let hi = pts.iter().position(|p| p.0 >= t).unwrap_or(pts.len() - 1);
+        if hi == 0 {
+            return pts[0].1;
+        }
+        let (t0, v0) = pts[hi - 1];
+        let (t1, v1) = pts[hi];
+        if t1 == t0 { v0 } else { v0 + (v1 - v0) * (t - t0) / (t1 - t0) }
+    }
+
+    #[test]
+    fn preview_draws_a_step_as_a_jump_not_a_slope() {
+        // Run 194: 3.5 ml/min, then 0 at the curve's end. Joined straight, the
+        // last two regular samples (3.5 at 99.5 %, 0 at 100 %) drew a ~5 min
+        // slope; the Overview's big figure fell along it to 0 while the pump
+        // ran at 3.5 to the last second.
+        let d = 56_664.0;
+        let c = CurveSpec {
+            mode: ParamMode::Endpoints,
+            start: 3.5,
+            end: 0.0,
+            duration: Duration::from_secs_f64(d),
+            clamp_min: 0.0,
+            clamp_max: 99_999.0,
+            params: CurveParams::Step {
+                segments: vec![
+                    StepSegment { at_seconds: 0.0, value: 3.5 },
+                    StepSegment { at_seconds: 20_000.0, value: 2.0 },
+                    StepSegment { at_seconds: d, value: 0.0 },
+                ],
+            },
+        };
+        let pts = c.preview(200);
+        assert!(pts.windows(2).all(|w| w[0].0 <= w[1].0), "time never goes back");
+        for t in [d - 120.0, d - 1.0, 19_999.0, 15_000.0, 20_001.0, 40_000.0] {
+            let want = c.value_at(Duration::from_secs_f64(t));
+            assert!(close(polyline_at(&pts, t), want), "at {t} s the preview reads {} for {want}", polyline_at(&pts, t));
+        }
+        assert!(close(pts.last().unwrap().1, 0.0));
     }
 
     #[test]
