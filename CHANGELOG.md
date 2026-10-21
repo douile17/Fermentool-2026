@@ -26,6 +26,10 @@
   flacon et ses tuyaux, l'heure était fausse.
 - Une vitesse de pompe de remplissage changée pendant un remplissage
   s'applique aussitôt (avant : au remplissage suivant).
+- Settings › About : « Open folder » / « Show in folder » ouvrent le dossier
+  des données, des logs, ou le dossier de l'historique et des réglages avec le
+  fichier sélectionné, dans l'Explorateur (au lieu de « Copy »). Le dossier
+  des données est écrit une fois, son contenu en liste dessous.
 - Balance plus tolérante à un PC chargé : une demande de poids peut attendre
   0,8 s (avant 0,2 s), et un remplissage n'est coupé qu'après 3 s sans
   lecture. Un remplissage du run 210 avait été coupé par une seule lecture

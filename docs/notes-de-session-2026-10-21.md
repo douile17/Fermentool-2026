@@ -133,6 +133,19 @@ vraies données), puis mise en place.
     compilations complètes faites ainsi pendant le run 210 : aucune erreur de
     balance.
 
+## 6 bis. Settings › About : ouvrir les dossiers
+
+- « Copy » remplacé par **« Open folder »** (dossier des données, logs) et
+  **« Show in folder »** (historique, réglages : l'Explorateur s'ouvre avec le
+  fichier sélectionné). Une page ne peut pas ouvrir un dossier : c'est le
+  daemon qui lance l'Explorateur (`POST /api/about/open`), et seulement pour
+  ces quatre emplacements nommés (`data`, `db`, `config`, `logs`), jamais un
+  chemin venu de la page (testé ; `C:/Windows` refusé, 400).
+- Présentation refaite sur maquette : le dossier des données une fois en
+  tête, son contenu en liste (icône, nom, ce que c'est), boutons alignés.
+  `insideFolder` (`lib/fmt.js`, testé) écrit chaque fichier par son nom dans
+  le dossier, ou son chemin complet s'il est ailleurs.
+
 ## 7. Commits de la session
 
 | Commit | Contenu |
