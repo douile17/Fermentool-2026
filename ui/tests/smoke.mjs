@@ -162,6 +162,8 @@ try {
       check('the run detail says its curve in the header', await js(`(() => { const c = [...document.querySelectorAll('.modal.detail .chips .chip')].map((e) => e.textContent); return c.length >= 3 && c.some((t) => /\\d/.test(t)); })()`));
       check('the run detail shows the feed rate chart', await js(`!!document.querySelector('.modal.detail .block svg')`));
       // its time scale is the experiment's (0, 6 h, 12 h…), never the time of day (17:00)
+      // Settings open and first, the bottle table folded under it (2026-10-22)
+      check('the run detail opens on Settings, the feed bottle folded below', await js(`(() => { const f = [...document.querySelectorAll('.modal.detail details.fold')]; const n = (d) => d.querySelector('.lbl')?.textContent.trim(); const si = f.findIndex((d) => n(d) === 'Settings'), bi = f.findIndex((d) => n(d) === 'Feed bottle'); return si >= 0 && f[si].open && (bi < 0 || (bi > si && !f[bi].open)); })()`));
       check('the run detail charts count the experiment time, not the clock', await js(`(() => { const t = [...document.querySelectorAll('.modal.detail svg text')].map((e) => e.textContent.trim()); return t.some((x) => / (h|min)$/.test(x)) && !t.some((x) => /^(\\w{3} )?\\d{2}:\\d{2}$/.test(x)); })()`));
       check('its bottle table and journal count it too, no time of day', await js(`![...document.querySelectorAll('.modal.detail .t, .modal.detail .jr .tm')].some((e) => /\\d{1,2}:\\d{2}/.test(e.textContent))`));
       if (await js(`!!document.querySelector('.modal.detail .jr')`)) {

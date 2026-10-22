@@ -226,7 +226,8 @@ export function journalLines(events, run) {
   const u = unitFor(run.control_var);
   const out = [];
   let refillN = 0;
-  let openRefill = null; // { line, startMs, rpm }
+  let openRefill = null; // { line, rpm, before }
+  let lastRefill = null; // the one last closed, in case it resumes
   // the run's start; with none known, its first event
   const startMs = Number.isFinite(Date.parse(run.started_at)) ? Date.parse(run.started_at) : Date.parse(evs[0]?.wall_time);
   const push = (iso, title, detail, tone = '') => {
@@ -239,6 +240,12 @@ export function journalLines(events, run) {
     const det = e.detail ?? '';
     const tone = e.level === 'error' || e.level === 'warn' || (e.kind.startsWith('alarm_') && e.kind !== 'alarm_cleared' && e.kind !== 'alarm_ack') ? 'bad' : '';
     if (e.kind === 'refill_start') {
+      // a fill cut by a silent balance and resumed is the same refill: its
+      // line goes on (run 210 showed "Refill 1" and "Refill 2" for one)
+      if (/^resuming/.test(det) && lastRefill) {
+        openRefill = lastRefill;
+        continue;
+      }
       refillN += 1;
       const rpm = det.match(/at ([\d.]+) rpm/)?.[1];
       openRefill = { line: push(e.wall_time, `Refill ${refillN}`, rpm ? `at ${rpm} rpm` : '', 'refill'), rpm };
@@ -250,7 +257,11 @@ export function journalLines(events, run) {
       const weights = w ? `${grouped(+w[1])} → ${grouped(+w[2])} g` : det;
       if (openRefill) {
         const took = (Date.parse(e.wall_time) - openRefill.line.ms) / 1000;
-        openRefill.line.detail = [mins(took) + (openRefill.rpm ? ` at ${openRefill.rpm} rpm` : ''), weights].join(', ');
+        // resumed: from the first weight before it to the last one after
+        openRefill.before ??= w?.[1];
+        const span = w && openRefill.before != null ? `${grouped(+openRefill.before)} → ${grouped(+w[2])} g` : weights;
+        openRefill.line.detail = [mins(took) + (openRefill.rpm ? ` at ${openRefill.rpm} rpm` : ''), span].join(', ');
+        lastRefill = openRefill;
         openRefill = null;
       } else {
         refillN += 1;
@@ -312,4 +323,12 @@ export function gapExtremes(points, spans) {
     behind = Math.min(behind, d - r);
   }
   return { ahead, behind };
+}
+
+/** The legend of the unweighed stretches on the run detail's charts: they
+ *  are refills, but also bumps of a second or two (the bottle touched),
+ *  which "Refill" alone called refills (runs 181, 192, 2026-10-22). */
+export function blindLegend(nSpans, nRefills) {
+  if (!nRefills) return 'Not weighed';
+  return nSpans > nRefills ? 'Refill or bump, not weighed' : 'Refill, not weighed';
 }

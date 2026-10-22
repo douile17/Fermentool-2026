@@ -10,7 +10,7 @@
   import { weighedFlow, flowWindowS } from '../lib/runview.js';
   import {
     TOLERANCE, alarmCount, atRun, gapExtremes, grouped, journalLines, mins,
-    refillRows, regulationFigures, verdict, whenLine, curveChips,
+    refillRows, regulationFigures, verdict, whenLine, curveChips, blindLegend,
   } from '../lib/rundetail.js';
 
   let runs = $state([]);
@@ -515,7 +515,7 @@
             {:else}
               <span><i class="sw actual"></i>Sent to the pump</span>
             {/if}
-            {#if spans.length}<span><i class="sw refilled"></i><i class="sw blind"></i>Refill, not weighed</span>{/if}
+            {#if spans.length}<span><i class="sw refilled"></i><i class="sw blind"></i>{blindLegend(spans.length, nRefills)}</span>{/if}
           </div>
         </div>
         <Chart
@@ -543,38 +543,9 @@
         </div>
       {/if}
 
-      {#if bottle}
-        <div class="block">
-          <h3>Feed bottle</h3>
-          <div class="tblwrap">
-            <table class="bottle">
-              <thead><tr><th>On the balance</th><th>Before</th><th>After</th><th>Poured</th><th>Fed during refill <span class="est-h">≈ est.</span></th></tr></thead>
-              <tbody>
-                <tr><td>Start <span class="t">at {atRun(0)}</span></td><td class="dim">·</td><td>{grouped(bottle.start)} g</td><td class="dim">·</td><td class="dim">·</td></tr>
-                {#each refills as r, i}
-                  <tr>
-                    <td>Refill {i + 1} <span class="t">at {atRun(r.from_s)}{r.took_s != null ? `, ${mins(r.took_s)}` : ''}</span></td>
-                    <td>{grouped(r.before_g)} g</td><td>{grouped(r.after_g)} g</td>
-                    <td>{grouped(r.added_g)} g</td><td class="dim">≈ {grouped(r.drawn_g)} g</td>
-                  </tr>
-                {/each}
-                <tr><td>End <span class="t">at {atRun(reportSpanS)}</span></td><td>{grouped(bottle.end)} g</td><td class="dim">·</td><td class="dim">·</td><td class="dim">·</td></tr>
-              </tbody>
-              {#if refills.length}
-                <tfoot><tr>
-                  <td>{refills.length} refill{refills.length === 1 ? '' : 's'}</td><td></td><td></td>
-                  <td>{grouped(refills.reduce((a, r) => a + r.added_g, 0))} g</td>
-                  <td class="dim">≈ {grouped(refills.reduce((a, r) => a + r.drawn_g, 0))} g</td>
-                </tr></tfoot>
-              {/if}
-            </table>
-          </div>
-        </div>
-      {/if}
-
-      <!-- For when it went wrong, or to look closer: folded. -->
+      <!-- Settings open, in view; the rest, to look closer, folded. -->
       <div class="folds">
-        <details class="fold">
+        <details class="fold" open>
           <summary>
             <Icon name="chevron-right" size={16} /><span class="lbl">Settings</span>
             <span class="peek">{[sel.cal ? 'tube' : null, sel.run.tubing_calibration_id != null ? 'calibration' : null, sel.run.gravimetric_trim ? 'balance' : null, sel.run.auto_refill ? 'refill' : null].filter(Boolean).join(', ') || 'details'}</span>
@@ -597,6 +568,40 @@
             {#if sel.run.app_version}<dt>App</dt><dd class="mono">{sel.run.app_version}</dd>{/if}
           </dl>
         </details>
+
+        <!-- the bottle's weights, folded: Settings first (2026-10-22) -->
+        {#if bottle}
+          <details class="fold">
+            <summary>
+              <Icon name="chevron-right" size={16} /><span class="lbl">Feed bottle</span>
+              <span class="peek">{refills.length ? `${refills.length} refill${refills.length === 1 ? '' : 's'}, ${grouped(refills.reduce((a, r) => a + r.added_g, 0))} g poured` : 'no refill'}</span>
+            </summary>
+            <div class="tblwrap">
+              <table class="bottle">
+                <thead><tr><th>On the balance</th><th>Before</th><th>After</th><th>Poured</th><th>Fed during refill <span class="est-h">≈ est.</span></th></tr></thead>
+                <tbody>
+                  <tr><td>Start <span class="t">at {atRun(0)}</span></td><td class="dim">·</td><td>{grouped(bottle.start)} g</td><td class="dim">·</td><td class="dim">·</td></tr>
+                  {#each refills as r, i}
+                    <tr>
+                      <td>Refill {i + 1} <span class="t">at {atRun(r.from_s)}{r.took_s != null ? `, ${mins(r.took_s)}` : ''}</span></td>
+                      <td>{grouped(r.before_g)} g</td><td>{grouped(r.after_g)} g</td>
+                      <td>{grouped(r.added_g)} g</td><td class="dim">≈ {grouped(r.drawn_g)} g</td>
+                    </tr>
+                  {/each}
+                  <tr><td>End <span class="t">at {atRun(reportSpanS)}</span></td><td>{grouped(bottle.end)} g</td><td class="dim">·</td><td class="dim">·</td><td class="dim">·</td></tr>
+                </tbody>
+                {#if refills.length}
+                  <tfoot><tr>
+                    <td>{refills.length} refill{refills.length === 1 ? '' : 's'}</td><td></td><td></td>
+                    <td>{grouped(refills.reduce((a, r) => a + r.added_g, 0))} g</td>
+                    <td class="dim">≈ {grouped(refills.reduce((a, r) => a + r.drawn_g, 0))} g</td>
+                  </tr></tfoot>
+                {/if}
+              </table>
+            </div>
+          </details>
+        {/if}
+
 
         {#if sel.report}
           <details class="fold">

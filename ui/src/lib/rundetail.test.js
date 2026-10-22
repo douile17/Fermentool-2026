@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  alarmCount, atRun, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines,
+  alarmCount, atRun, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines,
   refillRows, regulationFigures, verdict, whenLine,
 } from './rundetail.js';
 
@@ -212,5 +212,37 @@ describe('curveChips', () => {
   it('a constant or a one-level step says its level', () => {
     expect(text({ control_var: 'ml_min', duration_s: 3600, direction: 'cw', curve: { start: 5, end: 5, params: { kind: 'constant' } } }).slice(1, 3)).toEqual(['5.000 ml/min', 'for 1 h 0 m']);
     expect(text(run194)[1]).toBe('3.500 ml/min, then 0.000');
+  });
+});
+
+describe('journalLines, a refill cut and resumed', () => {
+  // Run 210: the balance went silent mid-fill, the refill pump stopped, the
+  // still weight read as a refill over; the fill resumed 1 s later. One
+  // refill, not "Refill 1" and "Refill 2".
+  const run210 = { control_var: 'ml_min', status: 'completed', started_at: at(21, 11, 26, 45), curve: { start: 6, end: 9, params: { kind: 'exponential' } } };
+  const evs = [
+    ev('refill_start', at(21, 13, 48, 16), 'under the refill level: 3612 g on the balance, filling to 4612 g at 55 rpm'),
+    ev('refill_interrupted', at(21, 14, 19, 3), 'no balance reading: refill pump stopped, the refill starts again once the balance answers', 'warn'),
+    ev('refill', at(21, 14, 19, 33), 'bottle refilled: 3612.3 g -> 4570.8 g (+958.5 g)'),
+    ev('refill_start', at(21, 14, 19, 34), 'resuming the interrupted refill: 4570 g on the balance, filling to 4612 g at 350 rpm'),
+    ev('refill_stop', at(21, 14, 19, 44), 'filled 38 g in 10 s at 350 rpm (+225 g/min net of the feed)'),
+    ev('refill', at(21, 14, 20, 16), 'bottle refilled: 4570.8 g -> 4609.5 g (+38.7 g)'),
+  ];
+  const lines = journalLines(evs, run210);
+  it('is one refill line, from the first weight to the last', () => {
+    const refills = lines.filter((l) => l.title.startsWith('Refill ') && l.tone === 'refill');
+    expect(refills.map((l) => l.title)).toEqual(['Refill 1']);
+    expect(refills[0].detail.replace(/\s/g, ' ')).toBe('32 min at 55 rpm, 3 612.3 → 4 609.5 g');
+  });
+  it('keeps the interruption as its own line', () => {
+    expect(lines.some((l) => l.title === 'Refill interrupted')).toBe(true);
+  });
+});
+
+describe('blindLegend', () => {
+  it('calls a stretch a refill only when it is one', () => {
+    expect(blindLegend(3, 3)).toBe('Refill, not weighed');
+    expect(blindLegend(8, 2)).toBe('Refill or bump, not weighed');
+    expect(blindLegend(4, 0)).toBe('Not weighed');
   });
 });
