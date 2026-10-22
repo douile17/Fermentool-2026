@@ -269,6 +269,41 @@ impl CurveSpec {
         self
     }
 
+    /// The curve a Constant run follows once its rate was changed mid-run:
+    /// a Step profile holding the original value, then each `(elapsed_s,
+    /// value)` change in time order. Anything else (no change, or not a
+    /// Constant) is returned as is. Pure, so a resume rebuilds the same curve
+    /// from the journalled changes. The duration is stretched to the last
+    /// change, a change made in the hold phase counts from its time only.
+    pub fn with_rate_changes(&self, changes: &[(f64, f64)]) -> CurveSpec {
+        let (Some(&(last_at, last_value)), CurveParams::Constant) = (changes.last(), &self.params)
+        else {
+            return self.clone();
+        };
+        let mut segments = vec![StepSegment {
+            at_seconds: 0.0,
+            value: self.start,
+        }];
+        segments.extend(
+            changes
+                .iter()
+                .map(|&(at_seconds, value)| StepSegment { at_seconds, value }),
+        );
+        // The duration is stored in whole seconds.
+        let duration = self
+            .duration
+            .max(Duration::from_secs(last_at.max(0.0).ceil() as u64));
+        CurveSpec {
+            mode: self.mode,
+            start: self.start,
+            end: last_value,
+            duration,
+            clamp_min: self.clamp_min,
+            clamp_max: self.clamp_max,
+            params: CurveParams::Step { segments },
+        }
+    }
+
     /// The [`CurveKind`] of this spec.
     pub fn kind(&self) -> CurveKind {
         self.params.kind()
@@ -672,6 +707,34 @@ mod tests {
         assert!(close(c.effective_end(), 30.0));
         assert!(close(c.value_at(hours(2)), 20.0));
         assert!(close(c.resolved().end, 30.0));
+    }
+
+    #[test]
+    fn rate_changes_make_steps() {
+        let c = CurveSpec::constant(5.0, hours(24));
+        let e = c.with_rate_changes(&[(22_800.0, 3.0), (65_100.0, 4.0)]);
+        assert!(e.validate().is_ok());
+        assert!(close(e.value_at(hours(1)), 5.0));
+        assert!(close(e.value_at(hours(7)), 3.0));
+        assert!(close(e.value_at(hours(19)), 4.0));
+        assert!(close(e.value_at(hours(30)), 4.0));
+    }
+
+    #[test]
+    fn a_change_in_the_hold_counts_from_its_time_only() {
+        let c = CurveSpec::constant(5.0, hours(3));
+        let e = c.with_rate_changes(&[(14_400.0, 3.0)]);
+        assert!(e.validate().is_ok());
+        assert!(close(e.value_at(Duration::from_secs(12_600)), 5.0));
+        assert!(close(e.value_at(Duration::from_secs(16_200)), 3.0));
+    }
+
+    #[test]
+    fn no_change_is_the_same_curve() {
+        let c = CurveSpec::constant(5.0, hours(3));
+        assert_eq!(c.with_rate_changes(&[]), c);
+        let l = CurveSpec::linear(1.0, 9.0, hours(2));
+        assert_eq!(l.with_rate_changes(&[(60.0, 3.0)]), l);
     }
 
     #[test]
