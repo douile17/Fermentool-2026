@@ -1,7 +1,8 @@
 <script>
   import { num, vol } from '../lib/fmt.js';
-  import { valueScale } from '../lib/chartscale.js';
+  import { valueScale, elapsedTicks, ticksFor } from '../lib/chartscale.js';
   import { splitEstimated } from '../lib/refill.js';
+  import { refillMarkAt } from '../lib/runview.js';
   import { textBox, placeLabel, besideLine } from '../lib/chartlabels.js';
 
   /**
@@ -49,7 +50,8 @@
     // there (History: the balance cannot weigh the feed during a refill).
     blindBands = false,
     // Time-axis labels under the plot, `{ t, label }` (History: clock times).
-    ticks = [],
+    // time-axis labels; none given: elapsed time, min then h (`elapsedTicks`)
+    ticks = null,
     // The planned curve as a wide pale stroke, so a trace on it stays visible.
     plannedWide = false,
     // The values at the curve's start and end, by its two dots.
@@ -187,12 +189,15 @@
     return out;
   });
 
-  // The next refill, drawn only inside the chart (past its end it would sit
-  // on the end and lie about the time). Its label takes the first place
+  // The next refill, at its time inside the chart; past the end (a run
+  // holding past its curve) on the right edge, its label ending in an arrow
+  // so it does not read as the end's time (lib/runview.js `refillMarkAt`).
+  // Its label takes the first place
   // beside the line clear of every other text and of the curve
   // (lib/chartlabels.js): it once printed over the end value. With no
   // clear place it is left out; the line stays.
-  const refillX = $derived(refill && refill.t > 0 && refill.t < dspan ? x(refill.t) : null);
+  const mark = $derived(refillMarkAt(refill, dspan));
+  const refillX = $derived(mark ? (mark.edge ? W - padR - 1 : x(mark.t)) : null);
   const takenBoxes = $derived.by(() => {
     const out = grid.filter((g) => g.text != null).map((g) => textBox(padL + 2, g.ly, g.text, 'start', 9.5));
     if (labels) {
@@ -209,7 +214,7 @@
   const refillLabel = $derived(
     refillX == null
       ? null
-      : placeLabel(besideLine(refillX, refill.label, { top: padT + 10, bottom: H - padB - 4, W }), {
+      : placeLabel(besideLine(refillX, mark.label, { top: padT + 10, bottom: H - padB - 4, W }), {
           taken: takenBoxes,
           yAt: curveYAt,
           W,
@@ -223,7 +228,7 @@
   const actualParts = $derived(
     !actual.length ? [] : blindBands ? splitEstimated(actual, bands).map((p) => ({ est: p.est, d: path(p.pts) })) : [{ est: false, d: path(actual) }]
   );
-  const tickMarks = $derived(ticks.filter((k) => k.t >= 0 && k.t <= dspan).map((k) => ({ ...k, x: x(k.t) })));
+  const tickMarks = $derived((ticks ?? elapsedTicks(dspan, ticksFor(W))).filter((k) => k.t >= 0 && k.t <= dspan).map((k) => ({ ...k, x: x(k.t) })));
 
   // Live "travelled" trace: the planned curve clipped to `nowS`, ending exactly
   // on the marker. Driven by the same smooth clock as the marker, so the green
@@ -301,7 +306,7 @@
     {#if refillX != null}
       <line x1={refillX} x2={refillX} y1={padT} y2={H - padB} class="refill" />
       {#if refillLabel}
-        <text x={refillLabel.x} y={refillLabel.y} text-anchor={refillLabel.anchor} class="axl refill-l">{refill.label}</text>
+        <text x={refillLabel.x} y={refillLabel.y} text-anchor={refillLabel.anchor} class="axl refill-l">{mark.label}</text>
       {/if}
     {/if}
 

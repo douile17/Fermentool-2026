@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deliveryFigures, flowWindowS, inAbout, nextRefill, refillDueInS, refillProgress, runState, stateTitle, weighedFlow } from './runview.js';
+import { deliveryFigures, flowWindowS, holdBand, inAbout, nextRefill, refillMarkAt, refillDueInS, refillProgress, runState, stateTitle, weighedFlow } from './runview.js';
 
 describe('weighedFlow', () => {
   // Run 184's curve: 13 -> 10 mL/min over 1 h, a point every 2 s.
@@ -160,5 +160,36 @@ describe('deliveryFigures', () => {
   it('is nothing before anything is asked', () => {
     expect(deliveryFigures([0, 0, 0])).toBeNull();
     expect(deliveryFigures(null)).toBeNull();
+  });
+});
+
+describe('holdBand', () => {
+  const cycle = { phase: 'idle', halted: false, low_g: 4000, high_g: 5200 };
+  const nowMs = Date.parse('2026-10-22T14:30:00Z');
+  it('past the curve, the next refill still comes first, Stop said under the title', () => {
+    const b = holdBand({ cycle, inS: 2 * 3600 + 600, nowMs, holdS: 4800 });
+    expect(b.next.label).toBe('Next refill');
+    expect(b.next.sub).toBe('in 2 h 10, at 4.00 kg, back to 5.20 kg');
+    expect(b.detail).toMatch(/^Done 1 h 20 ago, .*Stop records the run as completed\.$/);
+  });
+  it('with no refill waiting, it asks for Stop as before', () => {
+    for (const c of [null, { ...cycle, halted: true }, { ...cycle, phase: 'filling' }]) {
+      const b = holdBand({ cycle: c, inS: 600, nowMs, holdS: 4800 });
+      expect(b.next.what).toBe('Stop the run when you are done');
+      expect(b.detail).toBeNull();
+    }
+  });
+});
+
+describe('refillMarkAt', () => {
+  it('inside the curve, at its time', () => {
+    expect(refillMarkAt({ t: 3600, label: 'refill 14:00' }, 7200)).toEqual({ t: 3600, label: 'refill 14:00', edge: false });
+  });
+  it('past the curve, on the edge with an arrow, not hidden', () => {
+    expect(refillMarkAt({ t: 9000, label: 'refill 16:40, in 2 h 10' }, 7200)).toEqual({ t: 7200, label: 'refill 16:40, in 2 h 10 →', edge: true });
+  });
+  it('nothing without a time', () => {
+    expect(refillMarkAt(null, 7200)).toBeNull();
+    expect(refillMarkAt({ t: 0, label: 'x' }, 7200)).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { get, post, del } from '../lib/api.js';
-  import { num, dur, shortTime, stampY, unitFor, digitsFor, ranFor } from '../lib/fmt.js';
+  import { num, shortTime, stampY, unitFor, digitsFor, ranFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
   import GapChart from '../components/GapChart.svelte';
   import Icon from '../components/Icon.svelte';
@@ -9,8 +9,8 @@
   import { downloadSettings } from '../lib/runfile.js';
   import { weighedFlow, flowWindowS } from '../lib/runview.js';
   import {
-    TOLERANCE, alarmCount, atClock, clockTicks, curveLine, gapExtremes, grouped, journalLines, mins,
-    refillRows, regulationFigures, verdict, whenLine,
+    TOLERANCE, alarmCount, atRun, gapExtremes, grouped, journalLines, mins,
+    refillRows, regulationFigures, verdict, whenLine, curveChips,
   } from '../lib/rundetail.js';
 
   let runs = $state([]);
@@ -236,7 +236,6 @@
     return out;
   });
 
-  const startMs = $derived(sel ? Date.parse(sel.run.started_at) : 0);
   const spans = $derived(sel?.report?.estimated ?? []);
   // A run goes on past its curve (the hold): both charts span all of it.
   const reportSpanS = $derived(
@@ -465,6 +464,12 @@
             <span class="sep">·</span><span class="nw">ran {rf.ran}{rf.of ? ` ${rf.of}` : ''}</span>
             {#if sel.run.responsible}<span class="sep">·</span><span class="nw">{sel.run.responsible}</span>{/if}
           </div>
+          <!-- the curve said up front: its start and end were hard to find behind Settings -->
+          <div class="chips" aria-label="Curve">
+            {#each curveChips(sel.run) as c}
+              <span class="chip">{#if c.value}<b class="mono">{c.value}</b> {c.unit}{:else}{c.text}{/if}</span>
+            {/each}
+          </div>
         </div>
         <div class="hd-actions">
           <div class="again">
@@ -523,7 +528,6 @@
           digits={digitsFor(sel.run.control_var)}
           bands={spans}
           blindBands={chartWeighed.length > 0}
-          ticks={clockTicks(startMs, reportSpanS)}
           plannedWide
           endpoints={false}
         />
@@ -535,7 +539,7 @@
             <h3>Running total vs requested</h3>
             <div class="legend"><span>delivered − requested, mL</span></div>
           </div>
-          <GapChart points={sel.report.points} {spans} spanS={reportSpanS} ticks={clockTicks(startMs, reportSpanS)} />
+          <GapChart points={sel.report.points} {spans} spanS={reportSpanS} />
         </div>
       {/if}
 
@@ -546,15 +550,15 @@
             <table class="bottle">
               <thead><tr><th>On the balance</th><th>Before</th><th>After</th><th>Poured</th><th>Fed during refill <span class="est-h">≈ est.</span></th></tr></thead>
               <tbody>
-                <tr><td>Start <span class="t">{atClock(startMs, 0)}</span></td><td class="dim">·</td><td>{grouped(bottle.start)} g</td><td class="dim">·</td><td class="dim">·</td></tr>
+                <tr><td>Start <span class="t">at {atRun(0)}</span></td><td class="dim">·</td><td>{grouped(bottle.start)} g</td><td class="dim">·</td><td class="dim">·</td></tr>
                 {#each refills as r, i}
                   <tr>
-                    <td>Refill {i + 1} <span class="t">{atClock(startMs, r.from_s)}{r.took_s != null ? `, ${mins(r.took_s)}` : ''}</span></td>
+                    <td>Refill {i + 1} <span class="t">at {atRun(r.from_s)}{r.took_s != null ? `, ${mins(r.took_s)}` : ''}</span></td>
                     <td>{grouped(r.before_g)} g</td><td>{grouped(r.after_g)} g</td>
                     <td>{grouped(r.added_g)} g</td><td class="dim">≈ {grouped(r.drawn_g)} g</td>
                   </tr>
                 {/each}
-                <tr><td>End <span class="t">{atClock(startMs, reportSpanS)}</span></td><td>{grouped(bottle.end)} g</td><td class="dim">·</td><td class="dim">·</td><td class="dim">·</td></tr>
+                <tr><td>End <span class="t">at {atRun(reportSpanS)}</span></td><td>{grouped(bottle.end)} g</td><td class="dim">·</td><td class="dim">·</td><td class="dim">·</td></tr>
               </tbody>
               {#if refills.length}
                 <tfoot><tr>
@@ -573,11 +577,9 @@
         <details class="fold">
           <summary>
             <Icon name="chevron-right" size={16} /><span class="lbl">Settings</span>
-            <span class="peek">{sel.run.curve.params.kind} · {dur(sel.run.duration_s)} · {sel.run.direction}</span>
+            <span class="peek">{[sel.cal ? 'tube' : null, sel.run.tubing_calibration_id != null ? 'calibration' : null, sel.run.gravimetric_trim ? 'balance' : null, sel.run.auto_refill ? 'refill' : null].filter(Boolean).join(', ') || 'details'}</span>
           </summary>
           <dl>
-            <dt>Curve</dt><dd>{curveLine(sel.run)}</dd>
-            <dt>Direction</dt><dd>{sel.run.direction === 'ccw' ? 'Counter-clockwise' : 'Clockwise'}</dd>
             {#if sel.cal}
               <dt>Tube</dt>
               <dd>{[sel.cal.brand, sel.cal.product_ref].filter(Boolean).join(' ') || 'Tube'}{sel.cal.inner_diameter_mm != null ? `, ${sel.cal.inner_diameter_mm} mm ID` : ''}{sel.cal.tubing_lot_id ? `, lot ${sel.cal.tubing_lot_id}` : ''}</dd>
@@ -605,7 +607,7 @@
             <dl>
               {#if trimStartS != null}
                 <dt>Correction on</dt>
-                <dd>{atClock(startMs, trimStartS)}, after {dur(trimStartS)}{reg.correction ? `, at ×${reg.correction}` : ''}</dd>
+                <dd>at {atRun(trimStartS)}{reg.correction ? `, at ×${reg.correction}` : ''}</dd>
               {/if}
               {#if reg.ratio}<dt>Pump ratio</dt><dd class="mono">{reg.ratio}</dd>{/if}
               <dt>Largest gap</dt>
@@ -635,7 +637,7 @@
             {:else}
               {#each journal as l}
                 <div class="jr {l.tone}">
-                  <span class="d mono">{l.day}</span><span class="tm mono">{l.time}</span>
+                  <span class="tm mono">{l.time}</span>
                   <span class="w"><b>{l.title}</b> <span>{l.detail}</span></span>
                 </div>
               {/each}
@@ -740,6 +742,9 @@
   .idrow .rid { font-size: 12px; color: var(--muted); }
   .detail-head h2 { margin: 4px 0 2px; font-size: 22px; text-wrap: balance; overflow-wrap: anywhere; }
   .when { display: flex; flex-wrap: wrap; column-gap: var(--s-2); font-size: 13px; color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s-2); }
+  .chip { padding: 3px 10px; border-radius: 999px; background: var(--surface-sunken); font-size: 13px; color: var(--ink); }
+  .chip b { font-weight: 600; }
   .when .sep { opacity: 0.6; }
   .nw { white-space: nowrap; }
   .again { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
@@ -793,9 +798,8 @@
   dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--s-5); margin: 0 0 var(--s-4) 24px; font-size: 13px; }
   dt { color: var(--muted); }
   dd { margin: 0; }
-  .jr { display: grid; grid-template-columns: 34px 46px minmax(0, 1fr); gap: var(--s-3); padding: 6px 0 6px 24px; font-size: 13px; align-items: baseline; }
+  .jr { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: var(--s-3); padding: 6px 0 6px 24px; font-size: 13px; align-items: baseline; }
   .jr + .jr { border-top: 1px solid var(--line-soft); }
-  .jr .d { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; }
   .jr .tm { font-size: 12px; color: var(--muted); }
   .jr .w b { font-weight: 600; }
   .jr .w span { color: var(--muted); }

@@ -306,6 +306,25 @@ export function nextRefill({ cycle, inS, nowMs }) {
 }
 const kgOf = (g) => `${(g / 1000).toFixed(2)} kg`;
 
+/** The band of a run holding past its curve (mockup C, 2026-10-22): the
+ *  automatic refill goes on, so its time is what the band says next, and
+ *  Stop moves into the line under the title; with none waiting, the band
+ *  asks for Stop. `{ next, detail }`, `detail` null to keep runState's. */
+export function holdBand({ cycle, inS, nowMs, holdS }) {
+  const nr = nextRefill({ cycle, inS, nowMs });
+  if (nr) return { next: nr, detail: `Done ${hm(holdS)} ago, the pump still feeds. Stop records the run as completed.` };
+  return { next: { what: 'Stop the run when you are done', sub: `curve done ${hm(holdS)} ago, pump still feeding` }, detail: null };
+}
+
+/** The chart's refill mark: at its time inside the curve's span, or on the
+ *  right edge with an arrow when it falls past the end (a run holding past
+ *  its curve). `{ t, label }` for the chart, null for none. */
+export function refillMarkAt(refill, spanS) {
+  if (!refill || !(refill.t > 0) || !(spanS > 0)) return null;
+  if (refill.t < spanS) return { t: refill.t, label: refill.label, edge: false };
+  return { t: spanS, label: `${refill.label} →`, edge: true };
+}
+
 /** The Delivery panel's figures from the last tracking point
  *  `[t, asked_ml, weighed_ml]`: the share delivered and the gap, both in %.
  *  "0.0 %" alone read as nothing delivered; "100.0 % delivered" cannot. */

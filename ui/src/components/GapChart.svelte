@@ -6,9 +6,10 @@
   import { num } from '../lib/fmt.js';
   import { splitEstimated } from '../lib/refill.js';
   import { gapSeries, gapScale } from '../lib/rundetail.js';
+  import { elapsedTicks, ticksFor } from '../lib/chartscale.js';
 
   /** @type {{ points: [number, number, number][], spans?: [number, number][], spanS: number, ticks?: { t: number, label: string }[] }} */
-  let { points, spans = [], spanS, ticks = [] } = $props();
+  let { points, spans = [], spanS, ticks = null } = $props();
 
   let boxW = $state(700);
   const W = $derived(Math.max(240, Math.round(boxW)));
@@ -33,7 +34,8 @@
       d: p.pts.map(([t, v], i) => `${i ? 'L' : 'M'}${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' '),
     })),
   );
-  const tickMarks = $derived(ticks.filter((k) => k.t >= 0 && k.t <= span).map((k) => ({ ...k, x: x(k.t) })));
+  // none given: the experiment's elapsed time, min then h, as every chart
+  const tickMarks = $derived((ticks ?? elapsedTicks(span, ticksFor(W))).filter((k) => k.t >= 0 && k.t <= span).map((k) => ({ ...k, x: x(k.t) })));
 </script>
 
 <div class="wrap" bind:clientWidth={boxW}>

@@ -4,7 +4,7 @@
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
   import { bottleWeights, weighedOutShown, REFILL_GRACE_MS } from '../lib/balance.js';
-  import { valueAt, hm, clock, when, refillDueInS, runState, nextRefill, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
+  import { valueAt, hm, clock, when, refillDueInS, runState, nextRefill, holdBand, inAbout, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
@@ -203,14 +203,19 @@
   });
   // When the automatic refill should start, for the line on the chart.
   const refillInS = $derived(flow ? refillDueInS({ cycle, weightG, ...flow }) : null);
+  // Past the curve the chart ends before the refill: the mark sits on its
+  // edge with an arrow (Chart, `refillMarkAt`), so its label says how long.
   const refillMark = $derived(
-    refillInS != null ? { t: elapsed + refillInS, label: `refill ${when(now + refillInS * 1000, now)}` } : null
+    refillInS != null
+      ? { t: elapsed + refillInS, label: `refill ${when(now + refillInS * 1000, now)}${inHold ? `, ${inAbout(refillInS)}` : ''}` }
+      : null
   );
+  const hold = $derived(inHold ? holdBand({ cycle, inS: refillInS, nowMs: now, holdS }) : null);
   // The one thing the operator has to do next, as a clock time. With
   // automatic refill there is nothing to do: the band says when it refills.
   const next = $derived.by(() => {
     if (!run) return null;
-    if (inHold) return { what: 'Stop the run when you are done', sub: `curve done ${hm(holdS)} ago, pump still feeding` };
+    if (hold) return hold.next;
     const nr = nextRefill({ cycle, inS: refillInS, nowMs: now });
     if (nr) return nr;
     if (cycle && !cycle.halted) return { label: 'Refill', what: 'The refill pump tops the bottle up', sub: cycleLine(cycle) };
@@ -456,7 +461,7 @@
             {rs.title}
           </div>
           <div class="band-sub">
-            {#if rs.detail}{rs.detail}{:else if run}Run {run.id}, {run.name}{/if}
+            {#if rs.word === 'Holding' && hold?.detail}{hold.detail}{:else if rs.detail}{rs.detail}{:else if run}Run {run.id}, {run.name}{/if}
           </div>
           {#if rs.progress}
             {@const p = rs.progress}

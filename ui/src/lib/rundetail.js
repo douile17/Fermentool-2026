@@ -14,7 +14,6 @@ export const SETTLE_S = 900;
 
 const pad = (n) => String(n).padStart(2, '0');
 const hm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-const weekday = (d) => d.toLocaleDateString(LOCALE, { weekday: 'short' });
 const dayMonth = (d) => d.toLocaleDateString(LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
 const sameDay = (a, b) => a.toDateString() === b.toDateString();
 
@@ -36,28 +35,6 @@ export function whenLine(startedIso, endedIso) {
   const b = new Date(endedIso);
   if (Number.isNaN(b.getTime())) return from;
   return `${from} → ${sameDay(a, b) ? '' : `${dayMonth(b)} `}${hm(b)}`;
-}
-
-/** Clock-time ticks for a run's time axis: `[{ t, label }]`, `t` in run
- *  seconds, on round hours (or minutes for a short run), at most `max` of
- *  them; midnight is labelled with its day, "Tue 00:00". */
-export function clockTicks(startMs, spanS, max = 7) {
-  if (!Number.isFinite(startMs) || !(spanS > 0)) return [];
-  const steps = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440]; // minutes
-  const stepMin = steps.find((m) => spanS / 60 / m <= max) ?? 1440;
-  const stepMs = stepMin * 60_000;
-  const start = new Date(startMs);
-  // first round time after the start, counted in local time
-  const midnight = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
-  let at = midnight + Math.ceil((startMs - midnight) / stepMs) * stepMs;
-  const out = [];
-  for (; at <= startMs + spanS * 1000; at += stepMs) {
-    const d = new Date(at);
-    // a DST change shifts local hours: keep the ticks on round local times
-    const label = hm(d) === '00:00' ? `${weekday(d)} 00:00` : hm(d);
-    out.push({ t: (at - startMs) / 1000, label });
-  }
-  return out;
 }
 
 /** Number of alarms raised in a run's events (not their clearing or ack). */
@@ -148,10 +125,13 @@ export function refillRows(bottle, spans) {
   });
 }
 
-/** "Mon 22:01" for run time `t_s`. */
-export function atClock(startMs, t_s) {
-  const d = new Date(startMs + t_s * 1000);
-  return `${weekday(d)} ${hm(d)}`;
+/** Run time `t_s` as the experiment counts it, never the time of day
+ *  (2026-10-22): "0", "47 min", "4 h 45", "26 h 03". */
+export function atRun(t_s) {
+  const m = Math.max(0, Math.floor((t_s || 0) / 60));
+  if (m === 0) return '0';
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}`;
 }
 
 /** Minutes, rounded, "27 min"; seconds under a minute. */
@@ -177,6 +157,29 @@ export function curveLine(run) {
   }
   const mu = kind === 'exponential' && c.mode === 'physio' && c.params.mu_per_hour != null ? `, µ ${num(c.params.mu_per_hour, 3)} h⁻¹` : '';
   return `${name}, ${num(c.start, d)} → ${num(c.end, d)} ${u} over ${over}${mu}`;
+}
+
+/** The curve as the run detail's header chips (mockup C, 2026-10-22: its
+ *  start and end were hard to find, behind Settings): `[{ text }` or
+ *  `{ value, unit }]`, the shape, its values, its length, the direction. */
+export function curveChips(run) {
+  const c = run.curve;
+  const u = unitFor(run.control_var);
+  const d = digitsFor(run.control_var);
+  const kind = c.params.kind;
+  const out = [{ text: kind.charAt(0).toUpperCase() + kind.slice(1) }];
+  if (kind === 'constant') out.push({ value: num(c.start, d), unit: u });
+  else if (kind === 'step') {
+    const segs = (c.params.segments ?? []).filter((s) => s.at_seconds < run.duration_s);
+    if (segs.length <= 1) {
+      const v = segs[0]?.value ?? c.start;
+      out.push({ value: num(v, d), unit: Math.abs(c.end - v) > 1e-9 ? `${u}, then ${num(c.end, d)}` : u });
+    } else out.push({ value: `${num(c.start, d)} → ${num(c.end, d)}`, unit: `${u}, ${segs.length} levels` });
+  } else out.push({ value: `${num(c.start, d)} → ${num(c.end, d)}`, unit: u });
+  if (kind === 'exponential' && c.mode === 'physio' && c.params.mu_per_hour != null) out.push({ text: `µ ${num(c.params.mu_per_hour, 3)} h⁻¹` });
+  out.push({ text: `${kind === 'constant' || kind === 'step' ? 'for' : 'over'} ${dur(run.duration_s)}` });
+  out.push({ text: run.direction === 'ccw' ? 'counter-clockwise' : 'clockwise' });
+  return out;
 }
 
 // --- the journal, in words ------------------------------------------------
@@ -213,9 +216,9 @@ const kindTitle = (k) => TITLES[k] ?? (k.charAt(0).toUpperCase() + k.slice(1)).r
 /** A run's events as the journal's lines, in time order: `[{ day, time,
  *  title, detail, tone }]`. A refill's start, stop and settle make one line
  *  ("Refill 2", how long, at what speed, the weights); the correction's
- *  start and its first ratio, a minute apart, one too. `day` is set on the
- *  first line and whenever the day changes. `tone`: 'refill', 'bad' for an
- *  alarm or an error, '' otherwise. */
+ *  start and its first ratio, a minute apart, one too. `time` is the
+ *  experiment's time since the start (`atRun`), not the time of day.
+ *  `tone`: 'refill', 'bad' for an alarm or an error, '' otherwise. */
 export function journalLines(events, run) {
   // Same-second events (the correction and its first ratio) keep the order
   // they were journalled in, by id.
@@ -224,12 +227,11 @@ export function journalLines(events, run) {
   const out = [];
   let refillN = 0;
   let openRefill = null; // { line, startMs, rpm }
-  let lastDay = null;
+  // the run's start; with none known, its first event
+  const startMs = Number.isFinite(Date.parse(run.started_at)) ? Date.parse(run.started_at) : Date.parse(evs[0]?.wall_time);
   const push = (iso, title, detail, tone = '') => {
-    const d = new Date(iso);
-    const day = lastDay && sameDay(lastDay, d) ? '' : weekday(d);
-    lastDay = d;
-    const line = { day, time: hm(d), title, detail: detail ?? '', tone, ms: d.getTime() };
+    const ms = Date.parse(iso);
+    const line = { time: atRun((ms - startMs) / 1000), title, detail: detail ?? '', tone, ms };
     out.push(line);
     return line;
   };

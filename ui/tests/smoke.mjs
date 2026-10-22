@@ -143,6 +143,8 @@ try {
     await sleep(900);
     check('Feed profile turns green with a duration', (await greens())[2] === 'G', await greens());
     check('the curve is drawn beside the profile', await js(`!!document.querySelector('.preview svg')`));
+    // a time scale under it, in minutes for this 2 h curve (hours past 2 h)
+    check('the curve has a time scale, 0 to 120 min', await js(`(() => { const t = [...document.querySelectorAll('.preview svg text')].map((e) => e.textContent.trim()); return t.includes('0') && t.includes('120 min'); })()`));
     await click('.step', 'Check and start');
     await sleep(600);
     check('Check and start shows the curve and a Start button', await js(`!!document.querySelector('.go .preview svg') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Start run'))`));
@@ -156,7 +158,12 @@ try {
       check('a past run opens', await js(`!!document.querySelector('.modal.detail')`));
       // The verdict comes first: "On target" / "Off target", or not weighed.
       check('the run detail says how it went first', await js(`/On target|Off target|Not weighed|wrong side/.test(document.querySelector('.modal.detail .say')?.textContent ?? '')`));
+      // the curve said up front, start and end in the header (2026-10-22: hard to find behind Settings)
+      check('the run detail says its curve in the header', await js(`(() => { const c = [...document.querySelectorAll('.modal.detail .chips .chip')].map((e) => e.textContent); return c.length >= 3 && c.some((t) => /\\d/.test(t)); })()`));
       check('the run detail shows the feed rate chart', await js(`!!document.querySelector('.modal.detail .block svg')`));
+      // its time scale is the experiment's (0, 6 h, 12 h…), never the time of day (17:00)
+      check('the run detail charts count the experiment time, not the clock', await js(`(() => { const t = [...document.querySelectorAll('.modal.detail svg text')].map((e) => e.textContent.trim()); return t.some((x) => / (h|min)$/.test(x)) && !t.some((x) => /^(\\w{3} )?\\d{2}:\\d{2}$/.test(x)); })()`));
+      check('its bottle table and journal count it too, no time of day', await js(`![...document.querySelectorAll('.modal.detail .t, .modal.detail .jr .tm')].some((e) => /\\d{1,2}:\\d{2}/.test(e.textContent))`));
       if (await js(`!!document.querySelector('.modal.detail .jr')`)) {
         check('the journal is in words, not event kinds', await js(`![...document.querySelectorAll('.modal.detail .jr b')].some((b) => /_/.test(b.textContent))`));
       }

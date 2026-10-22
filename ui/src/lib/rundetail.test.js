@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  alarmCount, clockTicks, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines,
+  alarmCount, atRun, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines,
   refillRows, regulationFigures, verdict, whenLine,
 } from './rundetail.js';
 
@@ -10,6 +10,7 @@ const at = (d, h, m, s = 0) => new Date(2026, 9, d, h, m, s).toISOString();
 // Run 194 as journalled: 3.5 ml/min step, three automatic refills.
 const run194 = {
   status: 'completed',
+  started_at: at(19, 17, 15, 35),
   control_var: 'ml_min',
   duration_s: 56664,
   curve: { mode: 'endpoints', start: 3.5, end: 0, params: { kind: 'step', segments: [{ at_seconds: 0, value: 3.5 }, { at_seconds: 56664, value: 0 }] } },
@@ -43,11 +44,13 @@ describe('journalLines', () => {
   });
 
   it('says a refill in words: how long, how fast, the weights', () => {
-    expect(lines[2]).toMatchObject({ time: '22:01', tone: 'refill', detail: '28 min at 55 rpm, 3 656.8 → 4 655.1 g' });
+    expect(lines[2]).toMatchObject({ time: '4 h 45', tone: 'refill', detail: '28 min at 55 rpm, 3 656.8 → 4 655.1 g' });
   });
 
-  it('names the day on the first line and when it changes, not otherwise', () => {
-    expect(lines.map((l) => l.day)).toEqual(['Mon', '', '', 'Tue', '', '', '']);
+  it('counts the experiment time, not the time of day', () => {
+    expect(lines[0].time).toBe('0');
+    expect(lines[1].time).toBe('2 min');
+    expect(lines.every((l) => !/:/.test(l.time))).toBe(true);
   });
 
   it('puts units on the values', () => {
@@ -165,18 +168,6 @@ describe('whenLine', () => {
   });
 });
 
-describe('clockTicks', () => {
-  it('puts a 15 h 45 m run on round 3 h clock times, midnight with its day', () => {
-    const t = clockTicks(new Date(2026, 9, 19, 17, 15, 35).getTime(), 56677);
-    expect(t.map((x) => x.label)).toEqual(['18:00', '21:00', 'Tue 00:00', '03:00', '06:00', '09:00']);
-    expect(t[0].t).toBe(2665);
-  });
-  it('uses minutes for a short run', () => {
-    const t = clockTicks(new Date(2026, 9, 15, 16, 19).getTime(), 3600);
-    expect(t.map((x) => x.label)).toEqual(['16:20', '16:30', '16:40', '16:50', '17:00', '17:10']);
-  });
-});
-
 describe('curveLine', () => {
   it('says a one-level step as a level and its end', () => {
     expect(curveLine(run194)).toBe('Step, 3.500 ml/min for 15 h 44 m, then 0.000');
@@ -196,5 +187,30 @@ describe('grouped', () => {
     expect(grouped(3305.61)).toBe('3 305.6');
     expect(grouped(98)).toBe('98.0');
     expect(grouped(-1234.5, 0)).toBe('−1 235');
+  });
+});
+
+describe('atRun', () => {
+  it('says run time as the experiment counts it', () => {
+    expect(atRun(0)).toBe('0');
+    expect(atRun(47 * 60 + 10)).toBe('47 min');
+    expect(atRun(4 * 3600 + 45 * 60 + 46)).toBe('4 h 45');
+    expect(atRun(26 * 3600 + 3 * 60)).toBe('26 h 03');
+  });
+});
+
+describe('curveChips', () => {
+  const text = (run) => curveChips(run).map((c) => c.text ?? `${c.value} ${c.unit}`);
+  it('says the shape, start and end, length and direction (run 210)', () => {
+    const run210 = { control_var: 'ml_min', duration_s: 10800, direction: 'ccw', curve: { mode: 'endpoints', start: 6, end: 9, params: { kind: 'exponential', mu_per_hour: 0.15 } } };
+    expect(text(run210)).toEqual(['Exponential', '6.000 → 9.000 ml/min', 'over 3 h 0 m', 'counter-clockwise']);
+  });
+  it('gives µ only when it was asked (Physio)', () => {
+    const run = { control_var: 'ml_min', duration_s: 3600, direction: 'cw', curve: { mode: 'physio', start: 2, end: 2.3, params: { kind: 'exponential', mu_per_hour: 0.14 } } };
+    expect(text(run)).toContain('µ 0.140 h⁻¹');
+  });
+  it('a constant or a one-level step says its level', () => {
+    expect(text({ control_var: 'ml_min', duration_s: 3600, direction: 'cw', curve: { start: 5, end: 5, params: { kind: 'constant' } } }).slice(1, 3)).toEqual(['5.000 ml/min', 'for 1 h 0 m']);
+    expect(text(run194)[1]).toBe('3.500 ml/min, then 0.000');
   });
 });
