@@ -1481,6 +1481,27 @@ mod tests {
     }
 
     #[test]
+    fn clear_history_removes_the_rate_changes_of_the_runs_it_removes() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        s.insert_calibration(&new_calibration(runs, [50.0; 3])).unwrap();
+        let dosing = s.insert_run(&sample_run()).unwrap();
+        let at = ts("2026-09-02T08:00:00Z");
+        s.add_setpoint_change(dosing, 600.0, 3.0, at).unwrap();
+        s.add_setpoint_change(runs[0], 60.0, 2.0, at).unwrap();
+        s.finish_run(dosing, RunStatus::Stopped, ts("2026-09-02T09:00:00Z")).unwrap();
+
+        s.clear_history().unwrap();
+
+        let left: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM setpoint_changes WHERE run_id = ?1", [dosing], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "no rate change left behind its run");
+        assert_eq!(s.setpoint_changes(runs[0]).unwrap().len(), 1, "a kept run keeps its own");
+    }
+
+    #[test]
     fn delete_run_removes_one_run_and_keeps_calibration_bursts() {
         let s = Store::open_in_memory().unwrap();
         let runs = three_bursts(&s);

@@ -1406,11 +1406,11 @@ impl<T: Transport> Engine<T> {
     }
 
     /// The operator changes the rate of the active Constant run from
-    /// `elapsed_s` (the control thread's `run_now()`) on. Recorded first, so
-    /// a resume rebuilds the same curve; the next
-    /// [`apply_setpoint`](Self::apply_setpoint) writes it. The trim is left
-    /// as it is: c is a property of the tube, not of the rate. Returns the
-    /// rates `(from, to)`.
+    /// `elapsed_s` (the control thread's `run_now()`) on. Written to the pump
+    /// first, then recorded, so a resume rebuilds the same curve; a value the
+    /// pump refuses, or a lost link, records nothing and leaves the old rate
+    /// on. The trim is left as it is: c is a property of the tube, not of
+    /// the rate. Returns the rates `(from, to)`.
     pub fn set_constant_rate(&mut self, value: f64, elapsed_s: f64, now: Timestamp) -> Result<(f64, f64)> {
         let Some(a) = self.active.as_ref() else {
             return Err(EngineError::Idle);
@@ -1441,9 +1441,30 @@ impl<T: Transport> Engine<T> {
         let elapsed_s = a.rate_changes.last().map_or(elapsed_s.max(0.0), |&(t, _)| elapsed_s.max(t));
         let id = a.id;
         let from = a.spec.value_at(Duration::from_secs_f64(elapsed_s));
+        let control_var = a.control_var;
         let c = if a.gravimetric_trim { self.trim_c } else { 1.0 };
-        let grid = drive_grid(a.control_var, self.drive_ml_per_rpm);
-        self.store.add_setpoint_change(id, elapsed_s, value, now)?;
+        let grid = drive_grid(control_var, self.drive_ml_per_rpm);
+        // Nothing reaches the pump over a lost link: a change recorded there
+        // would be counted as fed while the pump runs on (see `start_run`).
+        if self.serial_lost {
+            return Err(EngineError::SerialDown);
+        }
+        // The pump takes the new rate first, recorded only once it did: a
+        // value it refuses (0x03) keeps it on the old one, and a change
+        // recorded anyway would be counted in the journal and the trim, and
+        // asked again at every write and on every resume.
+        let target = quantize(value * c, grid);
+        let drive = self.drive_ml_per_rpm;
+        drive_write(&mut self.pump, &mut self.drive_paused, control_var, target, drive)
+            .map_err(|e| setpoint_error(e, control_var, target, drive))?;
+        self.write_fails = 0;
+        if let Err(e) = self.store.add_setpoint_change(id, elapsed_s, value, now) {
+            // Not recorded: the next sub-second write puts the old rate back.
+            if let Some(a) = self.active.as_mut() {
+                a.last_write_q = None;
+            }
+            return Err(e.into());
+        }
 
         let a = self.active.as_mut().expect("checked above");
         a.rate_changes.push((elapsed_s, value));
@@ -1457,10 +1478,10 @@ impl<T: Transport> Engine<T> {
                 a.volume_added_ml = Some(vol + volume_slice((a.vol_elapsed_s, a.vol_target), (elapsed_s, old)));
                 a.vol_elapsed_s = elapsed_s;
             }
-            a.vol_target = quantize(value * c, grid);
+            a.vol_target = target;
         }
-        // Forces the next sub-second write.
-        a.last_write_q = None;
+        a.last_write_q = Some(target);
+        a.last_target = Some(target);
         // The change is recorded: a journal line that fails must not undo it.
         let _ = self.store.log_event(&NewEvent {
             run_id: Some(id),
@@ -6363,9 +6384,9 @@ mod tests {
             e.tick(at(i)).unwrap();
         }
         assert_eq!(e.set_constant_rate(3.0, 600.0, at(600)).unwrap(), (5.0, 3.0));
-        // The next sub-second write puts it on the pump, not the next tick.
-        assert!(e.apply_setpoint(at(600) + SignedDuration::from_millis(150)).unwrap());
+        // On the pump at once, not at the next tick: no write left to make.
         assert!((e.pump.transport().flow_ml_min() as f64 - 3.0).abs() < 1e-3);
+        assert!(!e.apply_setpoint(at(600) + SignedDuration::from_millis(150)).unwrap());
         for i in 601..=610 {
             let o = e.tick(at(i)).unwrap();
             assert!(matches!(o, TickOutcome::Applied { target, .. } if (target - 3.0).abs() < 1e-9), "{o:?}");
@@ -6428,6 +6449,65 @@ mod tests {
         e.set_constant_rate(48.0, 10.0, at(10)).unwrap();
         e.apply_setpoint(at(11)).unwrap();
         assert!((e.pump.transport().speed_rpm() as f64 - 20.0).abs() < 1e-3);
+    }
+
+    /// What a refused change must leave as it was: no row, no event, the
+    /// curve, the commanded volume and the last write.
+    fn assert_rate_unchanged(e: &Engine<SimPump>, id: i64, vol: Option<f64>) {
+        assert!(e.store().setpoint_changes(id).unwrap().is_empty());
+        assert!(rate_events(e, id).is_empty());
+        let st = e.status().active.unwrap();
+        assert_eq!(st.rate_changes, 0);
+        assert_eq!(st.volume_added_ml, vol);
+        let a = e.active.as_ref().unwrap();
+        assert_eq!(a.last_write_q, Some(5.0));
+        assert_eq!(a.spec.value_at(Duration::from_secs(3000)), 5.0);
+    }
+
+    #[test]
+    fn a_rate_the_pump_refuses_is_not_recorded() {
+        let mut e = engine();
+        let id = e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        for i in 1..=60 {
+            e.apply_setpoint(at(i)).unwrap();
+            e.tick(at(i)).unwrap();
+        }
+        let vol = e.status().active.unwrap().volume_added_ml;
+        // Its own head/tubing table cannot deliver it: 0x03 on the write.
+        e.pump.transport_mut().reject_setpoint_writes = true;
+        let err = e.set_constant_rate(3.0, 60.0, at(60)).unwrap_err();
+        assert!(
+            matches!(err, EngineError::PumpRejectedSetpoint { code: 0x03, control_var: ControlVar::MlMin, value } if (value - 3.0).abs() < 1e-9),
+            "{err:?}"
+        );
+        assert_rate_unchanged(&e, id, vol);
+        e.pump.transport_mut().reject_setpoint_writes = false;
+        assert!((e.pump.transport().flow_ml_min() as f64 - 5.0).abs() < 1e-3, "the old rate still driven");
+        let o = e.tick(at(61)).unwrap();
+        assert!(matches!(o, TickOutcome::Applied { target, .. } if (target - 5.0).abs() < 1e-9), "{o:?}");
+    }
+
+    #[test]
+    fn a_rate_change_over_a_lost_link_is_refused() {
+        let mut e = engine();
+        let id = e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        e.tick(at(1)).unwrap();
+        let vol = e.status().active.unwrap().volume_added_ml;
+        e.serial_lost = true;
+        let before = e.pump.transport().transactions;
+        let err = e.set_constant_rate(3.0, 10.0, at(10)).unwrap_err();
+        assert!(matches!(err, EngineError::SerialDown), "{err:?}");
+        assert_eq!(e.pump.transport().transactions, before, "no frame sent over a lost link");
+        assert_rate_unchanged(&e, id, vol);
+    }
+
+    #[test]
+    fn an_accepted_rate_is_on_the_pump_at_once() {
+        let mut e = engine();
+        e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        e.set_constant_rate(3.0, 10.0, at(10)).unwrap();
+        assert!((e.pump.transport().flow_ml_min() as f64 - 3.0).abs() < 1e-3);
+        assert_eq!(e.active.as_ref().unwrap().last_write_q, Some(3.0));
     }
 
     #[test]

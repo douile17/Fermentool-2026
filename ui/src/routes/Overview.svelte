@@ -11,7 +11,7 @@
   import Icon from '../components/Icon.svelte';
   import StateIcon from '../components/StateIcon.svelte';
   import ChangeRate from '../components/ChangeRate.svelte';
-  import { canChangeRate, rateSince, rateSteps } from '../lib/ratechange.js';
+  import { canChangeRate, curveFact, rateSince, rateSteps } from '../lib/ratechange.js';
   import { cycleLine } from '../lib/refill.js';
 
   // Overview follows feeding cycles only: a calibration burst is watched
@@ -109,9 +109,11 @@
   }
 
   // A rate changed (here or from another tab): the run and its curve again.
-  let reloading = false;
+  // Once per count of changes: a reload that fails is not asked again at
+  // every status frame, only when the count moves on.
+  let reloading = $state(false);
+  let rateTried = null;
   async function reloadRate(id) {
-    if (reloading) return;
     reloading = true;
     try {
       const r = await get(`/api/runs/${id}`);
@@ -119,6 +121,7 @@
       if (id === loadedId) {
         run = r;
         planned = p.series;
+        err = null;
       }
     } catch (e) {
       err = e.message;
@@ -127,7 +130,10 @@
   }
   $effect(() => {
     const n = active?.rate_changes;
-    if (n == null || loadedId == null || !run || n === (run.setpoint_changes?.length ?? 0)) return;
+    if (n == null || loadedId == null || !run || reloading || n === (run.setpoint_changes?.length ?? 0)) return;
+    const key = `${loadedId}:${n}`;
+    if (key === rateTried) return;
+    rateTried = key;
     reloadRate(loadedId);
   });
   let changingRate = $state(false);
@@ -575,7 +581,7 @@
               {#if trimmed}
                 <dt>Balance trim</dt><dd class="mono">×{num(app.status?.trim_c, 3)}</dd>
               {/if}
-              <dt>Curve</dt><dd class="mono">{num(run.curve.start, digits)} → {num(run.curve.end, digits)}</dd>
+              <dt>Curve</dt><dd class="mono">{curveFact(run)}</dd>
               <dt>Direction</dt><dd>{run.direction === 'cw' ? 'clockwise' : 'counter-clockwise'}</dd>
             </dl>
           </div>

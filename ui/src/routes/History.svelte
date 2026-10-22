@@ -205,6 +205,12 @@
     app.prefill = settingsOf(sel.run);
     app.tab = 'new';
   }
+  // The dialog opens on the rate it preselects, as Change rate opens on
+  // its field: the arrow keys then move between the rates.
+  let ratesEl = $state(null);
+  $effect(() => {
+    if (pickRate && ratesEl) ratesEl.querySelector('input:checked')?.focus();
+  });
   function runAgainAt() {
     if (!sel) return;
     app.prefill = runAgainSeed(settingsOf(sel.run), steps[pickedRate].value);
@@ -706,7 +712,7 @@
         <div class="eyebrow">Run again</div>
         <h2 id="ft-again">Start from which rate?</h2>
         <p class="lede">The rate of “{sel.run.name}” changed during the run.</p>
-        <fieldset class="rates">
+        <fieldset class="rates" bind:this={ratesEl}>
           <legend class="sr-only">Rate</legend>
           {#each steps as s, i}
             <label class="rate" class:on={pickedRate === i}>

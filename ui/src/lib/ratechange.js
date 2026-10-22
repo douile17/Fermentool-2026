@@ -3,7 +3,7 @@
 // check of a new rate before it is sent. Plain functions of the run as
 // `GET /api/runs/:id` gives it (`setpoint_changes`) and of the status frame.
 
-import { LOCALE, num, unitFor, digitsFor } from './fmt.js';
+import { LOCALE, dur, num, unitFor, digitsFor } from './fmt.js';
 import { atRun } from './rundetail.js';
 
 /** The rates a run went through: the start rate (at `started_at`), then
@@ -33,11 +33,12 @@ export function rateSince(run) {
   return steps.length === 1 ? 'constant since the start' : `since ${rateLabel(steps.at(-1))}`;
 }
 
-/** The rate a run with changes asks at run time `t_s`. */
-export function rateAt(run, t_s) {
-  let v = run.curve.start;
-  for (const s of rateSteps(run)) if (s.elapsedS <= t_s) v = s.value;
-  return v;
+/** The Overview's "Curve" fact: "Constant, 24 h" (its rate, which may have
+ *  changed, is said above it), "5.0 → 50.0" for any other curve. */
+export function curveFact(run) {
+  if (run.curve?.params?.kind === 'constant') return `Constant, ${dur(run.duration_s).replace(/ 0 [ms]$/, '')}`;
+  const d = digitsFor(run.control_var);
+  return `${num(run.curve.start, d)} → ${num(run.curve.end, d)}`;
 }
 
 /** Whether the Overview offers "Change rate": the active feed run, a

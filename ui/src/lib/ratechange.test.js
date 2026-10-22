@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundsLine, canChangeRate, checkRate, rateAt, rateLabel, rateMarks, rateSince, rateSteps, runAgainSeed } from './ratechange.js';
+import { boundsLine, canChangeRate, checkRate, curveFact, rateLabel, rateMarks, rateSince, rateSteps, runAgainSeed } from './ratechange.js';
 
 // Local times, whatever the machine's zone: the UI shows the PC's clock.
 const at = (d, h, m, s = 0) => new Date(2026, 9, d, h, m, s).toISOString();
@@ -54,12 +54,17 @@ describe('rateSince', () => {
   });
 });
 
-describe('rateAt', () => {
-  it('is the rate a step curve asks at a run time', () => {
-    expect(rateAt(run214, 0)).toBe(5);
-    expect(rateAt(run214, 22799)).toBe(5);
-    expect(rateAt(run214, 22800)).toBe(3);
-    expect(rateAt(run214, 90000)).toBe(4);
+describe('curveFact', () => {
+  it('names a Constant run by its length, not its first rate', () => {
+    const r = { ...run214, duration_s: 86400 };
+    expect(curveFact(r)).toBe('Constant, 24 h');
+    expect(curveFact({ ...r, duration_s: 5400 })).toBe('Constant, 1 h 30 m');
+    expect(curveFact({ ...r, duration_s: 600 })).toBe('Constant, 10 m');
+  });
+  it('keeps start → end for any other curve', () => {
+    const lin = { control_var: 'ml_min', duration_s: 3600, curve: { start: 5, end: 50, params: { kind: 'linear' } } };
+    expect(curveFact(lin)).toBe('5.000 → 50.000');
+    expect(curveFact({ ...lin, control_var: 'rpm' })).toBe('5.0 → 50.0');
   });
 });
 
