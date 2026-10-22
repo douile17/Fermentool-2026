@@ -30,6 +30,37 @@
   des données, des logs, ou le dossier de l'historique et des réglages avec le
   fichier sélectionné, dans l'Explorateur (au lieu de « Copy »). Le dossier
   des données est écrit une fois, son contenu en liste dessous.
+- Settings › **Pumps** remplace « Pump » et « Refill pump » : le câble (port,
+  baud, Connect, ou Disconnect en rouge une fois connecté) et la liste des pompes branchées dessus, chacune avec son
+  picto, son adresse MODBUS et son état (« answers », ou « Not answering » en
+  rouge avec quoi vérifier). Les réglages de la pompe de remplissage
+  s'ouvrent par « Change ». Un seul Save, qui ne reconnecte que si le port, le
+  baud ou l'adresse de la pompe d'alimentation change.
+- La barre de connexion en haut devient une ligne fine, seulement en cas de
+  problème, avec un lien vers Settings › Pumps (le choix du port est là-bas).
+- Tout Settings allégé (audit UX du 22 octobre) : plus de surtitre ni de
+  phrase d'introduction, les explications iront dans la documentation
+  technique. Balance : Connect / Disconnect comme les pompes, une ligne
+  d'état (« COM7 connected: 4349.6 g, stable. »), Save grisé tant que rien
+  ne change. Crash resume : un seul interrupteur, appliqué au clic ; le délai de
+  reprise d'une mesure de calibration n'est plus que dans `config.toml`
+  (`[resume] grace_minutes`). Display : le choix s'applique au clic, sans Save. Daemon : « Shut
+  down daemon » en contour rouge, le rouge plein reste pour la confirmation.
+  Notifications : par personne, le nom, le topic en entier, « Generate » puis
+  « QR », « Test », et le reste (nouveau topic, Test alarm, Teams, Remove en
+  rouge) dans un menu « … ».
+- Pumps et Balance disent leur état d'abord, en grand, dans un bandeau
+  teinté (« Connected » en vert avec une prise, « Disconnected » en gris,
+  « Not answering » en rouge), le détail dessous (port, pompes qui
+  répondent, poids), Connect ou Disconnect à droite ; le port et le baud
+  passent en dessous. Disconnect est un bouton sans cadre, rouge sombre
+  avec une icône « débrancher ».
+- Câble des pompes rebranché : les deux pompes reviennent ensemble (avant,
+  « 1 pump of 2 answers » jusqu'à 15 s). La pompe de remplissage est
+  réinterrogée dès que la pompe d'alimentation répond, puis toutes les 3 s
+  tant qu'elle ne répond pas, et plus du tout pendant un run.
+- Liens directs vers une section : `#settings/<id>` (par ex.
+  `#settings/balance`) ouvre l'app sur cette section.
 - Balance plus tolérante à un PC chargé : une demande de poids peut attendre
   0,8 s (avant 0,2 s), et un remplissage n'est coupé qu'après 3 s sans
   lecture. Un remplissage du run 210 avait été coupé par une seule lecture

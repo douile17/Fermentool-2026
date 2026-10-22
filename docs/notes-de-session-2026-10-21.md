@@ -146,6 +146,78 @@ vraies données), puis mise en place.
   `insideFolder` (`lib/fmt.js`, testé) écrit chaque fichier par son nom dans
   le dossier, ou son chemin complet s'il est ailleurs.
 
+## 6 ter. Settings › Pumps (maquette v1 à v6, audit UX)
+
+- Les pompes sont toutes sur **un seul câble RS-485**, chacune à son adresse
+  MODBUS, et d'autres viendront : une section « Pumps » avec la connexion du
+  câble, puis une ligne par pompe (picto, adresse, résumé, état).
+- **Audit UX** (skill uxaudit) de la v4 : les agents juges du skill ne sont pas
+  installés sur ce poste ; la partie automatique a tourné, les jugements
+  visuels ont été faits à la main d'après les grilles du skill. Constats :
+  deux boutons principaux (Connect, Save), du vert trois fois sans problème,
+  lignes éclatées, « + Add a pump » inerte. Le tableau de bord du skill ne
+  tourne pas sous Windows (`fcntl`).
+- Retenu : un seul Save (reconnecte seulement si port, baud ou adresse de la
+  pompe d'alimentation changent), « Reconnect » discret sauf câble coupé,
+  couleur seulement en cas de problème, picto par pompe, « Change » pour la
+  pompe de remplissage.
+- **`POST /api/refill/ping`** : lit le registre de vitesse de la pompe de
+  remplissage à son adresse, sans jamais la démarrer, pour afficher son état
+  hors run (le daemon ne l'interrogeait que pendant un run). Testé, et sur le
+  vrai montage : `responding: true`.
+- La barre du haut : une ligne fine (point, phrase, lien « Pump settings »)
+  seulement en cas de problème ; `ConnectControl.svelte`,
+  `PumpSettings.svelte` et `RefillSettings.svelte` supprimés.
+- Logique dans `ui/src/lib/pumps.js` (testée).
+- Balance silencieuse à 16:52 (« serial transaction timed out »), avant le
+  redémarrage de 16:56 et pendant que le code du délai d'écriture tournait
+  depuis 2 h sans erreur : pas liée au logiciel, à vérifier sur la balance.
+
+## 6 quater. Settings, tout le ménage (22 octobre, audit UX)
+
+- Plus de surtitre (« HARDWARE »…) ni d'intro dans les cartes : le menu de
+  gauche le dit déjà, et les explications iront dans la documentation
+  technique. `SettingsCard` accepte `group` et `title` absents.
+- Connect / Disconnect partout où il y a un câble : pompes
+  (`POST /api/serial/disconnect` : le daemon passe sur le simulateur sans
+  toucher au port enregistré) et balance (`POST /api/scale/connect`,
+  `POST /api/scale/disconnect`, idem : le port reste dans `config.toml`).
+  Disconnect en contour rouge. Vérifié sur le montage : COM8 et COM7
+  déconnectés puis reconnectés.
+- Constats de l'audit corrigés : Notifications avait cinq boutons de même
+  poids par personne et un topic coupé (maintenant : prochaine étape seule,
+  le reste dans un menu « … », Escape ou un clic ailleurs le ferme) ;
+  Crash resume réduit à « Ask before resuming an interrupted run », appliqué
+  au clic (le délai de grâce d'une mesure de calibration reste dans
+  `config.toml` : qui calibre refait la mesure plutôt que de la reprendre ;
+  la section est prête pour d'autres options, une par ligne) ; Display sans Save ; Balance et
+  Crash resume avec Save grisé tant que rien ne change ; « Shut down
+  daemon » en contour rouge.
+- « On voit pas si c'est connecté » : maquette (canvas « Connection
+  state », quatre variantes), retenue la **B**, un en-tête d'état
+  (`LinkHeader.svelte`, partagé par Pumps et Balance) : pastille avec une
+  prise, le mot en grand, le détail, le bouton. Textes dans `lineState` /
+  `balanceLine` (`{ tone, word, text }`, testés). Au premier déploiement,
+  la classe `.ok` de l'en-tête prenait le style global
+  `.settings-pane .ok` (une bande verte) : l'utilisateur a préféré cette
+  bande, gardée volontairement (classes `t-…`, une teinte par état), mais
+  le Disconnect blanc encadré y faisait tache : il devient un bouton sans
+  cadre, rouge sombre, icône « unplug » (`.unplug`, `settings.css`). Le
+  smoke vérifie la bande et le bouton sans fond. Dans la liste des pompes, le résumé passe
+  à la ligne au lieu de passer sous « answers ».
+- Câble RS-485 débranché puis rebranché : « COM8, 1 pump of 2 answers »
+  quelques secondes. Le daemon sonde la pompe d'alimentation toutes les
+  secondes (`probe_link`), mais la pompe de remplissage n'était demandée
+  par la page que toutes les 15 s : sa dernière réponse datait du câble
+  coupé. Maintenant : ping dès que la pompe d'alimentation revient
+  (`feedCameBack`), toutes les 3 s tant qu'elle ne répond pas
+  (`pingDelayMs`), aucun pendant un run (`pingWanted` : le statut le dit,
+  et une lecture sans réponse tiendrait le bus). `lib/pumps.js`, testé.
+- `#settings/<id>` ouvre directement une section (`ui/src/lib/route.js`,
+  testé), pratique pour les captures et pour un lien envoyé à quelqu'un.
+- Smoke : 38 vérifications (Display sans Save, Save grisés, menu « … » de
+  Notifications), sans rien modifier.
+
 ## 7. Commits de la session
 
 | Commit | Contenu |

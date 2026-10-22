@@ -248,6 +248,13 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   20 s, then 10 s. A slow rise rewinds the count to the lowest Normal read
   (`rewind_slow_rise`). The ratio history survives a refill, except under an
   alarm (dry bottle). No gain over the weight before = a lift, not a refill.
+- Settings > Pumps shows each pump on the cable with its state. The refill
+  pump is asked by `POST /api/refill/ping` (a read of its speed register,
+  never a Start; `Engine::refill_ping`) while the page is open: every 15 s,
+  3 s while it does not answer, at once when the feed pump comes back
+  (the daemon probes that one every second), never during a run
+  (`lib/pumps.js`: `pingWanted`, `pingDelayMs`, `feedCameBack`). Outside a
+  run nothing else ever asks it.
 - The refill pump's speed (`[refill] speed_rpm`) is written at each fill's
   start, and **at once when Settings changes it mid-fill**
   (`refill_speed_now`, event `refill_speed`); a direction change waits for
@@ -282,6 +289,29 @@ in `rundetail.js` as tested plain functions, not in the component.
   behind "Show all N entries". Events fetched up to 1000.
 - Explanations (the `≈`, the smoothing, the tolerance) belong in the
   technical documentation, not as sentences in the popup.
+
+## Settings UI (2026-10-22)
+
+- No eyebrow, no intro paragraph in the cards: the side menu names the
+  group, explanations go to the technical docs. Keep it that way.
+- A cable has Connect, then Disconnect (red outline) once up:
+  `POST /api/serial/disconnect` (pumps, switches to the simulator) and
+  `POST /api/scale/connect|disconnect`; both keep the saved port in
+  `config.toml`. `POST /api/refill/ping` reads the refill pump's speed
+  register (never starts it) to show its state outside a run.
+- A link's state comes first and big, on a band tinted by the state:
+  `LinkHeader.svelte` (word + detail from `lineState` / `balanceLine`,
+  Connect / Disconnect beside it). Disconnect on the band is `.unplug`
+  (`settings.css`: no box, red ink, unplug icon); a white outlined button
+  looked stuck on. Tone classes are `t-ok`…: `settings.css` styles a bare
+  `.ok` inside `.settings-pane`, never name a class `.ok` there.
+- Save stays disabled until something changes; a two-way choice (Display)
+  or a single switch (Crash resume) applies on the click. The calibration
+  measurement grace is in `config.toml` only (`[resume] grace_minutes`). Rare or destructive actions of a list row go into a
+  "…" menu (Notifications).
+- `#settings/<id>` opens a section directly (`lib/route.js`): use it for
+  screenshots (navigate to `about:blank` between two, a hash change alone
+  does not re-route).
 
 ## Notifications (`notify.rs`)
 
