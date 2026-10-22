@@ -487,6 +487,10 @@ fn refill_detail(before_g: f64, after_g: f64) -> String {
     format!("bottle refilled: {before_g:.1} g -> {after_g:.1} g ({:+.1} g)", after_g - before_g)
 }
 
+/// Appended to a `refill` event journalled when a fill cut by a silent
+/// balance is to resume: not a refill over yet (notifications skip it).
+pub const REFILL_CUT_MARK: &str = ", cut: the fill resumes";
+
 /// `(before_g, after_g)` from a [`refill_detail`] string.
 fn parse_refill(detail: &str) -> Option<(f64, f64)> {
     let rest = detail.strip_prefix("bottle refilled: ")?;
@@ -579,6 +583,11 @@ pub struct Engine<T: Transport> {
     /// refill began, journalled with the reading after it in a `refill`
     /// event so a run's bottle weights can be checked end to end.
     refill_before_g: Option<f64>,
+    /// The "before" of a fill cut by a silent balance that will resume: its
+    /// `refill` event is journalled at the cut, marked, and the resumed
+    /// fill's event starts from here, so the two read as one refill (run
+    /// 210: +958.5 g then +38.7 g, and "Bottle refilled" sent at the cut).
+    refill_cut_before_g: Option<f64>,
     /// `(seconds_since_refill, weight_g)` samples since `refill_at`, feeding
     /// the Theil-Sen rate estimate. Cleared on every new refill reference.
     weight_buffer: Vec<(f64, f64)>,
@@ -774,15 +783,39 @@ pub struct RefillRecord {
     pub drawn_g: f64,
 }
 
-/// The estimated stretch a refill settled at `t_s` closes: it ends within
-/// `REFILL_SPAN_SLACK_S` of the `refill` event, the closest one wins.
+/// How long after its estimated stretch ends a `refill` event can come and
+/// still close it (it is journalled once the weight has settled).
 const REFILL_SPAN_SLACK_S: f64 = 30.0;
-fn refill_span(spans: &[[f64; 2]], t_s: f64) -> Option<[f64; 2]> {
-    spans
-        .iter()
-        .filter(|s| (s[1] - t_s).abs() <= REFILL_SPAN_SLACK_S)
-        .min_by(|a, b| (a[1] - t_s).abs().total_cmp(&(b[1] - t_s).abs()))
-        .copied()
+
+/// The `refill` events `(t_s, before_g, after_g)`, in time order, as the
+/// refills they really were, each with the estimated stretch it belongs to.
+/// Events inside the same stretch (it starts at or before them and ends at
+/// most `REFILL_SPAN_SLACK_S` before them) are one refill: a fill cut by a
+/// silent balance reads as over (the weight stands still with the refill
+/// pump stopped), then resumes and settles again. Run 210 journalled one
+/// fill as +958.5 g and +38.7 g; History counted two refills, the first one
+/// shown after the second and with no feed drawn. The merged refill keeps
+/// the first "before", the last "after" and the last time.
+fn group_refills(events: &[(f64, f64, f64)], spans: &[[f64; 2]]) -> Vec<(f64, f64, f64, Option<[f64; 2]>)> {
+    let span_of = |t: f64| {
+        spans
+            .iter()
+            .filter(|s| s[0] <= t && t <= s[1] + REFILL_SPAN_SLACK_S)
+            .min_by(|a, b| (a[1] - t).abs().total_cmp(&(b[1] - t).abs()))
+            .copied()
+    };
+    let mut out: Vec<(f64, f64, f64, Option<[f64; 2]>)> = Vec::new();
+    for &(t, before, after) in events {
+        let span = span_of(t);
+        match out.last_mut() {
+            Some(last) if span.is_some() && last.3 == span => {
+                last.0 = t;
+                last.2 = after;
+            }
+            _ => out.push((t, before, after, span)),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -873,6 +906,7 @@ impl<T: Transport> Engine<T> {
             refill_weight_g,
             refill_at,
             refill_before_g: None,
+            refill_cut_before_g: None,
             weight_buffer: Vec::new(),
             last_weight_g: None,
             settling_since: None,
@@ -1977,19 +2011,20 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
     let at = |e: &EventRow| e.wall_time.duration_since(run.started_at).as_secs_f64().max(0.0);
     let markers = events.iter().map(|e| TrackMarker { t_s: at(e), kind: e.kind.clone() }).collect();
     let estimated = store.estimated_spans(run_id)?;
+    let mut found: Vec<(f64, f64, f64)> = events
+        .iter()
+        .filter(|e| e.kind == "refill")
+        .filter_map(|e| e.detail.as_deref().and_then(parse_refill).map(|(b, a)| (at(e), b, a)))
+        .collect();
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut refills: Vec<RefillRecord> = Vec::new();
-    for e in events.iter().filter(|e| e.kind == "refill") {
-        let Some((before_g, after_g)) = e.detail.as_deref().and_then(parse_refill) else {
-            continue;
-        };
-        let t_s = at(e);
-        let drawn_g = match refill_span(&estimated, t_s) {
+    for (t_s, before_g, after_g, span) in group_refills(&found, &estimated) {
+        let drawn_g = match span {
             Some([from, to]) => store.delivered_over(run_id, from, to)?.unwrap_or(0.0).max(0.0),
             None => 0.0,
         };
         refills.push(RefillRecord { t_s, before_g, after_g, drawn_g });
     }
-    refills.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
     let (weight_start_g, weight_end_g) = store.weight_bounds(run_id)?;
     Ok(Some(TrackingReport {
         estimated,
@@ -2156,12 +2191,25 @@ impl<T: Transport> Engine<T> {
             if let (Some(before), Some(run_id)) =
                 (self.refill_before_g.take(), self.active.as_ref().map(|a| a.id))
             {
+                // Cut, and the fill will resume: journalled now (nothing is
+                // lost if it never does), marked, its "before" kept for the
+                // resumed fill's event.
+                let cut = self.refill.resume_fill;
+                let before = if cut {
+                    *self.refill_cut_before_g.get_or_insert(before)
+                } else {
+                    self.refill_cut_before_g.take().unwrap_or(before)
+                };
+                let mut detail = refill_detail(before, raw_g);
+                if cut {
+                    detail.push_str(REFILL_CUT_MARK);
+                }
                 let _ = self.store.log_event(&NewEvent {
                     run_id: Some(run_id),
                     wall_time: now,
                     level: EventLevel::Info,
                     kind: "refill".into(),
-                    detail: Some(refill_detail(before, raw_g)),
+                    detail: Some(detail),
                 });
             }
         }
@@ -4297,9 +4345,33 @@ mod tests {
         // Run 182: the refill pump filled 11:41:01 to 11:42:39, the event
         // came at the end of that stretch; an earlier one is not its own.
         let spans = [[600.0, 640.0], [1477.6, 1574.6]];
-        assert_eq!(refill_span(&spans, 1575.2), Some([1477.6, 1574.6]));
-        assert_eq!(refill_span(&spans, 1000.0), None, "no stretch ends near it");
-        assert_eq!(refill_span(&[], 1575.2), None);
+        let one = |t: f64| group_refills(&[(t, 0.0, 1.0)], &spans)[0].3;
+        assert_eq!(one(1575.2), Some([1477.6, 1574.6]));
+        assert_eq!(one(1000.0), None, "no stretch around it");
+        assert_eq!(group_refills(&[(1575.2, 0.0, 1.0)], &[])[0].3, None);
+    }
+
+    #[test]
+    fn a_refill_cut_and_resumed_is_one_refill() {
+        // Run 210: the balance went silent mid-fill (12:19:03), the refill
+        // pump stopped, the still weight read as a refill over (+958.5 g at
+        // 10368 s); the fill resumed and settled again (+38.7 g at 10411 s).
+        // One stretch unweighed, 8491.6 to 10410.6 s: one refill, not two
+        // (History showed "2 refills", the first one after the second).
+        let spans = [[8491.6, 10410.6]];
+        let events = [(10368.0, 3612.3, 4570.8), (10411.0, 4570.8, 4609.5)];
+        assert_eq!(group_refills(&events, &spans), vec![(10411.0, 3612.3, 4609.5, Some([8491.6, 10410.6]))]);
+        // Two refills in two stretches stay two; one with no stretch stays alone.
+        let spans = [[600.0, 640.0], [1477.6, 1574.6]];
+        let events = [(641.0, 400.0, 700.0), (1000.0, 690.0, 720.0), (1575.2, 500.0, 900.0)];
+        assert_eq!(
+            group_refills(&events, &spans),
+            vec![
+                (641.0, 400.0, 700.0, Some([600.0, 640.0])),
+                (1000.0, 690.0, 720.0, None),
+                (1575.2, 500.0, 900.0, Some([1477.6, 1574.6])),
+            ]
+        );
     }
 
     #[test]

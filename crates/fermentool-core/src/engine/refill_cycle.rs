@@ -215,6 +215,7 @@ impl<T: Transport> Engine<T> {
         self.refill.plan = Some(plan);
         self.refill.phase = Phase::Idle;
         self.refill.resume_fill = false;
+        self.refill_cut_before_g = None;
         self.save_refill_plan();
     }
 
@@ -223,6 +224,7 @@ impl<T: Transport> Engine<T> {
     pub(super) fn refill_plan_resume(&mut self, run_id: i64, now: Timestamp) {
         self.refill.phase = Phase::Idle;
         self.refill.resume_fill = false;
+        self.refill_cut_before_g = None;
         self.refill.plan = self.load_refill_plan(run_id);
         if self.refill.plan.is_none() {
             let _ = self.store.log_event(&NewEvent {
@@ -239,6 +241,7 @@ impl<T: Transport> Engine<T> {
         self.refill.plan = None;
         self.refill.phase = Phase::Idle;
         self.refill.resume_fill = false;
+        self.refill_cut_before_g = None;
         self.save_refill_plan();
     }
 
@@ -375,6 +378,7 @@ impl<T: Transport> Engine<T> {
             Phase::Idle => {
                 if plan.halted {
                     self.refill.resume_fill = false;
+                    self.refill_cut_before_g = None;
                     return;
                 }
                 if self.scale_state != trim::ScaleState::Normal || self.refill.stop_owed {
@@ -382,7 +386,9 @@ impl<T: Transport> Engine<T> {
                 }
                 if self.refill.resume_fill {
                     if weight_g >= plan.high_g {
+                        // full after all: the cut's own event is the refill
                         self.refill.resume_fill = false;
+                        self.refill_cut_before_g = None;
                     } else if self.refill_line_up()
                         && self.refill_start_pump(t, weight_g, now, "resuming the interrupted refill")
                     {
@@ -951,6 +957,26 @@ mod tests {
         let kinds = b.kinds();
         assert!(kinds.contains(&"refill_interrupted".to_string()), "{kinds:?}");
         assert!(!kinds.iter().any(|k| k.starts_with("alarm_")), "{kinds:?}");
+        // One fill: the cut's `refill` event is marked (no "Bottle refilled"
+        // sent), the resumed fill's one runs from the weight before the
+        // fill, not from the cut (run 210 journalled +958.5 g at the cut,
+        // then +38.7 g, and said "Bottle refilled" with the bottle not full).
+        let refills: Vec<(bool, (f64, f64))> = b
+            .e
+            .store
+            .events(Some(b.run_id), 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == "refill")
+            .filter_map(|ev| {
+                let d = ev.detail?;
+                Some((d.ends_with(crate::engine::REFILL_CUT_MARK), crate::engine::parse_refill(&d)?))
+            })
+            .collect();
+        let whole: Vec<_> = refills.iter().filter(|r| !r.0).map(|r| r.1).collect();
+        assert_eq!(whole.len(), 1, "{refills:?}");
+        assert!(whole[0].0 < 600.0 && whole[0].1 > 1050.0, "from before the fill to the top: {refills:?}");
+        assert_eq!(refills.iter().filter(|r| r.0).count(), 1, "the cut, marked: {refills:?}");
     }
 
     #[test]

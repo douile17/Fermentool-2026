@@ -69,6 +69,11 @@ pub struct Message {
 /// What a journal event tells the run's owner, if anything worth a message.
 pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
     use Tone::*;
+    // A fill cut by a silent balance, to resume: the bottle is not refilled
+    // yet, the resumed fill's own event says it (run 210 said it twice).
+    if e.kind == "refill" && e.detail.as_deref().is_some_and(|d| d.ends_with(crate::engine::REFILL_CUT_MARK)) {
+        return None;
+    }
     let (tone, title) = match e.kind.as_str() {
         "start" => (Info, "Run started".to_string()),
         "alarm_feed_stopped" => (Alarm, "Feed stopped: bottle empty or line blocked".into()),
@@ -787,6 +792,16 @@ mod tests {
         }
         let done = run_row(RunStatus::Completed);
         assert_eq!(message_for(&event("stop", None), &done).unwrap().title, "Run completed");
+    }
+
+    #[test]
+    fn a_fill_cut_to_resume_sends_no_bottle_refilled() {
+        // Run 210 sent "Bottle refilled" at the cut, with the bottle not full.
+        let run = run_row(RunStatus::Running);
+        let cut = format!("bottle refilled: 3612.3 g -> 4570.8 g (+958.5 g){}", crate::engine::REFILL_CUT_MARK);
+        assert!(message_for(&event("refill", Some(&cut)), &run).is_none());
+        let done = "bottle refilled: 3612.3 g -> 4609.5 g (+997.2 g)";
+        assert_eq!(message_for(&event("refill", Some(done)), &run).unwrap().title, "Bottle refilled");
     }
 
     #[test]
