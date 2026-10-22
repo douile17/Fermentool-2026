@@ -73,6 +73,16 @@
   seule la ligne d'en-tête garde la date et l'heure de début et de fin.
 - Fiche d'un run : la courbe est dite dans l'en-tête, en pastilles (forme,
   début → fin, durée, sens), au lieu d'être cachée dans Settings.
+- Un remplissage coupé par une balance muette puis repris compte pour un
+  seul, partout : tableau du flacon, nombre de refills, journal de la fiche,
+  y compris pour les runs passés (run 210 : un remplissage de 32 min, et
+  non « Refill 1 » après « Refill 2 »). La notification « Bottle refilled »
+  ne part plus au moment de la coupure, seulement à la fin.
+- Légende des graphiques de la fiche : « Refill or bump, not weighed »
+  quand des à-coups de la balance s'ajoutent aux remplissages, « Not
+  weighed » sans remplissage.
+- Fiche d'un run : Settings ouvert et en premier, le tableau du flacon
+  replié dessous (« 1 refill, 1 270.8 g poured »).
 - Liens directs vers une section : `#settings/<id>` (par ex.
   `#settings/balance`) ouvre l'app sur cette section.
 - Balance plus tolérante à un PC chargé : une demande de poids peut attendre

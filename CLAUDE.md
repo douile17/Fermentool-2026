@@ -268,6 +268,13 @@ the pump at their duration (their weighing window). `HoldingStatus` /
 - No "runs dry" time anywhere: the balance weighs the bottle, its cap and its
   tubing too, whose weight changes per bottle. Only differences of weight are
   projected (`drawnInS`: the next refill).
+- **A fill cut by a silent balance and resumed is one refill.** Its
+  `refill` event at the cut is marked `REFILL_CUT_MARK` (kept: nothing is
+  lost if it never resumes; `notify` skips it), the resumed fill's event
+  starts from the weight before the fill (`refill_cut_before_g`), and the
+  report merges the `refill` events of one unweighed stretch
+  (`group_refills`); the run detail's journal continues the line on
+  "resuming the interrupted refill". Run 210 read as two refills.
 - Events journalled for the chart markers and notifications: `trim_start`,
   `trim_ratio`, `alarm_*`, `alarm_cleared`, `refill` (`refill_detail` /
   `parse_refill` must stay in step), `refill_cancelled`, `trim_limit`, `scale_lost`,

@@ -266,6 +266,29 @@ vraies données), puis mise en place.
   tôt passaient donc sans rien tester. Toutes doublées (`\\d`), le smoke
   n'en contient plus de simples.
 
+## 6 septies. Un remplissage coupé puis repris compte pour un (22 octobre)
+
+- Run 210 : la balance muette à 12:19:03 (une compilation) a coupé le
+  remplissage ; le poids immobile, pompe arrêtée, a été pris pour un
+  remplissage fini (`refill` +958,5 g à 12:19:33) ; repris à 12:19:34, il
+  a fait un second `refill` (+38,7 g). History : « 2 refills », le premier
+  listé après le second, sans durée ni feed consommé ; journal « Refill 1 »
+  et « Refill 2 » ; notification « Bottle refilled » à la coupure.
+- Corrigé à trois endroits, chacun testé :
+  - le rapport (`group_refills`) : les `refill` d'une même période non
+    pesée font un seul remplissage, du premier « avant » au dernier
+    « après ». Répare aussi les runs passés ;
+  - le journal de la fiche (`journalLines`) : « resuming the interrupted
+    refill » continue la ligne du remplissage coupé ;
+  - le daemon : l'événement de la coupure reste écrit (rien de perdu si la
+    reprise ne vient jamais) mais marqué `REFILL_CUT_MARK`, l'événement de
+    fin part du poids d'avant le remplissage, et `notify` ignore celui
+    marqué. La régulation n'est pas touchée.
+- Revue de tous les runs avec refill (180 à 210) : chaque refill est dans
+  sa période non pesée. Les périodes sans refill sont des à-coups de
+  1 à 4 s ; la légende disait « Refill » pour elles : `blindLegend`.
+- Demande en cours : la fiche s'ouvre sur Settings, Feed bottle replié.
+
 ## 7. Commits de la session
 
 | Commit | Contenu |
@@ -286,8 +309,6 @@ Les commits `build(ui)` qui les suivent portent le bundle.
 
 - **Déployer** les changements du 21 au premier arrêt du run 210 (étiquette
   refill, « runs dry », vitesse de remplissage, balance).
-- **Un remplissage interrompu puis repris compte pour deux** dans History
-  (+958,5 g et +38,7 g pour le run 210) : les réunir en un seul.
 - **Documentation technique** : estimation pendant un remplissage (`≈`),
   précision de « Poured », lissage de l'écart, tolérance ±2 %.
 - **Step dans New run** (« arrêter l'alimentation à … »), sur maquette.
