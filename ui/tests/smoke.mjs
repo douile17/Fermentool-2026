@@ -97,6 +97,16 @@ try {
   // No "runs dry" time: the balance weighs the bottle and its tubing too,
   // so it came out too late (removed 2026-10-21).
   check('the Overview gives no time the bottle runs dry', await js(`!/Empty around|runs dry/i.test(document.body.innerText)`));
+  // Change rate only on a running Constant feed run (2026-10-22); looked
+  // at, never clicked.
+  const hasChangeRate = () => js(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Change rate')`);
+  if (idle) {
+    check('no Change rate without a run', !(await hasChangeRate()));
+  } else if (status.active.kind !== 'calibration') {
+    const live = await (await fetch(`${URL}/api/runs/${status.active.run_id}`)).json();
+    if (live.curve?.params?.kind !== 'constant') check('no Change rate on a run that is not Constant', !(await hasChangeRate()));
+    else console.log(`skip  no Change rate check: run ${status.active.run_id} is Constant`);
+  }
 
   if (!idle) {
     console.log(`skip  New run and History: run ${status.active.run_id} is active`);
@@ -173,10 +183,18 @@ try {
       await js(`document.querySelector('button.tr').click()`);
       await sleep(2500);
       const canReplay = await js(`(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('Run again')); return !!b && !b.disabled; })()`);
-      if (canReplay) {
+      // a run whose rate never changed asks nothing on Run again (2026-10-22)
+      const openId = await js(`document.querySelector('.modal.detail .rid')?.textContent.replace('#', '')`);
+      const opened = await (await fetch(`${URL}/api/runs/${openId}`)).json();
+      const changed = (opened.setpoint_changes ?? []).length > 0;
+      if (canReplay && !changed) {
         await click('button', 'Run again');
-        await sleep(1500);
+        await sleep(400);
+        check('Run again asks no rate when it never changed', await js(`!document.querySelector('#ft-again')`));
+        await sleep(1100);
         check('Run again lands on New run, Check and start', (await stepOn()) === 'Check and start', await stepOn());
+      } else if (canReplay) {
+        console.log(`skip  Run again: run ${openId} changed its rate`);
       } else {
         console.log('skip  Run again: this run\'s curve cannot be rebuilt');
       }

@@ -12,6 +12,7 @@
     TOLERANCE, alarmCount, atRun, gapExtremes, grouped, journalLines, mins,
     refillRows, regulationFigures, verdict, whenLine, curveChips, blindLegend,
   } from '../lib/rundetail.js';
+  import { rateLabel, rateMarks, rateSteps, runAgainSeed } from '../lib/ratechange.js';
 
   let runs = $state([]);
   let err = $state(null);
@@ -133,7 +134,8 @@
     sel = null;
     try {
       const run = await get(`/api/runs/${id}`);
-      const p = await post('/api/preview', { curve: run.curve, samples: 200 });
+      // the curve the run followed, its rate changes included
+      const p = await post('/api/preview', { curve: run.effective_curve ?? run.curve, samples: 200 });
       // A sample for the chart: the full journal (up to ~360k rows for a
       // 100 h run) is only fetched for the CSV export.
       const ticks = await get(`/api/runs/${id}/ticks?sample=3000`);
@@ -187,10 +189,26 @@
   const replayable = $derived(!!sel && FORM_KINDS.includes(sel.run.curve.params.kind));
   const notReplayable = 'New run cannot rebuild this curve shape';
 
-  // Seed NewRun from a past run's options and jump there.
+  // Seed NewRun from a past run's options and jump there. A run whose rate
+  // changed asks first from which of its rates.
+  const steps = $derived(sel ? rateSteps(sel.run) : []);
+  const marks = $derived(sel ? rateMarks(sel.run) : []);
+  let pickRate = $state(false);
+  let pickedRate = $state(0);
   function runAgain() {
     if (!sel || !replayable) return;
+    if (steps.length > 1) {
+      pickedRate = steps.length - 1;
+      pickRate = true;
+      return;
+    }
     app.prefill = settingsOf(sel.run);
+    app.tab = 'new';
+  }
+  function runAgainAt() {
+    if (!sel) return;
+    app.prefill = runAgainSeed(settingsOf(sel.run), steps[pickedRate].value);
+    pickRate = false;
     app.tab = 'new';
   }
 
@@ -258,10 +276,12 @@
   function closeSel() {
     sel = null;
     confirmDelete = false;
+    pickRate = false;
   }
   function onKey(e) {
     if (e.key !== 'Escape') return;
-    if (confirmDelete) {
+    if (pickRate) pickRate = false;
+    else if (confirmDelete) {
       if (!deleting) confirmDelete = false;
     } else if (confirmBulk && !bulkBusy) confirmBulk = false;
     else if (confirmClear && !clearing) confirmClear = false;
@@ -530,7 +550,13 @@
           blindBands={chartWeighed.length > 0}
           plannedWide
           endpoints={false}
+          markers={marks.map((m) => ({ t: m.t, label: m.text }))}
         />
+        {#if marks.length}
+          <ol class="marks">
+            {#each marks as m, i}<li><b>{i + 1}</b> {m.text}</li>{/each}
+          </ol>
+        {/if}
       </div>
 
       {#if verdictOf && !verdictOf.wrongSide && sel.report.points.length > 1}
@@ -669,6 +695,34 @@
       </div>
     </div>
   </div>
+
+  <!-- Run again from which rate: in its own small dialog over the detail. -->
+  {#if pickRate}
+    {@const u = unitFor(sel.run.control_var)}
+    {@const d = digitsFor(sel.run.control_var)}
+    <button class="backdrop over" aria-label="Cancel" onclick={() => (pickRate = false)}></button>
+    <div class="layer over">
+      <div class="modal card confirm" role="dialog" aria-modal="true" aria-labelledby="ft-again">
+        <div class="eyebrow">Run again</div>
+        <h2 id="ft-again">Start from which rate?</h2>
+        <p class="lede">The rate of “{sel.run.name}” changed during the run.</p>
+        <fieldset class="rates">
+          <legend class="sr-only">Rate</legend>
+          {#each steps as s, i}
+            <label class="rate" class:on={pickedRate === i}>
+              <input type="radio" name="ft-again-rate" value={i} bind:group={pickedRate} />
+              <span class="rv"><b class="mono">{num(s.value, d)}</b> {u}{#if s.atStart} <span class="dim">at the start</span>{:else if s.last} <span class="dim">the last one</span>{/if}</span>
+              <span class="dim mono">{rateLabel(s)}</span>
+            </label>
+          {/each}
+        </fieldset>
+        <div class="modal-foot">
+          <button class="btn-primary" onclick={runAgainAt}>Open New run at {num(steps[pickedRate].value, d)} {u}</button>
+          <button class="btn-ghost" onclick={() => (pickRate = false)}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- Confirmed in its own small dialog over the detail, like the bulk
        delete: the detail's footer never reflows under the cursor. -->
@@ -844,6 +898,16 @@
   .confirm h2 { font-size: 17px; margin: 6px 0 var(--s-3); }
   .confirm .lede { margin: 0; color: var(--muted); font-size: 13px; }
   .confirm .err { margin-top: var(--s-3); }
+  .marks { list-style: none; margin: var(--s-2) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-5); font-size: 12.5px; color: var(--muted); }
+  .marks b { color: var(--ink); font-weight: 600; font-family: var(--mono); }
+  .rates { margin: var(--s-4) 0 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-ctl); }
+  .rate { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-3) var(--s-3); cursor: pointer; font-size: 14px; }
+  .rate + .rate { border-top: 1px solid var(--line); }
+  .rate.on { background: color-mix(in srgb, var(--teal-700) 7%, var(--surface)); }
+  .rate input { margin: 0; accent-color: var(--teal-700); }
+  .rate .rv { flex: 1; }
+  .rate b { font-weight: 600; }
+  .rate .dim { color: var(--muted); font-size: 13px; }
   .legend { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); font-size: 12px; color: var(--muted); }
   .legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   .sw { display: inline-block; width: 16px; height: 3px; border-radius: 2px; }
