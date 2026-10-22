@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bottleWeights, weighedOutShown } from './balance.js';
+import { bottleWeights, weighedOutShown, balanceLine } from './balance.js';
 
 describe('bottleWeights', () => {
   // Run 182: 4394.7 g, refilled at 4094.7 g up to 4388.0 g while the feed
@@ -51,5 +51,23 @@ describe('weighedOutShown', () => {
   });
   it('falls back to its own count when the daemon has no figure', () => {
     expect(weighedOutShown({ bottleOut, deliveredG: null, refilling: true }).estimated).toBe(false);
+  });
+});
+
+describe('balanceLine', () => {
+  it('says the weight when the balance answers, quiet', () => {
+    expect(balanceLine({ scale_connected: true, scale_weight_g: 4345.24, scale_stable: true }, 'COM7')).toEqual({ tone: '', word: 'Connected', text: 'COM7, 4345.2 g, stable' });
+  });
+  it('says what to check when it does not', () => {
+    const l = balanceLine({ scale_connected: false }, 'COM7');
+    expect(l.tone).toBe('bad');
+    expect(l.word).toBe('Not answering');
+    expect(l.text).toMatch(/^COM7: is the balance on/);
+  });
+  it('a port saved but closed by Disconnect says so, not an error', () => {
+    expect(balanceLine({ scale_connected: null }, 'COM7')).toEqual({ tone: 'idle', word: 'Disconnected', text: 'COM7, not weighing' });
+  });
+  it('no port, no balance', () => {
+    expect(balanceLine({}, '')).toMatchObject({ tone: 'idle', word: 'No balance' });
   });
 });

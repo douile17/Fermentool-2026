@@ -3,9 +3,10 @@
   import { post } from '../../lib/api.js';
   import { loadConfig, patchConfig } from '../../lib/config.js';
   import QRCode from 'qrcode';
+  import Icon from '../../components/Icon.svelte';
   import SettingsCard from './SettingsCard.svelte';
 
-  let { group } = $props();
+  // `group` (passed to every section) is not shown here: the side menu says it.
 
   // The people who run experiments, each with their own ntfy topic (phone
   // push) and/or Teams webhook. Applied at once (the notifier reads the live
@@ -16,6 +17,7 @@
   let err = $state(null);
   let msg = $state(null);
   let testing = $state(null); // index being tested
+  let menuFor = $state(null); // index whose "…" menu is open
 
   $effect(() => {
     loadConfig()
@@ -161,16 +163,16 @@
   }
 </script>
 
+<svelte:window onclick={() => (menuFor = null)} onkeydown={(e) => e.key === 'Escape' && (menuFor = null)} />
+
 <SettingsCard
-  {group}
   title="Notifications"
-  intro="Everyone who runs experiments, each with their own phone channel. Starting a run then asks who it is for, and its alerts (feed stopped, balance or pump lost, run ended…) go to that person only. Alarms ring, routine news stays quiet."
   {err}
   {msg}
   loading={!loaded}
 >
   <details class="howto">
-    <summary>How to get alerts on your phone with ntfy (once, ~3 min)</summary>
+    <summary>Set up alerts on a phone (ntfy, once)</summary>
     <ol>
       <li>Install the free <b>ntfy</b> app (Google Play, App Store or F-Droid). No account needed.</li>
       <li>Below, <b>Add a person</b>, type your name, click <b>Generate</b> for a private topic.</li>
@@ -185,28 +187,42 @@
     </p>
   </details>
 
+  <!-- One person a row: name, topic, the next step (Generate while there is
+       no topic, then QR), Test; the rest behind "…" (UX audit, 2026-10-22:
+       five buttons of one weight, Remove as loud as the others). -->
   <div class="people">
     {#each people as p, i}
       <div class="person">
-        <input type="text" placeholder="Name" bind:value={p.name} aria-label="Name" />
-        <div class="topic">
-          <input type="text" class="mono" placeholder="ntfy topic" bind:value={p.ntfy_topic} aria-label="ntfy topic" />
-          <button class="btn-ghost" onclick={() => generateTopic(p)} title="Make a private, unguessable topic">Generate</button>
-          <button class="btn-ghost" disabled={!p.ntfy_topic.trim()} onclick={() => toggleQr(i)}
-                  title="Scan with the phone to subscribe">{qrFor === i ? 'Hide QR' : 'QR'}</button>
+        <div class="row">
+          <input type="text" class="name" placeholder="Name" bind:value={p.name} aria-label="Name" />
+          <input type="text" class="mono topic" placeholder="ntfy topic" bind:value={p.ntfy_topic} aria-label="ntfy topic" title={p.ntfy_topic} />
+          {#if p.ntfy_topic.trim()}
+            <button class="btn-ghost" onclick={() => toggleQr(i)} title="Scan with the phone to subscribe">{qrFor === i ? 'Hide QR' : 'QR'}</button>
+          {:else}
+            <button class="btn-ghost" onclick={() => generateTopic(p)} title="Make a private, unguessable topic">Generate</button>
+          {/if}
+          <button class="btn-ghost" disabled={testing === i || !(p.ntfy_topic.trim() || p.webhook.trim())} onclick={() => testPerson(i)}>
+            {testing === i ? 'Sending…' : 'Test'}
+          </button>
+          <div class="more">
+            <button class="btn-ghost dots" aria-label="More for {p.name || 'this person'}" aria-haspopup="menu"
+              aria-expanded={menuFor === i} onclick={(e) => { e.stopPropagation(); menuFor = menuFor === i ? null : i; }}>
+              <Icon name="more" size={16} />
+            </button>
+            {#if menuFor === i}
+              <div class="menu" role="menu">
+                <button role="menuitem" onclick={() => { generateTopic(p); menuFor = null; }}>New private topic</button>
+                <button role="menuitem" disabled={!p.ntfy_topic.trim()} onclick={() => { testPerson(i, true); menuFor = null; }}>Test alarm</button>
+                <button role="menuitem" onclick={() => { p.showTeams = true; menuFor = null; }}>{p.webhook ? 'Teams webhook' : 'Add a Teams webhook'}</button>
+                <button role="menuitem" class="danger" onclick={() => { menuFor = null; removePerson(i); }}>Remove {p.name.trim() || 'this person'}</button>
+              </div>
+            {/if}
+          </div>
         </div>
-        <button class="btn-ghost" disabled={testing === i || !(p.ntfy_topic.trim() || p.webhook.trim())}
-                onclick={() => testPerson(i)}>
-          {testing === i ? 'Sending…' : 'Test'}
-        </button>
-        <button class="btn-ghost" disabled={testing === i || !p.ntfy_topic.trim()}
-                onclick={() => testPerson(i, true)}
-                title="An alarm that comes back every minute until you press Acknowledge">Test alarm</button>
-        <button class={confirmRemove === i ? 'btn-danger' : 'btn-ghost'} onclick={() => removePerson(i)}
-                aria-label="Remove {p.name}">{confirmRemove === i ? 'Remove anyway' : 'Remove'}</button>
         {#if confirmRemove === i}
           <p class="pending">
             {p.name.trim()} is responsible for the run in progress: once removed, its alerts go to nobody.
+            <button class="linkish danger" onclick={() => removePerson(i)}>Remove anyway</button>
             <button class="linkish" onclick={() => (confirmRemove = null)}>Keep</button>
           </p>
         {/if}
@@ -224,15 +240,10 @@
           </div>
         {/if}
         {#if p.showTeams}
-          <input type="text" class="mono teams" placeholder="Teams Workflow webhook (optional): https://…"
-                 bind:value={p.webhook} aria-label="Teams webhook" />
-        {:else}
-          <button class="linkish teams" onclick={() => (p.showTeams = true)}>+ Teams webhook (optional)</button>
+          <input type="text" class="mono teams" placeholder="Teams Workflow webhook: https://…" bind:value={p.webhook} aria-label="Teams webhook" />
         {/if}
         {#if missing(p)}
-          <p class="pending">
-            Not saved yet: needs {missing(p)}.{p.saved ? ' Meanwhile the last saved channels stay in use.' : ''}
-          </p>
+          <p class="pending">Not saved yet: needs {missing(p)}.{p.saved ? ' Meanwhile the last saved channels stay in use.' : ''}</p>
         {/if}
       </div>
     {:else}
@@ -252,7 +263,7 @@
   </details>
 
   {#snippet foot()}
-    <button class="btn-ghost" onclick={addPerson}>Add a person</button>
+    <button class="btn-ghost" onclick={addPerson}>+ Add a person</button>
     <span class="save-state" class:bad={saveState === 'error'} aria-live="polite">
       {#if saveState === 'saving'}Saving…{:else if saveState === 'error'}Not saved: {saveErr}{:else}✓ Saved{/if}
     </span>
@@ -260,15 +271,31 @@
 </SettingsCard>
 
 <style>
-  .people { display: flex; flex-direction: column; gap: var(--s-3); margin-top: var(--s-4); }
-  .person { display: grid; grid-template-columns: 160px 1fr auto auto auto; gap: var(--s-2); align-items: center; }
-  .person input { min-width: 0; }
-  .topic { display: flex; gap: var(--s-2); min-width: 0; }
-  .topic input { flex: 1; }
-  .person .teams { grid-column: 2 / -1; justify-self: start; }
-  .person input.teams { justify-self: stretch; }
+  .people { display: flex; flex-direction: column; margin-top: var(--s-4); border: 1px solid var(--line); border-radius: var(--radius-ctl); }
+  .person { padding: var(--s-3) var(--s-4); display: flex; flex-direction: column; gap: var(--s-2); }
+  .person + .person { border-top: 1px solid var(--line); }
+  .row { display: flex; gap: var(--s-2); align-items: center; }
+  .row input { width: auto; min-width: 0; }
+  .row .name { flex: 0 0 120px; }
+  /* a generated topic (~27 characters) fits whole at this size */
+  .row .topic { flex: 1 1 auto; font-size: 13px; }
+  .more { position: relative; flex: none; align-self: stretch; display: flex; }
+  .dots { width: 38px; padding: 0; display: grid; place-items: center; align-self: stretch; }
+  .menu {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 200px;
+    display: flex; flex-direction: column; padding: var(--s-1);
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-ctl); box-shadow: var(--shadow-pop);
+  }
+  .menu button {
+    font: inherit; font-size: 13px; text-align: left; color: var(--ink); background: none; border: none;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .menu button:not(:disabled):hover { background: var(--surface-sunken); }
+  .menu button:focus-visible { outline: 2px solid var(--teal-600); outline-offset: -2px; }
+  .menu .danger { color: var(--danger-ink); }
+  .person .teams { width: 100%; }
+  .linkish.danger { color: var(--danger-ink); margin-left: var(--s-2); }
   .qr {
-    grid-column: 1 / -1;
     display: flex;
     gap: var(--s-4);
     align-items: center;
@@ -283,14 +310,14 @@
   .qr-help { font-size: 13px; flex: 1; min-width: 220px; }
   .qr-help p { margin: 0 0 var(--s-2); }
   .topic-line { display: flex; align-items: center; gap: var(--s-2); word-break: break-all; }
-  .pending { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--danger-ink); }
+  .pending { margin: 0; font-size: 12px; color: var(--danger-ink); }
   .save-state { font-size: 13px; color: var(--green-600); }
   .save-state.bad { color: var(--danger-ink); }
   .linkish { background: none; border: none; padding: 0; font: inherit; font-size: 12px; color: var(--teal-700); cursor: pointer; }
   .server { margin-top: var(--s-4); }
   .server-field { margin-top: var(--s-2); }
   @media (max-width: 720px) {
-    .person { grid-template-columns: 1fr auto auto auto; }
-    .person input:first-child { grid-column: 1 / -1; }
+    .row { flex-wrap: wrap; }
+    .row .name, .row .topic { flex: 1 1 100%; }
   }
 </style>

@@ -35,3 +35,15 @@ export function weighedOutShown({ bottleOut, deliveredG, refilling }) {
   if (refilling && deliveredG != null) return { g: deliveredG, estimated: true };
   return { g: bottleOut ?? null, estimated: false };
 }
+
+/** Settings > Balance: the balance's state header, `{ tone, word, text }`
+ *  (as `lineState` for the pumps), tone '' (connected), 'bad' or 'idle',
+ *  from the status frame and the saved port (`path`, '' for no balance). */
+export function balanceLine(s, path) {
+  if (!path) return { tone: 'idle', word: 'No balance', text: 'Pick its port and Connect' };
+  // saved, but not live: closed by Disconnect (the daemon follows no balance)
+  if (s && s.scale_connected == null) return { tone: 'idle', word: 'Disconnected', text: `${path}, not weighing` };
+  if (s?.scale_connected && s.scale_weight_g != null)
+    return { tone: '', word: 'Connected', text: `${path}, ${s.scale_weight_g.toFixed(1)} g, ${s.scale_stable ? 'stable' : 'settling'}` };
+  return { tone: 'bad', word: 'Not answering', text: `${path}: is the balance on, its cable plugged, its baud the same as here?` };
+}

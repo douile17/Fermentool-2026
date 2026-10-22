@@ -1,11 +1,13 @@
 <script>
   // The frame every Settings section uses: same head, same message lines,
   // same loading state, so a new section only writes its fields.
-  let { group, title, intro = null, err = null, msg = null, loading = false, children, foot = null } = $props();
+  let { group = null, title = null, intro = null, err = null, msg = null, loading = false, children, foot = null } = $props();
 </script>
 
 <section class="card">
-  <div class="card-head"><div><div class="eyebrow">{group}</div><h2>{title}</h2></div></div>
+  <!-- both optional: a card whose eyebrow says enough (About) has no title,
+       one whose title says enough (Pumps) no eyebrow -->
+  <div class="card-head"><div>{#if group}<div class="eyebrow">{group}</div>{/if}{#if title}<h2>{title}</h2>{/if}</div></div>
 
   {#if err}<div class="err msg">{err}</div>{/if}
   {#if msg}<div class="ok msg">{msg}</div>{/if}

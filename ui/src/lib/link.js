@@ -1,5 +1,5 @@
 // Single source of truth for "how is the pump link doing?", shared by the
-// top ConnBar, the inline connect-gate, and the sidebar foot indicator.
+// slim line at the top (ConnBar), Settings > Pumps, and the sidebar foot.
 //
 // tone: 'ok' | 'warn' | 'bad' | 'sim' | 'idle'
 //   ok   → healthy real port, pump responding        (green, bar hidden)
@@ -8,10 +8,10 @@
 //   sim  → running the simulator                      (grey, bar shown)
 //   idle → daemon not reachable yet                   (grey, bar shown)
 //
-// connectable: true  → picking a port and clicking Connect can fix this, so the
-//                      bar shows the full ConnectControl.
+// connectable: true  → the port settings can fix this: the line at the top
+//                      links to Settings > Pumps.
 //              false → it's a pump / disk / daemon condition a reconnect won't
-//                      touch, the bar shows just the status line.
+//                      touch, the line only tells.
 export function linkState(status, connected) {
   const s = status;
   if (!s) return { tone: 'idle', label: 'Connecting to daemon…', short: 'Daemon…', connectable: false };
@@ -45,7 +45,7 @@ export function linkState(status, connected) {
       tone: 'bad',
       label: 'No pump connected',
       short: 'No pump',
-      hint: 'Pick a serial port and click Connect (or enable simulator runs in Settings).',
+      hint: "Pick the cable's port in Settings, Pumps, or allow simulator runs there.",
       connectable: true,
     };
   if (s.serial_ok === false)
@@ -53,7 +53,7 @@ export function linkState(status, connected) {
       tone: 'bad',
       label: 'Pump not connected',
       short: 'Pump offline',
-      hint: 'Check power, wiring, the MODBUS address and the baud rate, then Connect.',
+      hint: 'Check power, wiring, the MODBUS address and the baud rate, then Connect in Settings, Pumps.',
       connectable: true,
     };
   if (s.pump_confirmed === false)

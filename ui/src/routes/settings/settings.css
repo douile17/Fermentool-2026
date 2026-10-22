@@ -59,6 +59,8 @@
   font-size: 12px;
 }
 .settings-pane .muted { color: var(--muted); }
+/* a section's Save sits at the right of its foot, as in Pumps and Balance */
+.settings-pane .save { margin-left: auto; }
 .settings-pane .ok {
   color: var(--green-600);
   background: color-mix(in srgb, var(--green-500) 12%, var(--surface));
@@ -69,3 +71,16 @@
 .settings-pane .howto { font-size: 13px; }
 .settings-pane .howto summary { cursor: pointer; color: var(--teal-700); }
 .settings-pane .howto ol { margin: var(--s-2) 0; padding-left: var(--s-5); line-height: 1.6; }
+
+/* Disconnect, on a link's state band (Pumps, Balance): no box of its own,
+   red ink and an unplug icon, red tint on hover only. A white outlined
+   button sat on the green band like a sticker (2026-10-22). */
+.settings-pane .unplug {
+  display: inline-flex; align-items: center; gap: 6px; flex: none; cursor: pointer;
+  font: 500 13.5px var(--font); color: var(--danger-ink);
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-ctl);
+  padding: 8px 12px;
+}
+.settings-pane .unplug:not(:disabled):hover { background: color-mix(in srgb, var(--danger) 10%, var(--surface)); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.settings-pane .unplug:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
+.settings-pane .unplug:disabled { opacity: 0.5; cursor: default; }

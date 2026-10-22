@@ -1,6 +1,5 @@
-import PumpSettings from './PumpSettings.svelte';
+import PumpsSettings from './PumpsSettings.svelte';
 import BalanceSettings from './BalanceSettings.svelte';
-import RefillSettings from './RefillSettings.svelte';
 import RunSettings from './RunSettings.svelte';
 import NotificationSettings from './NotificationSettings.svelte';
 import DaemonSettings from './DaemonSettings.svelte';
@@ -12,9 +11,9 @@ import AboutSettings from './AboutSettings.svelte';
 // plus one line here; `group` is the menu heading it sits under, `icon` a
 // name from components/Icon.svelte ('pump' draws the pump-head glyph).
 export const SECTIONS = [
-  { id: 'pump', label: 'Pump', group: 'Hardware', icon: 'pump', component: PumpSettings },
+  // the cable and every pump on it (feed, refill), one section (2026-10-21)
+  { id: 'pumps', label: 'Pumps', group: 'Hardware', icon: 'pump', component: PumpsSettings },
   { id: 'balance', label: 'Balance', group: 'Hardware', icon: 'weight', component: BalanceSettings },
-  { id: 'refill', label: 'Refill pump', group: 'Hardware', icon: 'droplet', component: RefillSettings },
   { id: 'runs', label: 'Crash resume', group: 'Runs', icon: 'power', component: RunSettings },
   { id: 'notifications', label: 'Notifications', group: 'Alerts', icon: 'bell', component: NotificationSettings },
   { id: 'display', label: 'Display', group: 'System', icon: 'ruler', component: DisplaySettings },

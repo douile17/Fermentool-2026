@@ -4,7 +4,7 @@
   import { loadConfig, patchConfig } from '../../lib/config.js';
   import SettingsCard from './SettingsCard.svelte';
 
-  let { group } = $props();
+  // `group` (passed to every section) is not shown here: the side menu says it.
 
   let loaded = $state(false);
   let port = $state(8730);
@@ -55,10 +55,11 @@
   }
 </script>
 
-<SettingsCard {group} title="Daemon" {err} {msg} loading={!loaded}>
+<SettingsCard title="Daemon" {err} {msg} loading={!loaded}>
   <div class="grid">
-    <label class="field"><span>API port (restart to apply; the desktop app expects 8730)</span>
+    <label class="field"><span>API port</span>
       <input type="number" bind:value={port} />
+      <small class="hint">applies after a restart</small>
     </label>
 
     <label class="field"><span>Log level</span>
@@ -69,14 +70,13 @@
   </div>
 
   {#snippet foot()}
-    <button class="btn-primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
+    <button class="btn-primary save" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
   {/snippet}
 </SettingsCard>
 
 <SettingsCard
-  group="Danger zone"
   title="Stop the daemon"
-  intro="Stops the control loop and the API. A running pump keeps its last commanded speed; restart the daemon to resume the run."
+  intro="The pump keeps its last speed until the daemon is started again."
   err={stopErr}
   msg={stopped ? 'Daemon stopped. This page is now offline.' : null}
 >
@@ -92,11 +92,15 @@
       <button class="btn-ghost" onclick={() => (confirmStop = false)}>Cancel</button>
     </div>
   {:else}
-    <button class="btn-danger" disabled={stopped} onclick={() => (confirmStop = true)}>Shut down daemon</button>
+    <!-- red outline, as Disconnect: the confirmation below is the filled red one -->
+    <button class="btn-ghost stop" disabled={stopped} onclick={() => (confirmStop = true)}>Shut down daemon</button>
   {/if}
 </SettingsCard>
 
 <style>
+  .hint { font-size: 12px; color: var(--muted); }
+  .stop { color: var(--danger-ink); border-color: color-mix(in srgb, var(--danger) 55%, var(--surface)); }
+  .stop:not(:disabled):hover { background: var(--danger-bg); border-color: var(--danger); }
   .confirm-note { margin-bottom: var(--s-3); color: var(--danger-ink); }
   .row { display: flex; gap: var(--s-3); flex-wrap: wrap; }
 </style>

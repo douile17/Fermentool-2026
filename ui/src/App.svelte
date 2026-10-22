@@ -17,6 +17,18 @@
   import { runState, stateTitle } from './lib/runview.js';
   import { num, unitFor, digitsFor } from './lib/fmt.js';
   import StateIcon from './components/StateIcon.svelte';
+  import { parseHash } from './lib/route.js';
+  import { SECTIONS } from './routes/settings/sections.js';
+
+  // A deep link (#settings/pumps, #history) opens that page at start.
+  {
+    const deep = parseHash(location.hash, SECTIONS.map((x) => x.id));
+    if (deep) {
+      app.route = deep.route;
+      if (deep.tab) app.tab = deep.tab;
+      if (deep.section) app.settingsSection = deep.section;
+    }
+  }
 
   const pumpLink = $derived(linkState(app.status, app.connected));
 
@@ -387,7 +399,7 @@
     <!-- One page title for screen readers; the tabs already say it on screen. -->
     <h1 class="sr-only">{pageTitle}</h1>
     <div class="wrap">
-      <ConnBar />
+      <ConnBar onopen={() => go(() => { app.route = 'settings'; app.settingsSection = 'pumps'; })} />
 
       {#if runPill && !onOverview}
         <div class="run-bar {runRs.tone}" role={runRs.tone === 'bad' ? 'alert' : 'status'}>
@@ -536,7 +548,7 @@
   .status.on .dot { background: var(--green-500); }
 
   /* Pump-link line, sits just above "daemon online". Persistent cue once the
-     big ConnBar has hidden itself. */
+     line at the top of the page has hidden itself. */
   .pumpstat {
     display: inline-flex; align-items: center; gap: var(--s-2);
     font-size: 12px; font-weight: 600; color: var(--muted);

@@ -66,11 +66,8 @@
   );
 </script>
 
-<SettingsCard {group} title="Fermentool" {err} loading={!about && !err}>
+<SettingsCard {group} {err} loading={!about && !err}>
   {#if about}
-    <p class="field-note intro">
-      Drives a LabQ peristaltic pump along a feed profile, with gravimetric trim, crash-safe journalling and alerts.
-    </p>
     <dl class="facts">
       <dt>Version</dt>
       <dd><span class="num">{about.version}</span></dd>
@@ -109,8 +106,6 @@
 {#if about}
   <SettingsCard
     group="Files"
-    title="Where the data lives"
-    intro="On this PC only. Back up the history file to keep the runs; an update never touches it."
   >
     <div class="root">
       <span class="ic"><Icon name="folder" size={22} /></span>
@@ -147,7 +142,6 @@
 
 
 <style>
-  .intro { margin-bottom: var(--s-4); }
   .facts {
     display: grid;
     grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);

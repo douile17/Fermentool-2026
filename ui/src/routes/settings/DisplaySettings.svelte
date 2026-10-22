@@ -4,7 +4,7 @@
   import { sizeParts } from '../../lib/tubesize.js';
   import SettingsCard from './SettingsCard.svelte';
 
-  let { group } = $props();
+  // `group` (passed to every section) is not shown here: the side menu says it.
 
   let loaded = $state(false);
   let tubeSizes = $state('mm');
@@ -24,6 +24,13 @@
   // What a 1/32" x 1/16" tube looks like with each choice.
   const sample = $derived(sizeParts(0.8, 1.6, tubeSizes));
 
+  // Two choices: applied on the click, no Save (UX audit, 2026-10-22).
+  function pick(v) {
+    if (v === tubeSizes || saving) return;
+    tubeSizes = v;
+    save();
+  }
+
   async function save() {
     saving = true;
     err = null;
@@ -42,9 +49,7 @@
 </script>
 
 <SettingsCard
-  {group}
   title="Display"
-  intro="How sizes are shown, the same for everyone on this PC."
   {err}
   {msg}
   loading={!loaded}
@@ -52,18 +57,14 @@
   <div class="field">
     <span>Tube sizes in</span>
     <div class="seg" role="radiogroup" aria-label="Tube sizes in">
-      <button role="radio" aria-checked={tubeSizes === 'mm'} class:on={tubeSizes === 'mm'} onclick={() => (tubeSizes = 'mm')}>mm first</button>
-      <button role="radio" aria-checked={tubeSizes === 'in'} class:on={tubeSizes === 'in'} onclick={() => (tubeSizes = 'in')}>inches first</button>
+      <button role="radio" aria-checked={tubeSizes === 'mm'} class:on={tubeSizes === 'mm'} onclick={() => pick('mm')}>mm first</button>
+      <button role="radio" aria-checked={tubeSizes === 'in'} class:on={tubeSizes === 'in'} onclick={() => pick('in')}>inches first</button>
     </div>
   </div>
   <p class="sample">
     A tube reads <span class="pri mono">{sample.pri}</span> <span class="sec mono">{sample.sec}</span>.
-    The calibration's diameter entry starts in this unit too.
   </p>
 
-  {#snippet foot()}
-    <button class="btn-primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
-  {/snippet}
 </SettingsCard>
 
 <style>

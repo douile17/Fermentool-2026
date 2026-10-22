@@ -180,13 +180,39 @@ try {
   check('Settings opens', await click('button', 'Settings'));
   await sleep(800);
   check('the Display section shows a tube size', (await click('button', 'Display')) && (await sleep(800), await js(`!!document.querySelector('.sample .pri')`)));
-  // Refill pump: looked at only, never saved nor tested (a Test runs a pump).
+  // Pumps: the cable and every pump on it (2026-10-21). Looked at only:
+  // never saved, reconnected nor tested (a Test runs a pump).
+  check('the Pumps section opens', (await click('.side button', 'Pumps')) && (await sleep(1200), await js(`!!document.querySelector('.pumps')`)));
+  check('it says the cable state first, in a word, above the port', await js(`(() => { const h = document.querySelector('.settings-pane .head .word'); const p = document.querySelector('.conn select.port'); return !!h && !!p && /^(Connected|Not connected|Not answering|Simulator)$/.test(h.textContent.trim()) && (h.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING) > 0; })()`));
+  // Disconnect while the cable is up, Connect while it is down (never clicked here)
+  // the state is a tinted band; Disconnect on it has no white box of its own (it sat on the band like a sticker)
+  check('the state is a tinted band, Disconnect without a box on it', await js(`(() => { const h = document.querySelector('.settings-pane .head'); const d = h && [...h.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Disconnect'); return !!h && getComputedStyle(h).backgroundColor !== 'rgba(0, 0, 0, 0)' && (!d || getComputedStyle(d).backgroundColor === 'rgba(0, 0, 0, 0)'); })()`));
+  check('the cable button says Connect or Disconnect', await js(`(() => { const b = [...document.querySelectorAll('.head button')].map((x) => x.textContent.trim()); return b.includes('Connect') !== b.includes('Disconnect'); })()`));
+  check('it lists the feed and the refill pump, each with an address', await js(`document.querySelectorAll('.pumps .item').length === 2 && document.querySelectorAll('.pumps .addr input').length === 2`));
   check(
-    'the Refill pump section shows its address and a Test button',
-    (await click('button', 'Refill pump')) &&
-      (await sleep(800),
-      await js(`!!document.querySelector('input[type=number][max="247"]') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Test (3 s)'))`)),
+    'Change opens the refill pump settings and its Test button',
+    (await click('.pumps .change', '')) &&
+      (await sleep(300), await js(`!!document.querySelector('.pumps .more input') && [...document.querySelectorAll('.pumps .more button')].some((b) => b.textContent.includes('Test 3 s'))`)),
   );
+  check('no Refill pump entry left in the Settings menu', await js(`![...document.querySelectorAll('.side button')].some((b) => b.textContent.trim() === 'Refill pump')`));
+
+  // --- the other sections, looked at only (UX audit, 2026-10-22)
+  check('Display applies on the click, no Save', (await click('.side button', 'Display')) && (await sleep(800), await js(`![...document.querySelectorAll('.settings-pane button')].some((b) => b.textContent.trim() === 'Save')`)));
+  check('Balance keeps Save off until a change', (await click('.side button', 'Balance')) && (await sleep(1200), await js(`[...document.querySelectorAll('.settings-pane button.save')].every((b) => b.disabled)`)));
+  check('Balance says its state in a word, with its Connect or Disconnect', await js(`/^(Connected|Disconnected|Not answering|No balance)$/.test(document.querySelector('.settings-pane .head .word')?.textContent.trim() ?? '') && document.querySelectorAll('.settings-pane .head button').length === 1`));
+  check('Crash resume is one switch, no Save, no grace', (await click('.side button', 'Crash resume')) && (await sleep(1200), await js(`document.querySelectorAll('.settings-pane input[type=checkbox]').length === 1 && !document.querySelector('.settings-pane input[type=number]') && ![...document.querySelectorAll('.settings-pane button')].some((b) => b.textContent.trim() === 'Save')`)));
+  await click('.side button', 'Notifications');
+  await sleep(1200);
+  if (await js(`!!document.querySelector('.person .dots')`)) {
+    check(
+      'a person\'s "…" menu holds Remove, out of the row',
+      (await click('.person .dots', '')) &&
+        (await sleep(200), await js(`!!document.querySelector('.person .menu .danger') && ![...document.querySelectorAll('.person .row > button')].some((b) => b.textContent.includes('Remove'))`)),
+    );
+    await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await sleep(200);
+    check('Escape closes the menu', await js(`!document.querySelector('.person .menu')`));
+  }
 
   // --- Tubing calibration last: it is only looked at, its draft untouched
   await click('button', 'Feeding profile');
