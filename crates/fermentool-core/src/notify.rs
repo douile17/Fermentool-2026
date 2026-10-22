@@ -75,6 +75,11 @@ pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
         return None;
     }
     let (tone, title) = match e.kind.as_str() {
+        // Detail "5.000 -> 3.000 ml/min": the new rate is the right side.
+        "setpoint_change" => {
+            let to = e.detail.as_deref().and_then(|d| d.split_once("->")).map_or("", |(_, r)| r.trim());
+            (Info, format!("Rate changed to {to}").trim_end().to_string())
+        }
         "start" => (Info, "Run started".to_string()),
         "alarm_feed_stopped" => (Alarm, "Feed stopped: bottle empty or line blocked".into()),
         "alarm_saturated" => (Alarm, "Pump out of the correction limit".into()),
@@ -792,6 +797,14 @@ mod tests {
         }
         let done = run_row(RunStatus::Completed);
         assert_eq!(message_for(&event("stop", None), &done).unwrap().title, "Run completed");
+    }
+
+    #[test]
+    fn a_rate_change_is_one_info_message() {
+        let run = run_row(RunStatus::Running);
+        let m = message_for(&event("setpoint_change", Some("5.000 -> 3.000 ml/min")), &run).unwrap();
+        assert_eq!(m.tone, Tone::Info);
+        assert_eq!(m.title, "Rate changed to 3.000 ml/min");
     }
 
     #[test]

@@ -111,6 +111,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/preview", post(preview))
         .route("/api/runs", get(list_runs).post(create_run))
         .route("/api/history", delete(clear_history))
+        .route("/api/runs/active/rate", post(set_active_rate))
         .route("/api/runs/{id}", get(get_run).delete(delete_run))
         .route("/api/runs/{id}/ticks", get(get_ticks))
         .route("/api/runs/{id}/events", get(get_events))
@@ -430,7 +431,7 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
     Ok(Json(json!({
         "saved": true,
         "scale_connected": scale_connected,
-        "note": "pump port, baud and address changes apply on the next Connect; balance changes apply now; API port and log level on restart"
+        "note": "pump port, baud and address changes apply on the next Connect; balance changes apply now; log level on restart"
     }))
     .into_response())
 }
@@ -595,6 +596,23 @@ async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -
     Ok((StatusCode::CREATED, Json(json!({ "run_id": id }))).into_response())
 }
 
+#[derive(serde::Deserialize)]
+struct RateBody {
+    value: f64,
+}
+
+/// Change the rate of the active Constant run. Refusals come back as for a
+/// start (`{ error, code, hint }`).
+async fn set_active_rate(State(s): State<AppState>, Json(b): Json<RateBody>) -> ApiResult<Response> {
+    let (from, to) = s
+        .control
+        .call(|reply| Command::SetConstantRate(b.value, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Detail)?;
+    Ok(Json(json!({ "from": from, "to": to })).into_response())
+}
+
 async fn clear_history(State(s): State<AppState>) -> ApiResult<Response> {
     s.control
         .call(Command::ClearHistory)
@@ -637,7 +655,11 @@ async fn get_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Re
         .await?
         .map_err(|e| ApiError::Conflict(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
-    Ok(Json(run).into_response())
+    // The curve the run really followed, rate changes included.
+    let effective = run.effective_curve();
+    let mut body = serde_json::to_value(&run).map_err(|e| ApiError::Conflict(e.to_string()))?;
+    body["effective_curve"] = serde_json::to_value(effective).map_err(|e| ApiError::Conflict(e.to_string()))?;
+    Ok(Json(body).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1658,6 +1680,61 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_rate_of_a_constant_run_changes_through_the_api() {
+        let app = router(test_state());
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/runs",
+                json!({
+                    "name": "c", "control_var": "rpm", "direction": "cw", "pump_addr": 1,
+                    "curve": {
+                        "mode": "endpoints", "start": 5, "end": 5, "duration": 3600,
+                        "clamp_min": 0, "clamp_max": 350,
+                        "params": { "kind": "constant" }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = body_json(res).await["run_id"].as_i64().unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/runs/active/rate", json!({ "value": 3.0 })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let b = body_json(res).await;
+        assert_eq!((b["from"].as_f64(), b["to"].as_f64()), (Some(5.0), Some(3.0)), "{b}");
+
+        let run = body_json(app.clone().oneshot(get(&format!("/api/runs/{id}"))).await.unwrap()).await;
+        assert_eq!(run["setpoint_changes"].as_array().unwrap().len(), 1, "{run}");
+        assert_eq!(run["effective_curve"]["params"]["kind"], json!("step"), "{run}");
+        assert_eq!(run["curve"]["params"]["kind"], json!("constant"), "{run}");
+
+        // A rate the pump cannot take is refused with the structured body.
+        let res = app
+            .oneshot(post_json("/api/runs/active/rate", json!({ "value": -1.0 })))
+            .await
+            .unwrap();
+        assert!(res.status().is_client_error());
+        assert!(body_json(res).await["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_rate_change_without_a_run_is_refused() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(post_json("/api/runs/active/rate", json!({ "value": 3.0 })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(res).await["code"], json!("idle"));
     }
 
     #[tokio::test]
