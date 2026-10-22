@@ -431,7 +431,7 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
     Ok(Json(json!({
         "saved": true,
         "scale_connected": scale_connected,
-        "note": "pump port, baud and address changes apply on the next Connect; balance changes apply now; log level on restart"
+        "note": "pump port, baud and address changes apply on the next Connect; balance changes apply now; API port and log level on restart"
     }))
     .into_response())
 }

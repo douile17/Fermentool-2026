@@ -581,9 +581,14 @@ fn control_loop<T: Transport + SwapTransport>(
                     Ok(Command::SetConstantRate(value, reply)) => {
                         let now = run_now(run_epoch, &mut clock_stepped);
                         let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let started = engine.active_status().map(|a| a.started_at);
-                            let elapsed_s = started.map_or(0.0, |s| now.duration_since(s).as_secs_f64().max(0.0));
-                            let res = engine.set_constant_rate(value, elapsed_s, now).map_err(|e| e.detail());
+                            // No run: the engine's own idle refusal, never an invented elapsed.
+                            let res = match engine.active_status().map(|a| a.started_at) {
+                                None => Err(crate::engine::EngineError::Idle.detail()),
+                                Some(s) => {
+                                    let elapsed_s = now.duration_since(s).as_secs_f64().max(0.0);
+                                    engine.set_constant_rate(value, elapsed_s, now).map_err(|e| e.detail())
+                                }
+                            };
                             let ok = res.is_ok();
                             let _ = reply.send(res);
                             ok
