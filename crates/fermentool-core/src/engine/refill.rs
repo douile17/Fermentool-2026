@@ -334,6 +334,23 @@ impl<T: Transport> Engine<T> {
         }
     }
 
+    /// Settings > Pumps: does the refill pump answer at its address? A read
+    /// of its speed register, never a Start, allowed during a run (the
+    /// control thread serialises it with the feed pump's writes). Outside a
+    /// run nothing else ever asks it, so its state was unknown there.
+    pub fn refill_ping(&mut self) -> std::result::Result<bool, String> {
+        if !self.refill_line_up() {
+            return Err("The pump line is not connected: the refill pump shares the feed pump's cable.".into());
+        }
+        let addr = self.refill.cfg.pump_address;
+        if addr == self.pump_addr {
+            return Err(format!("Address {addr} is the feed pump's: give the refill pump another one."));
+        }
+        let ok = self.pump.with_address(addr, |p| p.read_speed_rpm()).is_ok();
+        self.refill_answered(ok);
+        Ok(ok)
+    }
+
     /// A run is starting: a Test still running is cut short.
     pub(super) fn refill_end_test(&mut self, now: Instant) {
         if self.refill.test_until.is_some() && self.refill_line_up() {
@@ -388,6 +405,24 @@ mod tests {
             control_var: crate::store::ControlVar::MlMin,
             ..super::super::tests::linear_cfg()
         }
+    }
+
+    #[test]
+    fn a_ping_tells_whether_the_refill_pump_answers_and_never_starts_it() {
+        // Settings > Pumps shows each pump's state, outside a run too.
+        let mut e = engine();
+        e.set_refill(at(2), Instant::now());
+        assert_eq!(e.refill_ping(), Ok(true));
+        assert!(!refill_pump(&e, 2).running(), "a ping only reads");
+        e.pump.transport_mut().set_plugged(2, false);
+        assert_eq!(e.refill_ping(), Ok(false));
+    }
+
+    #[test]
+    fn a_ping_at_the_feed_pumps_address_is_refused() {
+        let mut e = engine();
+        e.set_refill(at(1), Instant::now());
+        assert!(e.refill_ping().is_err());
     }
 
     #[test]

@@ -122,10 +122,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/recovery/discard", post(discard))
         .route("/api/serial/ports", get(serial_ports))
         .route("/api/serial/reconnect", post(serial_reconnect))
+        .route("/api/serial/disconnect", post(serial_disconnect))
+        .route("/api/scale/connect", post(scale_connect))
+        .route("/api/scale/disconnect", post(scale_disconnect))
         .route("/api/pump/stop", post(pump_stop))
         .route("/api/scale/refill_mode", post(scale_refill_mode))
         .route("/api/scale/refill_done", post(scale_refill_done))
         .route("/api/refill/test", post(refill_test))
+        .route("/api/refill/ping", post(refill_ping))
         .route("/api/refill/now", post(refill_now))
         .route("/api/refill/stop", post(refill_pause))
         .route("/api/calibrations", get(list_calibrations).post(create_calibration))
@@ -840,6 +844,17 @@ async fn refill_test(State(s): State<AppState>) -> ApiResult<Response> {
     Ok(Json(json!({ "ok": true, "seconds": crate::engine::REFILL_TEST_S })).into_response())
 }
 
+/// Settings > Pumps: whether the refill pump answers at its address.
+async fn refill_ping(State(s): State<AppState>) -> ApiResult<Response> {
+    let responding = s
+        .control
+        .call(Command::RefillPing)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "responding": responding })).into_response())
+}
+
 async fn refill_now(State(s): State<AppState>) -> ApiResult<Response> {
     s.control
         .call(Command::RefillNow)
@@ -1086,6 +1101,54 @@ async fn serial_reconnect(
     s.config_rev.fetch_add(1, Ordering::SeqCst);
 
     Ok(Json(json!({ "connected": msg })).into_response())
+}
+
+/// Settings > Pumps' Disconnect: closes the cable's COM port (frees it for
+/// the LabQ's own software) by switching the live link to the simulator,
+/// which auto-reconnect leaves alone. `config.toml` keeps the port, so
+/// Connect, or a restart of the daemon, opens it again. Refused during a run.
+async fn serial_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
+    let cfg = s.config.read().await.clone();
+    let mut serial = cfg.serial.clone();
+    serial.path = "sim".into();
+    let pump_addr = cfg.pump.address;
+    s.control
+        .call(move |reply| Command::Reconnect { serial, pump_addr, reply })
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "disconnected": cfg.serial.path })).into_response())
+}
+
+/// Settings > Balance's Connect: opens the saved balance port again (after a
+/// Disconnect, or a balance that was off). `connected`: it answers already.
+async fn scale_connect(State(s): State<AppState>) -> ApiResult<Response> {
+    let scale = s.config.read().await.scale.clone();
+    if scale.path.trim().is_empty() {
+        return Err(ApiError::Conflict("no balance port saved: pick its port and Save".into()));
+    }
+    let connected = s
+        .control
+        .call(move |reply| Command::SetScale(scale, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "connected": connected })).into_response())
+}
+
+/// Settings > Balance's Disconnect: closes the balance's COM port, the saved
+/// config keeping it (Connect, or a restart of the daemon, opens it again).
+/// Refused during a run corrected by the balance.
+async fn scale_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
+    let saved = s.config.read().await.scale.clone();
+    let mut scale = saved.clone();
+    scale.path = String::new();
+    s.control
+        .call(move |reply| Command::SetScale(scale, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "disconnected": saved.path })).into_response())
 }
 
 #[cfg(test)]
@@ -1486,6 +1549,44 @@ mod tests {
         let app = router(test_state());
         let res = app.oneshot(get("/api/runs/999")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_balance_disconnects_and_connects_keeping_its_port() {
+        let st = test_state();
+        st.config.write().await.scale.path = "COM7".into();
+        let app = router(st.clone());
+        let res = app.clone().oneshot(post_json("/api/scale/disconnect", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["disconnected"], "COM7");
+        assert_eq!(st.config.read().await.scale.path, "COM7", "the port stays saved");
+        // no balance on a test machine: Connect is accepted, the link not up
+        let res = app.oneshot(post_json("/api/scale/connect", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn connecting_with_no_balance_port_saved_is_refused() {
+        let app = router(test_state());
+        let res = app.oneshot(post_json("/api/scale/connect", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn disconnect_frees_the_port_and_keeps_it_in_the_config() {
+        let dir = std::env::temp_dir().join(format!("ft-disconnect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfgp = dir.join("config.toml");
+        let mut st = test_state();
+        st.config_path = Arc::new(cfgp.clone());
+        st.config.write().await.serial.path = "COM8".into();
+        let app = router(st.clone());
+        let res = app.oneshot(post_json("/api/serial/disconnect", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["disconnected"], "COM8");
+        // the port stays configured: Connect (or a restart) opens it again
+        assert_eq!(st.config.read().await.serial.path, "COM8");
+        assert!(!cfgp.exists(), "nothing written to config.toml");
     }
 
     #[tokio::test]

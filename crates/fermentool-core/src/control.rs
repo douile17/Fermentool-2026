@@ -120,6 +120,8 @@ pub enum Command {
     SetRefill(RefillConfig, oneshot::Sender<()>),
     /// Settings' Test: run the refill pump 3 s, then stop it.
     RefillTest(oneshot::Sender<Result<(), String>>),
+    /// Settings > Pumps: does the refill pump answer (a read, never a Start).
+    RefillPing(oneshot::Sender<Result<bool, String>>),
     /// "Refill now": start a refill whatever the level, lift a halt.
     RefillNow(oneshot::Sender<Result<(), String>>),
     /// "Stop refill": stop a refill, hold the automatic refill.
@@ -972,6 +974,10 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         Command::SetRefill(cfg, reply) => {
             engine.set_refill(cfg, Instant::now());
             let _ = reply.send(());
+            true
+        }
+        Command::RefillPing(reply) => {
+            let _ = reply.send(engine.refill_ping());
             true
         }
         Command::RefillTest(reply) => {
