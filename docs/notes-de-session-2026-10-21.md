@@ -288,9 +288,6 @@ Les commits `build(ui)` qui les suivent portent le bundle.
   refill, « runs dry », vitesse de remplissage, balance).
 - **Un remplissage interrompu puis repris compte pour deux** dans History
   (+958,5 g et +38,7 g pour le run 210) : les réunir en un seul.
-- **Brouillon de calibration disparu le 21** (24,3 / 24,5 / 24,6 g, non
-  enregistré) : abandonné par l'utilisateur ? À confirmer ; les mesures
-  restent dans le journal (runs 201, 204, 205).
 - **Documentation technique** : estimation pendant un remplissage (`≈`),
   précision de « Poured », lissage de l'écart, tolérance ±2 %.
 - **Step dans New run** (« arrêter l'alimentation à … »), sur maquette.
