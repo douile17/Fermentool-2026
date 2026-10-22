@@ -59,6 +59,20 @@
   « 1 pump of 2 answers » jusqu'à 15 s). La pompe de remplissage est
   réinterrogée dès que la pompe d'alimentation répond, puis toutes les 3 s
   tant qu'elle ne répond pas, et plus du tout pendant un run.
+- Courbe finie, refill automatique en cours : le bandeau de l'Overview dit
+  le prochain refill (« Next refill, around 16:40, in 2 h 10 »), le rappel
+  de Stop passe sous le titre, et le graphique marque le refill sur son
+  bord droit avec une flèche (« refill 16:40, in 2 h 10 → »). Avant, le
+  prochain refill n'était dit nulle part après la fin de la courbe.
+- Tous les graphiques (Overview, New run, fiche d'un run dans History) ont
+  une échelle en temps d'expérience : en minutes jusqu'à 2 h, en heures
+  au-delà, le pas suivant la durée et la largeur du graphique. Jamais
+  l'heure du jour.
+- Fiche d'un run : le tableau du flacon (« Refill 2 at 2 h 21, 32 min »),
+  la régulation et le journal comptent aussi depuis le début du run ;
+  seule la ligne d'en-tête garde la date et l'heure de début et de fin.
+- Fiche d'un run : la courbe est dite dans l'en-tête, en pastilles (forme,
+  début → fin, durée, sens), au lieu d'être cachée dans Settings.
 - Liens directs vers une section : `#settings/<id>` (par ex.
   `#settings/balance`) ouvre l'app sur cette section.
 - Balance plus tolérante à un PC chargé : une demande de poids peut attendre

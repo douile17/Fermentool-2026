@@ -36,7 +36,10 @@ asked:**
   JS type noise: `jsconfig.check.json`). Zero errors, zero warnings.
 - `npm test`: vitest on the pure logic (`src/lib/*.test.js`: the burst
   balance checks, tube sizes).
-- `npm run smoke`, once deployed: `tests/smoke.mjs` walks the app in
+- `npm run smoke`, once deployed (a regex inside an `await js(...)`
+  template literal needs its backslashes doubled, `\\d`: the template
+  eats one, and a plain `\d` silently became `d`, a check that passed
+  testing nothing): `tests/smoke.mjs` walks the app in
   headless Edge (New run steps, the tube list, Run again, Settings, the
   calibration) and changes nothing (no run, no burst, no draft, no setting).
 
@@ -212,7 +215,10 @@ holds the curve's end value (`value_at` is flat there), still trimmed and
 journalled every second, until Stop, which records it `completed` (`stopped`
 before the curve end). `ActiveStatus::curve_done` marks the phase; the
 end-of-curve pop-up only informs. A crash in the hold resumes into it, any
-time later. Calibration bursts are the exception: they still finish and stop
+time later. With an automatic refill waiting, the Overview band says the
+next refill in the hold too (`holdBand`), and the chart marks it on its
+right edge with an arrow (`refillMarkAt`): the chart ends at the curve's
+end. Calibration bursts are the exception: they still finish and stop
 the pump at their duration (their weighing window). `HoldingStatus` /
 `stop_pump` remain only for a hold left by an older daemon.
 
@@ -272,7 +278,9 @@ the pump at their duration (their weighing window). `HoldingStatus` /
 Redesigned 2026-10-20 (UX audit, mockup on run 194). Order: name and
 `when · ran · person` with a close cross, then the **verdict** (On / Off
 target at ±2 %, worst gap after the first 15 min, 4 figures said once),
-Feed rate (clock-time axis), Running total vs requested (`GapChart`), the
+Feed rate (axis in the experiment's time: every chart, table and journal
+counts from the run's start, `elapsedTicks` / `atRun`, never the time of
+day; only the header line has dates), Running total vs requested (`GapChart`), the
 Feed bottle table, then folded Settings / Regulation / Journal. Logic lives
 in `rundetail.js` as tested plain functions, not in the component.
 - **A refill is not weighed**: its stretch (`report.estimated`) is drawn

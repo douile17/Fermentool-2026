@@ -218,6 +218,54 @@ vraies données), puis mise en place.
 - Smoke : 38 vérifications (Display sans Save, Save grisés, menu « … » de
   Notifications), sans rien modifier.
 
+## 6 quinquies. Prochain refill après la courbe, échelle de temps (22 octobre)
+
+- Question : après la fin de la courbe, sait-on quand vient le prochain
+  refill ? Le calcul oui (`refillDueInS` tient la valeur de fin), mais le
+  bandeau affichait « Stop the run when you are done » à la place, et le
+  graphique, qui s'arrête à la fin de la courbe, cachait le repère.
+- Maquette (canvas « Next refill after the curve ») : A bandeau, B les deux
+  empilés, C = A plus un repère au bord du graphique. Retenue : **C**.
+  `holdBand` (le prochain refill d'abord, le Stop dans la phrase sous le
+  titre ; sans refill en attente, le Stop comme avant) et `refillMarkAt`
+  (au bord droit, flèche) dans `lib/runview.js`, testés. Le repère garde le
+  style du repère pendant la courbe (trait teal), pas la pastille bleue de
+  la maquette.
+- Demande en cours de route : une échelle de temps qui s'adapte, en min puis
+  en h. `elapsedTicks` (min jusqu'à 2 h, h au-delà) et `ticksFor` (une
+  graduation par 80 px : « 100 min » et « 120 min » se chevauchaient sur
+  l'aperçu étroit de New run), dans `lib/chartscale.js`, testés ; `Chart`
+  l'utilise quand on ne lui donne pas de graduations. Smoke : l'aperçu de
+  New run montre 0 à 120 min.
+- Précision de l'utilisateur : le temps de l'expérience, pas l'heure du
+  jour, et « sur les runs » aussi. History passe donc en temps
+  d'expérience : les deux graphiques (`clockTicks` supprimé, `GapChart`
+  prend `elapsedTicks`), le tableau du flacon, la régulation et le journal
+  (`atRun` : « 0 », « 47 min », « 4 h 45 »). Smoke : aucune heure du jour
+  dans la fiche.
+- Vu au passage sur run 210 : un seul refill (2 h 21, 32 min) apparaît en
+  deux lignes, la seconde à 2 h 52 et listée avant ; c'est le point déjà
+  ouvert « refill interrompu compté deux fois » (section 8).
+- Pas vu en vrai : le bandeau d'un run dans sa phase de maintien avec un
+  refill automatique (aucun run en cours) ; la règle est testée.
+
+## 6 sexies. La courbe dans l'en-tête de la fiche (22 octobre)
+
+- « On a du mal à voir les paramètres de début et fin de la curve » : le
+  graphique de la fiche n'a pas les valeurs de bout (`endpoints={false}`),
+  le résumé de Settings ne disait que « exponential · 3 h 0 m · ccw ».
+- Maquette (canvas « Curve start and end in History ») : A une ligne au-
+  dessus du graphique, B les valeurs sur le graphique, C des pastilles dans
+  l'en-tête. Retenue : **C**. `curveChips` (`lib/rundetail.js`, testé) :
+  forme, « 6.000 → 9.000 ml/min », « over 3 h 0 m », sens ; µ seulement en
+  Physio. Curve et Direction quittent Settings, dont le résumé devient ce
+  qu'il contient (tube, calibration, balance, refill).
+- Trouvé en écrivant le smoke de cette pastille : dans le gabarit de
+  `await js(...)`, un `\d` devient `d` (le gabarit JS mange la barre
+  oblique). Les deux vérifications « pas d'heure du jour » ajoutées plus
+  tôt passaient donc sans rien tester. Toutes doublées (`\\d`), le smoke
+  n'en contient plus de simples.
+
 ## 7. Commits de la session
 
 | Commit | Contenu |
