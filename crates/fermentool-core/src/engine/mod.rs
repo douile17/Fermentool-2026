@@ -11,7 +11,9 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use fermentool_curves::CurveSpec;
-use fermentool_modbus::{limits, PduError, Pump, PumpError, PumpTransport, Transport, TransportError};
+use fermentool_modbus::{
+    limits, PduError, Pump, PumpError, PumpKind, PumpTarget, PumpTransport, Transport, TransportError,
+};
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +82,9 @@ pub enum EngineError {
     GravimetricTrimNeedsCalibration,
     /// The run drives the refill pump, and it did not answer a Stop.
     RefillPumpSilent { address: u8 },
+    /// The feed pump (a LabV or a PDS II head) could not be put in
+    /// transferring mode, the only one where it takes a speed.
+    PumpMode(PumpKind, PumpError),
 }
 
 /// Structured error for the HTTP API: a one-line `message` (the [`Display`] of
@@ -123,6 +128,11 @@ impl std::fmt::Display for EngineError {
                 f,
                 "running on the pump simulator. Configure a real serial port, or enable simulator runs in Settings, before starting a run"
             ),
+            EngineError::PumpMode(kind, e) => write!(
+                f,
+                "the {} did not take transferring mode ({e})",
+                pump_name(*kind)
+            ),
             EngineError::PumpRejectedSetpoint {
                 code,
                 control_var,
@@ -157,6 +167,7 @@ impl EngineError {
             EngineError::ScaleUnavailable => "scale_unavailable",
             EngineError::GravimetricTrimNeedsCalibration => "trim_needs_calibration",
             EngineError::RefillPumpSilent { .. } => "refill_pump_silent",
+            EngineError::PumpMode(..) => "pump_mode",
         }
     }
 
@@ -165,6 +176,18 @@ impl EngineError {
     /// everything.
     pub fn hint(&self) -> Option<String> {
         let text = match self {
+            EngineError::PumpMode(kind, _) => {
+                return match kind {
+                    PumpKind::LabQ => None,
+                    PumpKind::LabV => Some(
+                        "Put the LabV on its main screen; Fermentool sets transferring mode itself, it could not."
+                            .to_string(),
+                    ),
+                    PumpKind::PdsII { head } => Some(format!(
+                        "Is head {head} set to independent operation, and the controller on its main screen?"
+                    )),
+                };
+            }
             EngineError::PumpRejectedSetpoint { control_var, .. } => match control_var {
                 ControlVar::MlMin => {
                     "That flow is outside the range the LabQ's configured pump head and tubing can \
@@ -329,6 +352,12 @@ pub struct EngineStatus {
     pub active: Option<ActiveStatus>,
     /// `"sim"` or the open serial port name.
     pub transport: String,
+    /// The feed pump's model: `"labq"`, `"labv"` or `"pds2"`.
+    pub pump_model: &'static str,
+    /// The feed pump's head, a PDS II only.
+    pub pump_head: Option<u8>,
+    /// The feed pump's top speed (rpm): curves and setpoints stay under it.
+    pub pump_max_rpm: f64,
     /// Set when a run completed and the pump is still holding its final
     /// setpoint (it is not stopped on natural completion). Cleared by
     /// [`Engine::stop_pump`] or by starting another run.
@@ -530,7 +559,9 @@ pub struct Engine<T: Transport> {
     /// The configured serial link, kept so the daemon can reopen it on its own
     /// after a mid-run cable/adapter glitch.
     serial: SerialConfig,
-    pump_addr: u8,
+    /// The feed pump: address, model (register map) and top speed. The pump
+    /// targets it, except while a refill operation borrows the line.
+    feed: PumpTarget,
     /// Consecutive failed pump writes since the last success.
     write_fails: u32,
     /// The real port was configured but is not currently open.
@@ -847,6 +878,8 @@ pub struct TrackingStatus {
 
 impl<T: Transport> Engine<T> {
     pub fn new(pump: Pump<T>, store: Store, app_version: impl Into<String>) -> Self {
+        // The pump the engine was given until `set_serial` applies the config.
+        let feed = pump.target();
         // A run that completed naturally leaves the pump running at its final
         // setpoint; if the daemon restarts before the operator stops it, restore
         // the hold so the UI still offers a Stop button instead of showing
@@ -884,7 +917,7 @@ impl<T: Transport> Engine<T> {
                 baud: 9600,
                 allow_simulator: false,
             },
-            pump_addr: 0,
+            feed,
             write_fails: 0,
             serial_lost: false,
             // Permissive until `set_serial` applies the real config, matching
@@ -1026,11 +1059,12 @@ impl<T: Transport> Engine<T> {
     /// failure. If a real port is configured but the pump is currently on the
     /// simulator (it wouldn't open at boot), mark the link lost so recovery
     /// starts retrying immediately.
-    pub fn set_serial(&mut self, serial: SerialConfig, pump_addr: u8) {
+    pub fn set_serial(&mut self, serial: SerialConfig, feed: PumpTarget) {
         let lost = !serial.use_simulator() && self.transport == TransportKind::Sim;
         self.allow_simulator = serial.allow_simulator;
         self.serial = serial;
-        self.pump_addr = pump_addr;
+        self.feed = feed;
+        self.pump.set_target(feed);
         self.serial_lost = lost;
         if lost {
             let _ = self.store.log_event(&NewEvent {
@@ -1108,7 +1142,7 @@ impl<T: Transport> Engine<T> {
     pub fn swap_transport(
         &mut self,
         serial: &SerialConfig,
-        pump_addr: u8,
+        feed: PumpTarget,
     ) -> Result<TransportKind>
     where
         T: SwapTransport,
@@ -1116,13 +1150,13 @@ impl<T: Transport> Engine<T> {
         if self.active.is_some() {
             return Err(EngineError::Busy);
         }
-        let kind = self.pump.transport_mut().swap(serial, pump_addr);
-        self.pump.set_address(pump_addr);
+        let kind = self.pump.transport_mut().swap(serial, feed.address);
+        self.pump.set_target(feed);
         self.transport = kind.clone();
         self.allow_simulator = serial.allow_simulator;
         self.write_fails = 0;
         self.serial = serial.clone();
-        self.pump_addr = pump_addr;
+        self.feed = feed;
 
         let now = Timestamp::now();
         if serial.use_simulator() {
@@ -1170,7 +1204,7 @@ impl<T: Transport> Engine<T> {
         match self
             .pump
             .transport_mut()
-            .swap_strict(&self.serial, self.pump_addr)
+            .swap_strict(&self.serial, self.feed.address)
         {
             Some(kind) => {
                 self.transport = kind;
@@ -1306,6 +1340,9 @@ impl<T: Transport> Engine<T> {
         EngineStatus {
             active: self.active_status(),
             transport: self.transport.label(),
+            pump_model: self.feed.kind.model().as_str(),
+            pump_head: self.feed.kind.head(),
+            pump_max_rpm: self.feed.max_rpm,
             holding: self.holding.clone(),
             serial_ok: !self.serial_lost,
             write_fails: self.write_fails,
@@ -1449,7 +1486,7 @@ impl<T: Transport> Engine<T> {
         // changes: a refused start leaves the trim state, a hold left by an
         // older daemon and the pump as they were.
         let (lo, hi) = match cfg.control_var {
-            ControlVar::Rpm => (limits::RPM_MIN, limits::RPM_MAX),
+            ControlVar::Rpm => (limits::RPM_MIN, self.feed.max_rpm),
             ControlVar::MlMin => (limits::FLOW_MIN, limits::FLOW_MAX),
         };
         let mut spec = cfg.curve.clone();
@@ -1478,11 +1515,11 @@ impl<T: Transport> Engine<T> {
         if let Some(r) = drive {
             // The tube's ceiling at full speed, without the trim's headroom.
             let peak = spec.peak_value();
-            if peak / r > limits::RPM_MAX {
+            let max = self.feed.max_rpm;
+            if peak / r > max {
                 return Err(EngineError::Config(format!(
-                    "the curve asks up to {peak:.2} ml/min; this tube delivers at most {:.2} ml/min at {} rpm",
-                    limits::RPM_MAX * r,
-                    limits::RPM_MAX
+                    "the curve asks up to {peak:.2} ml/min; this tube delivers at most {:.2} ml/min at {max} rpm",
+                    max * r
                 )));
             }
         }
@@ -1494,12 +1531,18 @@ impl<T: Transport> Engine<T> {
         // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
         // head-type / tubing-size registers are deliberately left untouched, see
         // the note in migrations/0001_init.sql.
+        // A LabV or PDS II head takes a speed only in transferring mode: set
+        // it before the pump moves (a read and nothing more when it is
+        // there already; no frame at all for a LabQ).
+        self.pump
+            .ensure_transferring()
+            .map_err(|e| EngineError::PumpMode(self.feed.kind, e))?;
         self.drive_ml_per_rpm = drive;
         self.drive_paused = false;
         let start_seq = std::time::Instant::now();
         self.pump.set_direction(cfg.direction == Direction::Cw)?;
         drive_write(&mut self.pump, &mut self.drive_paused, cfg.control_var, first, drive)
-            .map_err(|e| setpoint_error(e, cfg.control_var, first, drive))?;
+            .map_err(|e| setpoint_error(e, cfg.control_var, first, drive, self.feed.max_rpm))?;
         // Driven in rpm under the motor's minimum: the curve asks for no
         // flow yet, the pump starts once it rises.
         if !self.drive_paused {
@@ -1690,10 +1733,10 @@ impl<T: Transport> Engine<T> {
             match read_actual(&mut self.pump, control_var, self.drive_ml_per_rpm) {
                 Ok(actual) => {
                     let mut actual = actual as f64;
-                    // Driven in rpm, the motor tops out at RPM_MAX: compare with
-                    // what was written, not with a target beyond the tube.
+                    // Driven in rpm, the motor tops out at the pump's max: compare
+                    // with what was written, not with a target beyond the tube.
                     let written = match (control_var, self.drive_ml_per_rpm) {
-                        (ControlVar::MlMin, Some(r)) => drive_rpm(target, r) * r,
+                        (ControlVar::MlMin, Some(r)) => drive_rpm(target, r, self.feed.max_rpm) * r,
                         _ => target,
                     };
                     let tol = (5.0 * drive_grid(control_var, self.drive_ml_per_rpm)).max(0.04 * written.abs());
@@ -2947,9 +2990,33 @@ impl<T: Transport> Engine<T> {
 
         self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
 
+        // Normally still in transferring mode: one read, no write, the feed
+        // goes on uninterrupted. A failed read does not block a crash resume:
+        // the writes below meet a dead pump the usual way.
+        let mode = match self.pump.ensure_transferring() {
+            Ok(false) => None,
+            Ok(true) => Some(format!(
+                "the {} was out of transferring mode: stopped and switched back",
+                pump_name(self.feed.kind)
+            )),
+            Err(e) => Some(format!(
+                "could not check the {}'s operating mode ({e}); resuming anyway",
+                pump_name(self.feed.kind)
+            )),
+        };
+        if let Some(detail) = mode {
+            let _ = self.store.log_event(&NewEvent {
+                run_id: Some(run.id),
+                wall_time: now,
+                level: EventLevel::Warn,
+                kind: "pump_mode".into(),
+                detail: Some(detail),
+            });
+        }
+
         self.pump.set_direction(run.direction == Direction::Cw)?;
         drive_write(&mut self.pump, &mut self.drive_paused, run.control_var, target, drive)
-            .map_err(|e| setpoint_error(e, run.control_var, target, drive))?;
+            .map_err(|e| setpoint_error(e, run.control_var, target, drive, self.feed.max_rpm))?;
         if !self.drive_paused {
             self.pump.start()?;
         }
@@ -3142,7 +3209,7 @@ fn drive_write<T: Transport>(
 ) -> std::result::Result<(), PumpError> {
     match (control_var, drive) {
         (ControlVar::MlMin, Some(r)) => {
-            let rpm = drive_rpm(value, r);
+            let rpm = drive_rpm(value, r, pump.target().max_rpm);
             if rpm < limits::RPM_MIN - 1e-9 {
                 if !*paused {
                     pump.stop()?;
@@ -3163,9 +3230,17 @@ fn drive_write<T: Transport>(
 }
 
 /// The rpm that delivers `ml_min` at `ml_per_rpm`, on the motor's 0.1 rpm
-/// step and within its range.
-fn drive_rpm(ml_min: f64, ml_per_rpm: f64) -> f64 {
-    quantize(ml_min / ml_per_rpm, setpoint_grid(ControlVar::Rpm)).clamp(0.0, limits::RPM_MAX)
+/// step and within its range (`max_rpm`: the feed pump's top speed).
+fn drive_rpm(ml_min: f64, ml_per_rpm: f64, max_rpm: f64) -> f64 {
+    quantize(ml_min / ml_per_rpm, setpoint_grid(ControlVar::Rpm)).clamp(0.0, max_rpm)
+}
+
+/// A pump as the operator knows it: "LabV", "PDS II head 2".
+fn pump_name(kind: PumpKind) -> String {
+    match kind.head() {
+        Some(head) => format!("{} head {head}", kind.model().label()),
+        None => kind.model().label().to_string(),
+    }
 }
 
 /// Classify a failed setpoint write. Only MODBUS `0x03` (illegal *data value*)
@@ -3177,9 +3252,15 @@ fn drive_rpm(ml_min: f64, ml_per_rpm: f64) -> f64 {
 ///
 /// An ml/min run driven in rpm wrote an rpm: the refusal is reported as such,
 /// never pointing at the head/tubing table that mode does not use.
-fn setpoint_error(e: PumpError, control_var: ControlVar, value: f64, drive: Option<f64>) -> EngineError {
+fn setpoint_error(
+    e: PumpError,
+    control_var: ControlVar,
+    value: f64,
+    drive: Option<f64>,
+    max_rpm: f64,
+) -> EngineError {
     let (control_var, value) = match (control_var, drive) {
-        (ControlVar::MlMin, Some(r)) => (ControlVar::Rpm, drive_rpm(value, r)),
+        (ControlVar::MlMin, Some(r)) => (ControlVar::Rpm, drive_rpm(value, r, max_rpm)),
         _ => (control_var, value),
     };
     match &e {
@@ -4837,7 +4918,7 @@ mod tests {
         for i in 1..=40 {
             e.tick(at(i)).unwrap();
         }
-        assert!((e.pump.transport().speed_rpm() as f64 - limits::RPM_MAX).abs() < 1e-3);
+        assert!((e.pump.transport().speed_rpm() as f64 - 350.0).abs() < 1e-3);
         assert!(e.status().pump_confirmed);
     }
 
@@ -5036,7 +5117,7 @@ mod tests {
 
         let row = e.store().run(id).unwrap().unwrap();
         assert_eq!(row.status, RunStatus::Running);
-        assert!(row.curve.clamp_max <= limits::RPM_MAX + 1e-9);
+        assert!(row.curve.clamp_max <= 350.0 + 1e-9);
         assert!(row.curve.clamp_min >= limits::RPM_MIN - 1e-9);
     }
 
@@ -5229,7 +5310,7 @@ mod tests {
             baud: 9600,
             allow_simulator: false,
         };
-        assert!(matches!(e.swap_transport(&sc, 1), Err(EngineError::Busy)));
+        assert!(matches!(e.swap_transport(&sc, PumpTarget::labq(1)), Err(EngineError::Busy)));
     }
 
     #[test]
@@ -5241,7 +5322,7 @@ mod tests {
             allow_simulator: false,
         };
         assert_eq!(
-            e.swap_transport(&sc, 1).unwrap(),
+            e.swap_transport(&sc, PumpTarget::labq(1)).unwrap(),
             crate::transport::TransportKind::Sim
         );
         assert_eq!(e.status().transport, "sim");
@@ -5361,7 +5442,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         assert!(!e.serial_lost());
         assert!(e.recover_serial(t0()));
@@ -5378,7 +5459,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         assert!(e.serial_lost()); // real port configured but engine is on sim
         assert!(!e.recover_serial(t0())); // swap_strict fails to open
@@ -5404,7 +5485,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         for _ in 0..5 {
             assert!(!e.recover_serial(t0()));
@@ -5469,7 +5550,8 @@ mod tests {
                 PumpError::Pdu(PduError::Exception(0x03)),
                 ControlVar::MlMin,
                 12.0,
-                None
+                None,
+                350.0
             ),
             EngineError::PumpRejectedSetpoint { code: 0x03, .. }
         ));
@@ -5480,7 +5562,8 @@ mod tests {
                 PumpError::Pdu(PduError::Exception(0x03)),
                 ControlVar::MlMin,
                 12.0,
-                Some(2.4)
+                Some(2.4),
+                350.0
             ),
             EngineError::PumpRejectedSetpoint { code: 0x03, control_var: ControlVar::Rpm, value }
                 if (value - 5.0).abs() < 1e-9
@@ -5492,7 +5575,8 @@ mod tests {
                 PumpError::Pdu(PduError::Exception(0x02)),
                 ControlVar::Rpm,
                 50.0,
-                None
+                None,
+                350.0
             ),
             EngineError::Pump(_)
         ));
@@ -5502,7 +5586,8 @@ mod tests {
                 PumpError::Transport(fermentool_modbus::TransportError::Timeout),
                 ControlVar::Rpm,
                 50.0,
-                None
+                None,
+                350.0
             ),
             EngineError::Pump(_)
         ));
@@ -5528,7 +5613,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         assert!(!e.serial_lost(), "precondition: not probed yet");
 
@@ -5561,7 +5646,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         assert!(e.serial_lost());
         assert!(!e.recover_serial(t0()));
@@ -5580,7 +5665,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         assert!(e.serial_lost());
         assert!(matches!(
@@ -5603,7 +5688,7 @@ mod tests {
     fn start_run_is_refused_on_the_simulator_unless_enabled() {
         let mut e = engine(); // on the simulator
         // The shipped default: sim transport, simulator runs NOT enabled.
-        e.set_serial(sim_serial(false), 1);
+        e.set_serial(sim_serial(false), PumpTarget::labq(1));
         assert!(!e.serial_lost(), "sim is not a lost real link");
         assert!(e.status().simulator);
         assert!(!e.status().allow_simulator);
@@ -5614,7 +5699,7 @@ mod tests {
         assert!(e.store().list_runs(10).unwrap().is_empty());
 
         // Opt in → the run starts.
-        e.set_serial(sim_serial(true), 1);
+        e.set_serial(sim_serial(true), PumpTarget::labq(1));
         assert!(e.start_run(linear_cfg(), t0()).is_ok());
     }
 
@@ -5630,14 +5715,14 @@ mod tests {
         };
 
         let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
-        b.set_serial(sim_serial(false), 1);
+        b.set_serial(sim_serial(false), PumpTarget::labq(1));
         assert!(matches!(
             b.resume(at(1200), grace()),
             Err(EngineError::SimulatorNotAllowed)
         ));
 
         // The run is still recoverable once simulator runs are enabled.
-        b.set_serial(sim_serial(true), 1);
+        b.set_serial(sim_serial(true), PumpTarget::labq(1));
         assert_eq!(b.resume(at(1200), grace()).unwrap(), id);
     }
 
@@ -5799,7 +5884,7 @@ mod tests {
             CurveSpec::linear(0.0, 5000.0, Duration::from_secs(3600)).with_clamp(0.0, 5000.0);
         e.start_run(cfg, t0()).unwrap();
         e.tick(at(3599)).unwrap();
-        assert!(e.pump.transport().speed_rpm() as f64 <= limits::RPM_MAX + 1e-3);
+        assert!(e.pump.transport().speed_rpm() as f64 <= 350.0 + 1e-3);
     }
 
     #[test]
@@ -6217,5 +6302,156 @@ mod tests {
         let mut e = engine();
         e.start_run(linear_cfg(), t0()).unwrap();
         assert!(matches!(e.resume(t0(), grace()), Err(EngineError::Busy)));
+    }
+
+    // --- Feed pump models (LabV, PDS II) ---------------------------------
+
+    use fermentool_modbus::{PumpKind, PumpModel, PumpTarget};
+
+    fn labv_target(max_rpm: f64) -> PumpTarget {
+        PumpTarget { address: 1, kind: PumpKind::LabV, max_rpm }
+    }
+
+    fn pds_target(head: u8) -> PumpTarget {
+        PumpTarget { address: 1, kind: PumpKind::PdsII { head }, max_rpm: 600.0 }
+    }
+
+    fn strict(model: PumpModel) -> SimPump {
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(model);
+        sim
+    }
+
+    fn engine_on(sim: SimPump, target: PumpTarget, store: Store) -> Engine<SimPump> {
+        Engine::new(Pump::with_target(sim, target), store, "test")
+    }
+
+    /// Every request frame, for a test that checks what reached the pump.
+    struct Recording {
+        sim: SimPump,
+        frames: Vec<Vec<u8>>,
+    }
+
+    impl Transport for Recording {
+        fn transaction(&mut self, request: &[u8]) -> std::result::Result<Vec<u8>, TransportError> {
+            self.frames.push(request.to_vec());
+            self.sim.transaction(request)
+        }
+    }
+
+    /// `(register, value)` of a `06H` write frame.
+    fn write_single(frame: &[u8]) -> Option<(u16, u16)> {
+        (frame.get(1) == Some(&0x06)).then(|| {
+            (u16::from_be_bytes([frame[2], frame[3]]), u16::from_be_bytes([frame[4], frame[5]]))
+        })
+    }
+
+    #[test]
+    fn a_labv_feed_run_writes_the_labv_registers() {
+        let mut e = engine_on(strict(PumpModel::LabV), labv_target(150.0), Store::open_in_memory().unwrap());
+        let cfg = RunConfig { curve: CurveSpec::linear(100.0, 100.0, Duration::from_secs(3600)), ..linear_cfg() };
+        e.start_run(cfg, t0()).unwrap();
+        let sim = e.pump.transport();
+        assert_eq!(sim.reg(1008), 1, "LabV Start/Stop is 1008");
+        assert_eq!(sim.reg(1006), 0, "never the LabQ Start/Stop");
+        assert!((sim.speed_rpm_of(PumpKind::LabV.map()) - 100.0).abs() < 1e-3);
+        e.tick(at(1)).unwrap();
+        assert!((e.pump.transport().speed_rpm_of(PumpKind::LabV.map()) - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_curve_over_the_pump_max_is_clamped_or_refused() {
+        let mut e = engine_on(SimPump::new(1), labv_target(150.0), Store::open_in_memory().unwrap());
+        let cfg = RunConfig { curve: CurveSpec::linear(0.0, 200.0, Duration::from_secs(3600)), ..linear_cfg() };
+        let id = e.start_run(cfg, t0()).unwrap();
+        let row = e.store.run(id).unwrap().unwrap();
+        assert!((row.curve.clamp_max - 150.0).abs() < 1e-9, "{}", row.curve.clamp_max);
+        e.stop_run(at(10)).unwrap();
+
+        // 2.4 ml/min per rpm: 150 rpm deliver 360 ml/min, the curve asks 500.
+        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        let spec = CurveSpec::linear(100.0, 500.0, Duration::from_secs(3600));
+        let err = e.start_run(driven_cfg(cal, spec), at(20)).unwrap_err();
+        assert!(
+            matches!(&err, EngineError::Config(m) if m.contains("at 150 rpm") && m.contains("360")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_pds_in_dispensing_mode_is_switched_once() {
+        let mut sim = strict(PumpModel::PdsII);
+        sim.set_reg(2005, 1);
+        let mut e = engine_on(sim, pds_target(2), Store::open_in_memory().unwrap());
+        e.start_run(linear_cfg(), t0()).unwrap();
+        let sim = e.pump.transport();
+        assert_eq!(sim.reg(2005), 0, "switched to transferring");
+        assert_eq!(sim.reg(2003), 1, "then started");
+        assert_eq!(sim.reg(10), 0, "never the all start/stop register");
+    }
+
+    #[test]
+    fn resume_in_transferring_mode_writes_no_mode() {
+        let db = TempDb::new();
+        let id = {
+            let mut a = engine_on(strict(PumpModel::PdsII), pds_target(1), db.store());
+            let id = a.start_run(linear_cfg(), t0()).unwrap();
+            a.tick(at(600)).unwrap();
+            id
+        };
+        let mut sim = strict(PumpModel::PdsII);
+        sim.set_reg(1003, 1); // still running at the crash
+        let rec = Recording { sim, frames: Vec::new() };
+        let mut b = Engine::new(Pump::with_target(rec, pds_target(1)), db.store(), "test");
+        assert_eq!(b.resume(at(1200), grace()).unwrap(), id);
+        let frames = &b.pump.transport().frames;
+        assert_eq!(frames[0][1], 0x03, "the mode is read first: {frames:?}");
+        for f in frames {
+            assert_ne!(write_single(f).map(|(r, _)| r), Some(1005), "no mode write");
+            assert_ne!(write_single(f), Some((1003, 0)), "never stopped");
+        }
+        assert_eq!(b.pump.transport().sim.reg(1003), 1);
+    }
+
+    #[test]
+    fn a_silent_pds_head_refuses_the_start_with_a_hint() {
+        let mut sim = strict(PumpModel::PdsII);
+        sim.logical_heads.insert(1);
+        let mut e = engine_on(sim, pds_target(1), Store::open_in_memory().unwrap());
+        let err = e.start_run(linear_cfg(), t0()).unwrap_err();
+        assert!(matches!(err, EngineError::PumpMode(..)), "{err:?}");
+        let d = err.detail();
+        assert_eq!(d.code, "pump_mode");
+        assert!(d.hint.unwrap_or_default().contains("independent operation"));
+        assert!(e.status().active.is_none());
+        assert!(e.store().list_runs(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_labv_that_cannot_be_switched_says_so() {
+        let mut e = engine_on(strict(PumpModel::LabV), labv_target(150.0), Store::open_in_memory().unwrap());
+        e.pump.transport_mut().drop_next = 2; // the mode read and its retry
+        let err = e.start_run(linear_cfg(), t0()).unwrap_err();
+        assert!(matches!(err, EngineError::PumpMode(..)), "{err:?}");
+        assert!(err.hint().unwrap().contains("main screen"));
+    }
+
+    #[test]
+    fn a_labq_start_reads_no_mode() {
+        let mut e = engine();
+        e.start_run(linear_cfg(), t0()).unwrap();
+        // Direction, speed, Start: the LabQ start sequence, nothing more.
+        assert_eq!(e.pump.transport().transactions, 3);
+    }
+
+    #[test]
+    fn status_reports_the_feed_model() {
+        let e = engine_on(SimPump::new(1), pds_target(2), Store::open_in_memory().unwrap());
+        let st = e.status();
+        assert_eq!(st.pump_model, "pds2");
+        assert_eq!(st.pump_head, Some(2));
+        assert_eq!(st.pump_max_rpm, 600.0);
+        let st = engine().status();
+        assert_eq!((st.pump_model, st.pump_head, st.pump_max_rpm), ("labq", None, 350.0));
     }
 }

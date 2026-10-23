@@ -614,7 +614,7 @@ mod tests {
     impl Bench {
         fn new(store: Store) -> Self {
             let mut e = Engine::new(Pump::new(SimBus::new(), 1), store, "test");
-            e.pump_addr = 1;
+            e.feed.address = 1;
             e.set_refill(
                 RefillConfig { pump_address: 2, ..RefillConfig::default() },
                 Instant::now(),

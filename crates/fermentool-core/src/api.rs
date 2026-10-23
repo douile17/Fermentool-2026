@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, Notify, RwLock};
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::serial::available_ports;
 
-use crate::config::Config;
+use crate::config::{Config, PumpModelCfg};
 use crate::control::{Command, ControlHandle, DaemonStatus};
 use crate::engine::{ErrDetail, RunConfig};
 use crate::store::{NewCalibration, RunKind, RunStatus, Store, StoreError, CALIBRATION_DRAFT_KEY};
@@ -1056,6 +1056,21 @@ struct ReconnectReq {
     /// New MODBUS slave address; omitted = keep the current one.
     #[serde(default)]
     pump_addr: Option<u8>,
+    /// The feed pump's model, `"labq"`, `"labv"` or `"pds2"`; omitted = keep.
+    #[serde(default)]
+    pump_model: Option<String>,
+    /// PDS II head, 1..=8; omitted = keep.
+    #[serde(default)]
+    pump_head: Option<u8>,
+    /// Top speed (rpm): omitted = keep, `null` = the model's default.
+    #[serde(default, deserialize_with = "present")]
+    pump_max_rpm: Option<Option<f64>>,
+}
+
+/// A field that is present, even as `null` (`Some(None)`), as opposed to
+/// omitted (`None`, through `#[serde(default)]`).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<f64>>, D::Error> {
+    Option::<f64>::deserialize(d).map(Some)
 }
 
 /// Persist `serial.*` to `config.toml` and rebuild the live pump transport
@@ -1074,21 +1089,34 @@ async fn serial_reconnect(
         cfg.serial.baud = b;
     }
     if let Some(a) = req.pump_addr {
-        if !(1..=247).contains(&a) {
-            return Err(ApiError::Bad("MODBUS address must be 1..=247".into()));
-        }
         cfg.pump.address = a;
     }
+    if let Some(m) = req.pump_model {
+        cfg.pump.model = match m.as_str() {
+            "labq" => PumpModelCfg::Labq,
+            "labv" => PumpModelCfg::Labv,
+            "pds2" => PumpModelCfg::Pds2,
+            _ => return Err(ApiError::Bad(format!("\"{m}\" is not a pump model (labq, labv, pds2)"))),
+        };
+    }
+    if let Some(h) = req.pump_head {
+        cfg.pump.head = h;
+    }
+    if let Some(r) = req.pump_max_rpm {
+        cfg.pump.max_rpm = r;
+    }
+    // Address per model, head, max rpm: refused before anything changes.
+    cfg.validate().map_err(ApiError::Bad)?;
 
     // Swap first, a refused reconnect (e.g. a run is active) must not touch
     // `config.toml`, so the file always matches the live transport.
     let serial = cfg.serial.clone();
-    let pump_addr = cfg.pump.address;
+    let feed = cfg.pump.target();
     let msg = s
         .control
         .call(move |reply| Command::Reconnect {
             serial,
-            pump_addr,
+            feed,
             reply,
         })
         .await
@@ -1111,9 +1139,9 @@ async fn serial_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
     let cfg = s.config.read().await.clone();
     let mut serial = cfg.serial.clone();
     serial.path = "sim".into();
-    let pump_addr = cfg.pump.address;
+    let feed = cfg.pump.target();
     s.control
-        .call(move |reply| Command::Reconnect { serial, pump_addr, reply })
+        .call(move |reply| Command::Reconnect { serial, feed, reply })
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
@@ -1251,7 +1279,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         state_for(engine, &db)
     }
@@ -1712,6 +1740,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reconnect_sets_the_feed_pump_model() {
+        let dir = std::env::temp_dir().join(format!("ft-reconnect-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfgp = dir.join("config.toml");
+        let mut st = test_state();
+        st.config_path = Arc::new(cfgp.clone());
+        st.config.write().await.pump.max_rpm = Some(200.0);
+        let app = router(st.clone());
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/serial/reconnect",
+                json!({ "pump_model": "labv", "pump_head": 1, "pump_max_rpm": null }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let written = std::fs::read_to_string(&cfgp).unwrap();
+        assert!(written.contains("model = \"labv\""), "{written}");
+        assert_eq!(st.config.read().await.pump.max_rpm, None, "null: the model's default");
+        let status = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
+        assert_eq!(status["pump_model"], "labv", "{status}");
+        assert_eq!(status["pump_max_rpm"], 150.0, "{status}");
+        assert!(status["pump_head"].is_null(), "{status}");
+
+        // A LabV answers at 1..=32 only: refused, nothing changes.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/serial/reconnect", json!({ "pump_model": "labv", "pump_addr": 40 })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(st.config.read().await.pump.address, 1);
+
+        // Omitted fields keep their value.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/serial/reconnect", json!({ "pump_max_rpm": 120 })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cfg = st.config.read().await.clone();
+        assert_eq!((cfg.pump.model, cfg.pump.max_rpm), (PumpModelCfg::Labv, Some(120.0)));
+
+        let res = app
+            .oneshot(post_json("/api/serial/reconnect", json!({ "pump_model": "masterflex" })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

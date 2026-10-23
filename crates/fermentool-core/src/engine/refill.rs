@@ -302,7 +302,7 @@ impl<T: Transport> Engine<T> {
             return Err("A test is already running.".into());
         }
         let cfg = self.refill.cfg.clone();
-        if cfg.pump_address == self.pump_addr {
+        if cfg.pump_address == self.feed.address {
             return Err(format!(
                 "Address {} is the feed pump's: set another address in the refill pump's own menu, then here.",
                 cfg.pump_address
@@ -343,7 +343,7 @@ impl<T: Transport> Engine<T> {
             return Err("The pump line is not connected: the refill pump shares the feed pump's cable.".into());
         }
         let addr = self.refill.cfg.pump_address;
-        if addr == self.pump_addr {
+        if addr == self.feed.address {
             return Err(format!("Address {addr} is the feed pump's: give the refill pump another one."));
         }
         let ok = self.pump.with_address(addr, |p| p.read_speed_rpm()).is_ok();
@@ -377,7 +377,7 @@ mod tests {
 
     fn engine() -> Engine<SimBus> {
         let mut e = Engine::new(Pump::new(SimBus::new(), 1), Store::open_in_memory().unwrap(), "test");
-        e.pump_addr = 1;
+        e.feed.address = 1;
         e
     }
 

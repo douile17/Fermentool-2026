@@ -156,9 +156,9 @@ fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<WatchdogTransp
     // The port runs on a worker thread (see `transport` module docs): a stuck
     // serial syscall then wedges only that worker, never the control loop / API.
     let (transport, kind) = WatchdogTransport::spawn(&cfg.serial, cfg.pump.address);
-    let mut engine = Engine::new(Pump::new(transport, cfg.pump.address), store, VERSION);
+    let mut engine = Engine::new(Pump::with_target(transport, cfg.pump.target()), store, VERSION);
     engine.set_transport_kind(kind);
-    engine.set_serial(cfg.serial.clone(), cfg.pump.address);
+    engine.set_serial(cfg.serial.clone(), cfg.pump.target());
     // Only schedules: the refill pump's first Stop is the control loop's
     // first frame on the line, before any resume.
     engine.set_refill(cfg.refill.clone(), std::time::Instant::now());

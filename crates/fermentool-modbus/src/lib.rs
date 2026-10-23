@@ -42,9 +42,7 @@ pub mod reg {
 pub mod limits {
     /// Minimum settable motor speed (rpm).
     pub const RPM_MIN: f64 = 0.1;
-    // Temporary: Task 4 removes it (the maximum is the pump's own `max_rpm`).
-    /// Maximum settable motor speed of a LabQ (rpm).
-    pub const RPM_MAX: f64 = 350.0;
+    // No maximum here: it is the pump's own `PumpTarget::max_rpm`.
     /// Minimum settable flow rate (ml/min).
     pub const FLOW_MIN: f64 = 0.0;
     /// Maximum settable flow rate (ml/min).
