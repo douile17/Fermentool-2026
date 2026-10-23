@@ -1,6 +1,6 @@
 [package]
 name = "fermentool-modbus"
-description = "MODBUS-RTU framing helpers, register map and pump transport for the LabQ peristaltic pump"
+description = "MODBUS-RTU framing helpers, register maps and pump transport for the LabQ, LabV and PDS II peristaltic pumps"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

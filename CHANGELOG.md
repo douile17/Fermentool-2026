@@ -2,6 +2,43 @@
 
 ## Non publié (depuis 0.1.5)
 
+### Autres pompes : LabV et PDS II (23 octobre)
+
+- Settings › Pumps : chaque pompe se choisit parmi **LabQ, LabV et PDS II**
+  (avec sa photo), avec son adresse, sa tête (1 à 8, PDS II seulement) et sa
+  vitesse maximale (LabQ 350, LabV 150, PDS II 600 tr/min par défaut). Le
+  câble est affiché « 9600 baud · 8E1 » (le choix du baud disparaît).
+- Une vitesse au-dessus du maximum de la pompe est refusée (courbe, remplissage).
+- Une pompe laissée dans un autre mode que « transferring » est remise en
+  transferring au démarrage, à la reprise, au début d'un remplissage et au
+  Test (jamais pendant le réglage de la vitesse).
+- Le tuyau calibré appartient au modèle de pompe sur lequel il a été mesuré :
+  un nouveau run ne propose que les calibrations du modèle de la pompe
+  d'alimentation. Les calibrations existantes sont des LabQ. Chaque run
+  retient le modèle et la tête de sa pompe.
+- Alimentation et remplissage peuvent être deux têtes d'un même PDS II (même
+  adresse, têtes différentes).
+- Les protocoles LabV et PDS II sont dans le dépôt ; `docs/wiring.md` donne le
+  DB9 du LabV (broche 7 = masse du RS-485, 8 = B, 9 = A).
+
+**À vérifier sur le matériel** (une LabV, puis un PDS II ; rien n'a encore été
+essayé sur une vraie pompe autre que la LabQ) :
+
+1. Settings › Pumps : la pompe est branchée, réglée à 9600 et à son adresse,
+   et affiche « answers ». LabV : la parité est paire (9600 8E1) ; si elle ne
+   répond pas, regarder d'abord ce réglage dans son menu.
+2. Un court run en tr/min démarre, s'arrête, et tourne dans le sens choisi.
+3. Une pompe laissée dans un autre mode (dosage, volume fixe) est remise en
+   transferring toute seule au démarrage du run.
+4. Une vitesse au-dessus du maximum réglé est refusée avec un message qui le
+   dit.
+5. PDS II : une tête réglée en « logical operation » est refusée avec
+   l'indication de la passer en independent operation ; deux têtes d'un même
+   contrôleur (alimentation et remplissage) tournent sans que l'une
+   démarre ou arrête l'autre.
+6. Une calibration de tuyau faite sur la LabQ n'est pas proposée pour la
+   LabV ni le PDS II.
+
 ### History, calibration, remplissage (20 et 21 octobre)
 
 - Fiche d'un run dans History refaite : le nom et les dates d'abord, puis le

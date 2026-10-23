@@ -34,11 +34,11 @@ control path.)
 | Path | What |
 |---|---|
 | `crates/fermentool-curves` | Pure time-profile math (`CurveSpec`), no I/O. Fully unit-tested. |
-| `crates/fermentool-modbus`  | MODBUS-RTU CRC/framing + LabQ register map & limits. Byte-exact tests vs. the vendor doc. |
+| `crates/fermentool-modbus`  | MODBUS-RTU CRC/framing + LabQ / LabV / PDS II register maps & limits. Byte-exact tests vs. the vendor doc. |
 | `crates/fermentool-core`    | The daemon, `config` · `store` (SQLite journal) · `engine` (curve engine + crash recovery) · `control` (engine on its own thread) · `api` (axum REST) · embedded UI (m8). |
 | `ui/`                       | Svelte 5 + Vite front-end; built to `ui/dist/`, embedded by the daemon at milestone 8. |
 | `docs/`                     | Implementation plan, design language, wiring, service install. |
-| `LabQ Series MODBUS protocol.{md,pdf}` | Vendor protocol reference. |
+| `LabQ Series MODBUS protocol.{md,pdf}`, `LabV Series MODBUS protocol.md`, `PDS Series MODBUS protocol.md` | Vendor protocol references. |
 
 ## Build
 

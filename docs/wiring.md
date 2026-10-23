@@ -48,10 +48,29 @@ analog speed-control inputs (0-5V/0-10V/4-20mA, **do not tie these together,
 it damages the pump**), pins 11-13 are the motor-running status output, and
 pins 14/15 are an isolated 5V supply.
 
+### LabV pump-side connector (DB9)
+
+Per the LabV manual, the RS485 pins on the pump's DB9 are:
+
+- **Pin 9 = RS485-A**
+- **Pin 8 = RS485-B**
+- **Pin 7 = GND1, the RS-485 signal ground** (unlike the LabQ, this connector
+  has a ground for the bus: wire it to the adapter's ground)
+- Pin 5 = GND, the communication ground (RS232 side).
+- Pins 2 and 3 = RS232 (not used by this project).
+
+### PDS II pump-side connector
+
+To be filled from the pump (connector, pins and any signal ground not yet
+checked on a real unit).
+
 ## Pump serial settings
 
 - Protocol: MODBUS-RTU, **8E1**, baud 9600 (configurable on the pump).
-- Slave address: 1 (must be unique on the bus).
+- The cable is shown as 9600 baud 8E1 for every model (LabQ, LabV and PDS II
+  all use even parity); each pump must be set to 9600 by hand.
+- Slave address: 1 (must be unique on the bus), except two heads of one PDS II
+  controller, which share its address and differ by head number (1..8).
 - Commands are only accepted on the pump's **Main Interface** screen.
 
 ## Sanity check
