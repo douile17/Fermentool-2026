@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use fermentool_modbus::{PumpKind, PumpModel, PumpTarget};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -173,8 +174,75 @@ pub struct SerialConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PumpConfig {
-    /// MODBUS slave address, 1..247.
+    /// MODBUS slave address, 1..247 on a LabQ, 1..32 on a LabV / PDS II.
     pub address: u8,
+    /// Which pump model answers at `address`.
+    pub model: PumpModelCfg,
+    /// PDS II only: the head (1..=8) this config drives. Ignored otherwise.
+    pub head: u8,
+    /// Highest rpm the daemon will command. `None` = the model's default.
+    pub max_rpm: Option<f64>,
+}
+
+/// The pump model as written in `config.toml` (the modbus crate has no serde).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PumpModelCfg {
+    #[default]
+    Labq,
+    Labv,
+    Pds2,
+}
+
+impl PumpModelCfg {
+    pub fn model(self) -> PumpModel {
+        match self {
+            PumpModelCfg::Labq => PumpModel::LabQ,
+            PumpModelCfg::Labv => PumpModel::LabV,
+            PumpModelCfg::Pds2 => PumpModel::PdsII,
+        }
+    }
+}
+
+/// The pump a config describes. An invalid PDS II head (validation refuses
+/// it, but an unsanitised config can still carry one) falls back to head 1
+/// so this never panics.
+fn build_target(address: u8, model: PumpModelCfg, head: u8, max_rpm: f64) -> PumpTarget {
+    let kind = PumpKind::new(model.model(), head)
+        .or_else(|_| PumpKind::new(model.model(), 1))
+        .unwrap_or(PumpKind::LabQ);
+    PumpTarget { address, kind, max_rpm }
+}
+
+/// Problem with one pump's address, head and max rpm, if any. `who` is the
+/// prefix of the message, e.g. "the refill pump's".
+fn pump_problem(who: &str, address: u8, model: PumpModelCfg, head: u8, max_rpm: Option<f64>) -> Option<String> {
+    let m = model.model();
+    if !(1..=m.max_address()).contains(&address) {
+        return Some(format!("{who} MODBUS address must be 1..={} on a {}", m.max_address(), m.label()));
+    }
+    if model == PumpModelCfg::Pds2 && !(1..=8).contains(&head) {
+        return Some(format!("{who} PDS II head must be 1..=8"));
+    }
+    if let Some(r) = max_rpm {
+        let ceiling = m.max_rpm_ceiling();
+        if !(r.is_finite() && (0.1..=ceiling).contains(&r)) {
+            return Some(format!("{who} max rpm must be 0.1..{ceiling} on a {}", m.label()));
+        }
+    }
+    None
+}
+
+/// Same physical pump: same address, and on a PDS II (one address, several
+/// heads) the same head.
+pub fn same_pump(a: &PumpTarget, b: &PumpTarget) -> bool {
+    if a.address != b.address {
+        return false;
+    }
+    match (a.kind, b.kind) {
+        (PumpKind::PdsII { head: x }, PumpKind::PdsII { head: y }) => x == y,
+        _ => true,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,7 +295,13 @@ pub struct RefillConfig {
     /// or a Test uses it: a config with the default 2 on a feed pump at 2
     /// must still save).
     pub pump_address: u8,
-    /// Speed the refill pump runs at, rpm (0.1..350).
+    /// Which pump model the refill pump is.
+    pub pump_model: PumpModelCfg,
+    /// PDS II only: the head (1..=8).
+    pub pump_head: u8,
+    /// Highest rpm for the refill pump. `None` = the model's default.
+    pub pump_max_rpm: Option<f64>,
+    /// Speed the refill pump runs at, rpm (0.1..its max).
     pub speed_rpm: f64,
     /// The direction that pumps from the reservoir into the weighed bottle.
     /// No expected flow: the refill pump is not calibrated, a fill is judged
@@ -347,34 +421,71 @@ impl Default for RefillConfig {
     fn default() -> Self {
         Self {
             pump_address: 2,
+            pump_model: PumpModelCfg::Labq,
+            pump_head: 1,
+            pump_max_rpm: None,
             speed_rpm: 350.0,
             direction: Direction::Cw,
         }
     }
 }
 
-/// Bounds of the refill pump's speed, the LabQ's own.
+/// Lower bound of the refill pump's speed; the upper one is
+/// [`RefillConfig::max_rpm`].
 pub const REFILL_RPM_MIN: f64 = 0.1;
-pub const REFILL_RPM_MAX: f64 = 350.0;
 
 impl RefillConfig {
+    pub fn max_rpm(&self) -> f64 {
+        self.pump_max_rpm.unwrap_or_else(|| self.pump_model.model().default_max_rpm())
+    }
+
+    pub fn target(&self) -> PumpTarget {
+        build_target(self.pump_address, self.pump_model, self.pump_head, self.max_rpm())
+    }
+
     /// What [`Config::validate`] refuses in `[refill]`.
     fn problem(&self) -> Option<String> {
-        if !(1..=247).contains(&self.pump_address) {
-            return Some("the refill pump's MODBUS address must be 1..=247".into());
+        let pump = pump_problem(
+            "the refill pump's",
+            self.pump_address,
+            self.pump_model,
+            self.pump_head,
+            self.pump_max_rpm,
+        );
+        if pump.is_some() {
+            return pump;
         }
-        if !(self.speed_rpm.is_finite() && (REFILL_RPM_MIN..=REFILL_RPM_MAX).contains(&self.speed_rpm)) {
+        let max = self.max_rpm();
+        if !self.speed_rpm.is_finite() || self.speed_rpm < REFILL_RPM_MIN {
+            return Some(format!("the refill pump's speed must be {REFILL_RPM_MIN}..{max} rpm"));
+        }
+        if self.speed_rpm > max {
             return Some(format!(
-                "the refill pump's speed must be {REFILL_RPM_MIN}..{REFILL_RPM_MAX} rpm"
+                "the refill pump's speed {} rpm is over its max {max} rpm",
+                self.speed_rpm
             ));
         }
         None
     }
 }
 
+impl PumpConfig {
+    pub fn max_rpm(&self) -> f64 {
+        self.max_rpm.unwrap_or_else(|| self.model.model().default_max_rpm())
+    }
+
+    pub fn target(&self) -> PumpTarget {
+        build_target(self.address, self.model, self.head, self.max_rpm())
+    }
+
+    fn problem(&self) -> Option<String> {
+        pump_problem("the feed pump's", self.address, self.model, self.head, self.max_rpm)
+    }
+}
+
 impl Default for PumpConfig {
     fn default() -> Self {
-        Self { address: 1 }
+        Self { address: 1, model: PumpModelCfg::Labq, head: 1, max_rpm: None }
     }
 }
 
@@ -475,8 +586,8 @@ impl Config {
         if !SERIAL_BAUDS.contains(&self.serial.baud) {
             return Err(format!("the pump baud must be one of {SERIAL_BAUDS:?}"));
         }
-        if !(1..=247).contains(&self.pump.address) {
-            return Err("the MODBUS address must be 1..=247".into());
+        if let Some(p) = self.pump.problem() {
+            return Err(p);
         }
         if self.scale.baud == 0 {
             return Err("the balance baud must be a positive number".into());
@@ -517,9 +628,9 @@ impl Config {
             self.serial.baud = d.serial.baud;
             note("serial.baud");
         }
-        if !(1..=247).contains(&self.pump.address) {
-            self.pump.address = d.pump.address;
-            note("pump.address");
+        if self.pump.problem().is_some() {
+            self.pump = d.pump.clone();
+            note("pump");
         }
         if self.scale.baud == 0 {
             self.scale.baud = d.scale.baud;
@@ -602,6 +713,77 @@ mod tests {
         assert!(c.validate().is_ok());
         let back = Config::from_toml(&c.to_toml().unwrap()).unwrap();
         assert_eq!(back.refill.direction, Direction::Ccw);
+    }
+
+    fn pump_cfg(model: PumpModelCfg, address: u8) -> PumpConfig {
+        PumpConfig { address, model, ..PumpConfig::default() }
+    }
+
+    #[test]
+    fn an_old_config_is_labq_and_labq() {
+        let c = Config::from_toml("[pump]\naddress = 1\n").unwrap();
+        assert_eq!(c.pump.model, PumpModelCfg::Labq);
+        assert_eq!(c.pump.head, 1);
+        assert_eq!(c.pump.max_rpm(), 350.0);
+        assert_eq!(c.refill.pump_model, PumpModelCfg::Labq);
+        assert_eq!(c.refill.pump_head, 1);
+        assert_eq!(c.refill.max_rpm(), 350.0);
+    }
+
+    #[test]
+    fn model_defaults_and_ceilings() {
+        let mut c = Config::default();
+        c.pump.model = PumpModelCfg::Labv;
+        assert_eq!(c.pump.max_rpm(), 150.0);
+        c.pump.model = PumpModelCfg::Pds2;
+        assert_eq!(c.pump.max_rpm(), 600.0);
+        c.pump = pump_cfg(PumpModelCfg::Labq, 1);
+        c.pump.max_rpm = Some(400.0);
+        assert!(c.validate().is_err());
+        c.pump.model = PumpModelCfg::Labv;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn addresses_follow_the_model() {
+        let mut c = Config::default();
+        c.pump = pump_cfg(PumpModelCfg::Labq, 200);
+        assert!(c.validate().is_ok());
+        c.pump = pump_cfg(PumpModelCfg::Labv, 33);
+        assert!(c.validate().is_err());
+        c.pump = pump_cfg(PumpModelCfg::Pds2, 3);
+        c.pump.head = 9;
+        assert!(c.validate().is_err());
+        assert_eq!(c.sanitize().len(), 1);
+        assert_eq!(c.pump.model, PumpModelCfg::Labq);
+    }
+
+    #[test]
+    fn same_pump_rule() {
+        let t = |m: PumpModelCfg, a: u8, h: u8| PumpConfig { address: a, model: m, head: h, max_rpm: None }.target();
+        assert!(same_pump(&t(PumpModelCfg::Labq, 2, 1), &t(PumpModelCfg::Labq, 2, 1)));
+        assert!(same_pump(&t(PumpModelCfg::Labv, 2, 1), &t(PumpModelCfg::Labq, 2, 1)));
+        assert!(!same_pump(&t(PumpModelCfg::Pds2, 3, 1), &t(PumpModelCfg::Pds2, 3, 2)));
+        assert!(same_pump(&t(PumpModelCfg::Pds2, 3, 1), &t(PumpModelCfg::Pds2, 3, 1)));
+    }
+
+    #[test]
+    fn refill_speed_over_its_max_is_refused() {
+        let mut c = Config::default();
+        c.refill.pump_model = PumpModelCfg::Labv;
+        c.refill.speed_rpm = 300.0;
+        let e = c.validate().unwrap_err();
+        assert!(e.contains("300") && e.contains("150"), "{e}");
+        assert_eq!(c.sanitize().len(), 1);
+        assert_eq!(c.refill.pump_model, PumpModelCfg::Labq);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn target_never_panics_on_a_bad_head() {
+        let mut p = pump_cfg(PumpModelCfg::Pds2, 3);
+        p.head = 0;
+        assert_eq!(p.target().kind, PumpKind::PdsII { head: 1 });
     }
 
     #[test]
