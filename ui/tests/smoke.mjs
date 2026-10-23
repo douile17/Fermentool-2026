@@ -126,12 +126,19 @@ try {
     const tubeNeeded = await js(`!!document.querySelector('#nr-tube .trigger.need')`);
     if (!tubeNeeded) check('Pump and tube turns green with the direction', (await greens())[1] === 'G', await greens());
 
+    // pump models (2026-10-23): New run offers only the tubes calibrated on the feed pump's model
+    const calRows = await (await fetch(`${URL}/api/calibrations`)).json();
+    const feedModel = status.pump_model ?? 'labq';
+    const otherIds = (Array.isArray(calRows) ? calRows : []).filter((c) => (c.pump_model ?? 'labq') !== feedModel).map((c) => c.id);
     // the tube dropdown: opens on its button, searches, closes on Escape
     if (await js(`!!document.querySelector('#nr-tube .chg')`)) {
       await js(`document.querySelector('#nr-tube .chg').click()`);
       await sleep(400);
       check('the tube list opens on Change', await js(`!!document.querySelector('#nr-tube .pop')`));
       check('the tube search has the focus', (await js(`document.activeElement?.getAttribute('aria-label')`)) === 'Find a tube');
+      if (otherIds.length) {
+        check('the tube list holds no tube calibrated on another pump model', await js(`${JSON.stringify(otherIds)}.every((i) => !document.querySelector('#tube-opt-' + i))`));
+      }
       await js(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
       await sleep(300);
       check('Escape closes the tube list', await js(`!document.querySelector('#nr-tube .pop')`));
@@ -164,6 +171,7 @@ try {
       // its time scale is the experiment's (0, 6 h, 12 h…), never the time of day (17:00)
       // Settings open and first, the bottle table folded under it (2026-10-22)
       check('the run detail opens on Settings, the feed bottle folded below', await js(`(() => { const f = [...document.querySelectorAll('.modal.detail details.fold')]; const n = (d) => d.querySelector('.lbl')?.textContent.trim(); const si = f.findIndex((d) => n(d) === 'Settings'), bi = f.findIndex((d) => n(d) === 'Feed bottle'); return si >= 0 && f[si].open && (bi < 0 || (bi > si && !f[bi].open)); })()`));
+      check('the run detail Settings says its feed pump', await js(`/^(LabQ|LabV|PDS II, head \\d)$/.test([...document.querySelectorAll('.modal.detail details.fold dl dt')].find((t) => t.textContent.trim() === 'Feed pump')?.nextElementSibling?.textContent.trim() ?? '')`));
       check('the run detail charts count the experiment time, not the clock', await js(`(() => { const t = [...document.querySelectorAll('.modal.detail svg text')].map((e) => e.textContent.trim()); return t.some((x) => / (h|min)$/.test(x)) && !t.some((x) => /^(\\w{3} )?\\d{2}:\\d{2}$/.test(x)); })()`));
       check('its bottle table and journal count it too, no time of day', await js(`![...document.querySelectorAll('.modal.detail .t, .modal.detail .jr .tm')].some((e) => /\\d{1,2}:\\d{2}/.test(e.textContent))`));
       if (await js(`!!document.querySelector('.modal.detail .jr')`)) {
@@ -250,6 +258,10 @@ try {
   check('the calibration shows its four steps', (await js(`document.querySelectorAll('.steps .step').length`)) === 4);
   // "burst" is the code's word; the page says measurement (2026-10-20)
   check('the calibration says measurement, never burst', await js(`!/burst/i.test(document.querySelector('main')?.innerText ?? document.body.innerText)`));
+  // each calibration of the history says the pump model it was measured on
+  if (await js(`(() => { const b = document.querySelector('.hist-toggle'); if (b && b.getAttribute('aria-expanded') !== 'true') b.click(); return true; })()`) && (await sleep(400), await js(`!!document.querySelector('table.hist tbody tr')`))) {
+    check('a calibration row shows its pump model', await js(`[...document.querySelectorAll('table.hist tbody tr')].every((r) => /^(LabQ|LabV|PDS II)$/.test(r.querySelector('td.pm')?.textContent.trim() ?? ''))`));
+  }
   if (await js(`!!document.querySelector('.panel h3')`)) {
     // leaving with a calibration under way asks first; Stay keeps everything
     await click('.tab', 'Overview');

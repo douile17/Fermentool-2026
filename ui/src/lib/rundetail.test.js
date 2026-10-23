@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  alarmCount, atRun, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines,
+  alarmCount, atRun, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines, pumpLine,
   refillRows, regulationFigures, verdict, whenLine,
 } from './rundetail.js';
 
@@ -244,5 +244,17 @@ describe('blindLegend', () => {
     expect(blindLegend(3, 3)).toBe('Refill, not weighed');
     expect(blindLegend(8, 2)).toBe('Refill or bump, not weighed');
     expect(blindLegend(4, 0)).toBe('Not weighed');
+  });
+});
+
+describe('pumpLine', () => {
+  it('names the model, and the head on a PDS II', () => {
+    expect(pumpLine({ pump_model: 'labq' })).toBe('LabQ');
+    expect(pumpLine({ pump_model: 'labv', pump_head: 1 })).toBe('LabV');
+    expect(pumpLine({ pump_model: 'pds2', pump_head: 2 })).toBe('PDS II, head 2');
+  });
+  it('a run made before the models was a LabQ', () => {
+    expect(pumpLine({})).toBe('LabQ');
+    expect(pumpLine({ pump_model: null })).toBe('LabQ');
   });
 });

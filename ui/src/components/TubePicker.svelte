@@ -17,11 +17,12 @@
    *   lastUsed?: number | null,  // calibration of the last run on this pump
    *   allowNone?: boolean,       // the run can go without a calibration
    *   noneText?: string,
+   *   emptyText?: string,        // said when there is nothing to pick (default: none for this run)
    *   oncalibrate?: () => void,
    *   id?: string,
    * }}
    */
-  let { cals, value, onchange, lastUsed = null, allowNone = false, noneText = '', oncalibrate, id } = $props();
+  let { cals, value, onchange, lastUsed = null, allowNone = false, noneText = '', emptyText = '', oncalibrate, id } = $props();
 
   // Same limit as the calibration page: a spread past it is worth a look.
   const CV_WARN_PCT = 5;
@@ -252,7 +253,7 @@
           {/if}
         {:else}
           <div class="empty">
-            {q.trim() ? `No tube matches “${q.trim()}”.` : 'No tube calibrated for this run yet.'}
+            {q.trim() ? `No tube matches “${q.trim()}”.` : emptyText || 'No tube calibrated for this run yet.'}
             {#if oncalibrate}<button type="button" class="linkish" onclick={oncalibrate}>Calibrate a tube</button>{/if}
           </div>
         {/each}

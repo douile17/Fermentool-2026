@@ -4,6 +4,8 @@
   import { num, dur, vol, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { mlPerRpmOf, tubeRange, curveFit } from '../lib/tuberange.js';
   import { canStartRun } from '../lib/link.js';
+  import { forFeedPump } from '../lib/calibrations.js';
+  import { modelOf } from '../lib/pumps.js';
   import { radioKeys, rovingTab } from '../lib/radio.js';
   import { kg, refillAsked, refillOn, refillPlan, refillToChoose } from '../lib/refill.js';
   import Icon from '../components/Icon.svelte';
@@ -293,7 +295,7 @@
   // only seed the trim, so only with the trim on) and rpm ones: those drive
   // the pump in rpm, with or without a balance.
   const calMatches = $derived(
-    calibrations.filter(
+    forFeedPump(calibrations, app.status?.pump_model).filter(
       (c) =>
         !c.archived_at &&
         (f.control_var === 'rpm'
@@ -301,6 +303,11 @@
           : c.control_var === 'rpm' || (trimOn && c.control_var === 'ml_min')),
     ),
   );
+  // Calibrations exist, but none was measured on this feed pump's model.
+  const noneForModel = $derived(
+    calibrations.some((c) => !c.archived_at) && forFeedPump(calibrations, app.status?.pump_model).every((c) => c.archived_at),
+  );
+  const feedModelLabel = $derived(modelOf(app.status?.pump_model).label);
   const chosenCal = $derived(calMatches.find((c) => c.id === f.tubing_calibration_id) ?? null);
   // ml/min asked, rpm written: the pump's own head/tubing table is not used.
   const drivePerRpm = $derived(f.control_var === 'ml_min' ? mlPerRpmOf(chosenCal) : null);
@@ -339,8 +346,8 @@
   // How much feed the curve takes: its flow summed over time (trapezoids on
   // the preview's 200 points). An rpm curve needs the tube's ml per rpm.
   const mlPerRpm = $derived(mlPerRpmOf(chosenCal));
-  // What the tube delivers between 0.1 and 350 rpm, and whether the curve
-  // fits: the daemon refuses a peak past 350 rpm, this says it first.
+  // What the tube delivers between 0.1 rpm and the pump's max rpm, and
+  // whether the curve fits: the daemon refuses a peak past it, this says it first.
   const tubeFlow = $derived(tubeRange(mlPerRpm, pumpMaxRpm));
   const fit = $derived(
     drivePerRpm != null && !previewErr && preview.length
@@ -560,6 +567,7 @@
           <TubePicker cals={calMatches} value={f.tubing_calibration_id} lastUsed={lastUsedCal}
             onchange={(id) => { f.tubing_calibration_id = id; tubeTouched = true; }}
             allowNone={f.control_var === 'ml_min'}
+            emptyText={noneForModel ? `No tube calibrated on the ${feedModelLabel} yet: calibrate one in Tubing calibration.` : ''}
             noneText={trimOn ? "The pump's own ml/min, the regulation starts at ×1.00" : "The pump's own ml/min"}
             oncalibrate={() => (app.tab = 'calibration')} />
           {#if tubeFlow}
@@ -579,7 +587,7 @@
           {/if}
           {#if needsCalibration}
             <p class="k bad">
-              {calMatches.length ? 'Pick the tube you installed:' : `No ${unit} calibration recorded yet:`}
+              {calMatches.length ? 'Pick the tube you installed:' : noneForModel ? `No tube calibrated on the ${feedModelLabel} yet:` : `No ${unit} calibration recorded yet:`}
               the regulation cannot start in rpm without one.
               <button class="linkish" type="button" onclick={() => (app.tab = 'calibration')}>Calibrate this tube</button>
             </p>
