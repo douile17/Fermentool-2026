@@ -478,7 +478,7 @@ impl PumpConfig {
         build_target(self.address, self.model, self.head, self.max_rpm())
     }
 
-    fn problem(&self) -> Option<String> {
+    pub(crate) fn problem(&self) -> Option<String> {
         pump_problem("the feed pump's", self.address, self.model, self.head, self.max_rpm)
     }
 }

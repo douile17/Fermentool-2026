@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, Notify, RwLock};
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::serial::available_ports;
 
-use crate::config::{Config, PumpModelCfg};
+use crate::config::{Config, PumpModelCfg, SERIAL_BAUDS};
 use crate::control::{Command, ControlHandle, DaemonStatus};
 use crate::engine::{ErrDetail, RunConfig};
 use crate::store::{NewCalibration, RunKind, RunStatus, Store, StoreError, CALIBRATION_DRAFT_KEY};
@@ -1105,8 +1105,16 @@ async fn serial_reconnect(
     if let Some(r) = req.pump_max_rpm {
         cfg.pump.max_rpm = r;
     }
-    // Address per model, head, max rpm: refused before anything changes.
-    cfg.validate().map_err(ApiError::Bad)?;
+    // Only what a reconnect changes (the baud, the feed pump's address per
+    // model, head and max rpm), refused before anything changes. The rest
+    // of the config is PUT /api/config's business: a bad [notify] must not
+    // stop the pump from connecting.
+    if !SERIAL_BAUDS.contains(&cfg.serial.baud) {
+        return Err(ApiError::Bad(format!("the pump baud must be one of {SERIAL_BAUDS:?}")));
+    }
+    if let Some(p) = cfg.pump.problem() {
+        return Err(ApiError::Bad(p));
+    }
 
     // Swap first, a refused reconnect (e.g. a run is active) must not touch
     // `config.toml`, so the file always matches the live transport.
@@ -1776,6 +1784,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(res).await.to_string();
+        assert!(msg.contains("feed pump") && msg.contains("LabV"), "{msg}");
         assert_eq!(st.config.read().await.pump.address, 1);
 
         // Omitted fields keep their value.
@@ -1793,6 +1803,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reconnect_ignores_a_notify_section_that_would_not_save() {
+        let dir = std::env::temp_dir().join(format!("ft-reconnect-notify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut st = test_state();
+        st.config_path = Arc::new(dir.join("config.toml"));
+        st.config.write().await.notify.ntfy_server = "http://not-https".into();
+        assert!(st.config.read().await.validate().is_err(), "precondition");
+        let res = router(st)
+            .oneshot(post_json("/api/serial/reconnect", json!({ "path": "sim" })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

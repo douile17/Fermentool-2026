@@ -2983,8 +2983,27 @@ impl<T: Transport> Engine<T> {
         // `trim_c` only applies if this run opted in, same gate as
         // `tick`/`apply_setpoint`.
         let c = if run.gravimetric_trim { self.trim_c } else { 1.0 };
+        // The curve was clamped to the pump's max at start; a max lowered
+        // since (another pump, a corrected figure) must not refuse a crash
+        // resume: cap it again, as `start_run` does. An ml/min run driven in
+        // rpm needs nothing, `drive_rpm` caps at the pump's max.
+        let mut spec = run.curve.clone();
+        if run.control_var == ControlVar::Rpm && spec.clamp_max > self.feed.max_rpm {
+            spec.clamp_max = self.feed.max_rpm;
+            spec.clamp_min = spec.clamp_min.min(spec.clamp_max);
+            let _ = self.store.log_event(&NewEvent {
+                run_id: Some(run.id),
+                wall_time: now,
+                level: EventLevel::Warn,
+                kind: "max_rpm".into(),
+                detail: Some(format!(
+                    "the curve is capped at {} rpm, the feed pump's max now",
+                    self.feed.max_rpm
+                )),
+            });
+        }
         let target = quantize(
-            run.curve.value_at(Duration::from_secs_f64(elapsed_s)) * c,
+            spec.value_at(Duration::from_secs_f64(elapsed_s)) * c,
             drive_grid(run.control_var, self.drive_ml_per_rpm),
         );
 
@@ -3055,7 +3074,7 @@ impl<T: Transport> Engine<T> {
             responsible: run.responsible.clone(),
             curve_done: run.kind == RunKind::Dosing && elapsed_s >= run.duration_s as f64,
             started_at: run.started_at,
-            spec: run.curve,
+            spec,
             control_var: run.control_var,
             duration_s: run.duration_s,
             next_seq,
@@ -6442,6 +6461,45 @@ mod tests {
         e.start_run(linear_cfg(), t0()).unwrap();
         // Direction, speed, Start: the LabQ start sequence, nothing more.
         assert_eq!(e.pump.transport().transactions, 3);
+    }
+
+    fn labq_max(max_rpm: f64) -> PumpTarget {
+        PumpTarget { max_rpm, ..PumpTarget::labq(1) }
+    }
+
+    #[test]
+    fn a_max_lowered_since_the_crash_caps_the_resumed_rpm_run() {
+        let db = TempDb::new();
+        let id = {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let cfg = RunConfig { curve: CurveSpec::linear(300.0, 300.0, Duration::from_secs(3600)), ..linear_cfg() };
+            let id = a.start_run(cfg, t0()).unwrap();
+            a.tick(at(60)).unwrap();
+            id
+        };
+        let mut b = Engine::new(Pump::with_target(SimPump::new(1), labq_max(150.0)), db.store(), "test");
+        assert_eq!(b.resume(at(600), grace()).unwrap(), id);
+        assert!((b.pump.transport().speed_rpm() - 150.0).abs() < 1e-3);
+        let o = b.tick(at(601)).unwrap();
+        assert!(matches!(o, TickOutcome::Applied { written_ok: true, .. }), "{o:?}");
+        assert!((b.pump.transport().speed_rpm() - 150.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_max_lowered_since_the_crash_caps_a_resumed_driven_run() {
+        let db = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            let cal = seed_calibration(&a.store, ControlVar::Rpm, 50.0, 600.0);
+            // 2.4 ml/min per rpm: 600 ml/min is 250 rpm.
+            let spec = CurveSpec::linear(600.0, 600.0, Duration::from_secs(3600));
+            a.start_run(driven_cfg(cal, spec), t0()).unwrap();
+        }
+        let mut b = Engine::new(Pump::with_target(SimPump::new(1), labq_max(150.0)), db.store(), "test");
+        b.resume(at(600), grace()).unwrap();
+        assert!((b.pump.transport().speed_rpm() - 150.0).abs() < 1e-3);
+        let o = b.tick(at(601)).unwrap();
+        assert!(matches!(o, TickOutcome::Applied { written_ok: true, .. }), "{o:?}");
     }
 
     #[test]
