@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedCameBack, feedResponding, lineState, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump } from './pumps.js';
+import { feedCameBack, feedResponding, headOf, lineState, maxRpmSetting, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump } from './pumps.js';
 
 const up = { serial_ok: true, simulator: false, transport: 'COM8', pump_confirmed: true, write_fails: 0 };
 
@@ -113,5 +113,26 @@ describe('needsReconnect, pump model', () => {
     expect(needsReconnect(saved, { ...now, feedHead: 2 })).toBe(true);
     expect(needsReconnect(saved, { ...now, feedMaxRpm: 200 })).toBe(true);
     expect(needsReconnect(saved, { ...now, feedMaxRpm: '' })).toBe(false);
+  });
+});
+
+describe('maxRpmSetting', () => {
+  it('keeps the model default as null, so it follows the model', () => {
+    expect(maxRpmSetting('labq', 350)).toBe(null);
+    expect(maxRpmSetting('labv', '150')).toBe(null);
+    expect(maxRpmSetting('pds2', '')).toBe(null);
+    expect(maxRpmSetting('labq', null)).toBe(null);
+  });
+  it('keeps a speed typed by hand', () => {
+    expect(maxRpmSetting('labv', '120')).toBe(120);
+    expect(maxRpmSetting('pds2', 350)).toBe(350);
+  });
+});
+
+describe('headOf', () => {
+  it('drives a LabQ or a LabV on head 1, a PDS II on its chosen head', () => {
+    expect(headOf('labq', 4)).toBe(1);
+    expect(headOf('labv', 4)).toBe(1);
+    expect(headOf('pds2', '4')).toBe(4);
   });
 });

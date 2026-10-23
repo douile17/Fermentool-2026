@@ -203,6 +203,25 @@ try {
     (await click('.pumps .change', '')) &&
       (await sleep(300), await js(`!!document.querySelector('.pumps .more input') && [...document.querySelectorAll('.pumps .more button')].some((b) => b.textContent.includes('Test 3 s'))`)),
   );
+  // Pump models (2026-10-23, mockup v3): each row a photo and a LabQ / LabV /
+  // PDS II choice; the cable is fixed at 9600 baud 8E1, no baud to pick.
+  check('each pump has its photo and a LabQ, LabV, PDS II choice', await js(`(() => { const it = [...document.querySelectorAll('.pumps .item')]; return it.length === 2 && it.every((i) => { const g = i.querySelector('[role=radiogroup][aria-label$="pump model"]'); const r = g ? [...g.querySelectorAll('[role=radio]')].map((b) => b.textContent.trim()) : []; return !!i.querySelector('.pic img') && r.join(',') === 'LabQ,LabV,PDS II'; }); })()`));
+  check('the cable says 9600 baud, no baud to pick', await js(`/9600 baud/.test(document.querySelector('.conn .bus')?.textContent ?? '') && ![...document.querySelectorAll('.settings-pane select')].some((s) => /baud/i.test(s.getAttribute('aria-label') ?? '') || [...s.options].some((o) => /baud/i.test(o.textContent)))`));
+  // PDS II on the refill row shows its Head; then left without Save: the saved model comes back
+  const refillModel = `[...document.querySelectorAll('.pumps [aria-label="Refill pump model"] [role=radio]')]`;
+  const savedRefill = await js(`${refillModel}.find((b) => b.getAttribute('aria-checked') === 'true')?.textContent.trim()`);
+  if (await js(`${refillModel}.find((b) => b.textContent.trim() === 'PDS II')?.disabled ?? true`)) {
+    console.log('skip  the refill pump model: locked while a run refills');
+  } else {
+    await js(`${refillModel}.find((b) => b.textContent.trim() === 'PDS II').click()`);
+    await sleep(300);
+    check('PDS II on the refill pump shows a Head field and a Head badge', await js(`(() => { const i = document.querySelectorAll('.pumps .item')[1]; return !!i && !!i.querySelector('label.head select') && /^Head \\d$/.test(i.querySelector('.pic .hd')?.textContent.trim() ?? ''); })()`));
+    await click('.side button', 'Display');
+    await sleep(600);
+    await click('.side button', 'Pumps');
+    await sleep(1200);
+    check('left without Save, the refill pump keeps its saved model', (await js(`${refillModel}.find((b) => b.getAttribute('aria-checked') === 'true')?.textContent.trim()`)) === savedRefill, savedRefill);
+  }
   check('no Refill pump entry left in the Settings menu', await js(`![...document.querySelectorAll('.side button')].some((b) => b.textContent.trim() === 'Refill pump')`));
 
   // --- the other sections, looked at only (UX audit, 2026-10-22)

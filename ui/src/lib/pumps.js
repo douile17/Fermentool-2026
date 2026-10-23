@@ -75,6 +75,18 @@ export function pumpTone({ up, responding }) {
 /** The feed pump answers when the cable is up and its writes get through. */
 export const feedResponding = (s) => (lineUp(s) ? s.pump_confirmed !== false && (s.write_fails ?? 0) < 3 : null);
 
+/** A max rpm field as config.toml keeps it: null (the model's default,
+ *  which follows the model) when empty or equal to that default, else the
+ *  number typed. */
+export function maxRpmSetting(model, value) {
+  if (value == null || value === '') return null;
+  const r = Number(value);
+  return r === modelOf(model).maxRpm ? null : r;
+}
+
+/** The head a pump is driven on: chosen on a PDS II, 1 for the others. */
+export const headOf = (model, head) => (modelOf(model).id === 'pds2' ? Number(head) : 1);
+
 const maxRpmKey = (v) => (v == null || v === '' ? null : Number(v));
 
 /** Whether Save must reconnect the cable: its port, baud or the feed
