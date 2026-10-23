@@ -740,11 +740,19 @@ pub struct SimPump {
     pub frozen_readback: Option<f32>,
     /// Number of transactions seen (successful or dropped).
     pub transactions: usize,
+    /// When set, the pump answers like that model: exception 02 for a register
+    /// the model does not document, exception 03 for a speed / flow write while
+    /// its mode register is not [`TRANSFERRING`].
+    pub strict: Option<PumpModel>,
+    /// PDS II heads (1..=8) in logical operation: they do not answer at all.
+    pub logical_heads: std::collections::BTreeSet<u8>,
 }
 
 impl SimPump {
     pub fn new(address: u8) -> Self {
         Self {
+            strict: None,
+            logical_heads: std::collections::BTreeSet::new(),
             address,
             regs: std::collections::BTreeMap::new(),
             drop_next: 0,
@@ -766,6 +774,18 @@ impl SimPump {
     /// A speed or flow register of any map (LabQ / LabV 1002, 1004; PDS II n030, n032).
     fn is_setpoint_reg(reg: u16) -> bool {
         matches!(reg % 1000, 2 | 4 | 30 | 32)
+    }
+
+    /// Whether `model` documents holding register `r` (a strict pump answers
+    /// exception 02 for the others).
+    fn documented(model: PumpModel, r: u16) -> bool {
+        match model {
+            PumpModel::LabQ => (1000..=1009).contains(&r),
+            PumpModel::LabV => matches!(r, 1000..=1005 | 1007..=1010 | 1015..=1016 | 1018..=1023),
+            PumpModel::PdsII => {
+                r == 10 || ((1000..=8999).contains(&r) && matches!(r % 1000, 0..=35 | 100..=107))
+            }
+        }
     }
 
     /// Any holding register (0 if never written).
@@ -845,6 +865,36 @@ impl Transport for SimPump {
         }
         if body.len() < 6 {
             return Err(TransportError::Timeout);
+        }
+
+        if let Some(model) = self.strict {
+            let first = u16::from_be_bytes([body[2], body[3]]);
+            let qty = match func {
+                0x06 => 1,
+                _ => u16::from_be_bytes([body[4], body[5]]).max(1),
+            };
+            let last = first.saturating_add(qty - 1);
+            if model == PumpModel::PdsII && matches!(func, 0x03 | 0x06 | 0x10) {
+                let head = (first / 1000) as u8;
+                if self.logical_heads.contains(&head) {
+                    return Err(TransportError::Timeout);
+                }
+            }
+            if matches!(func, 0x03 | 0x06 | 0x10)
+                && !(first..=last).all(|r| Self::documented(model, r))
+            {
+                return Ok(with_crc(vec![body[0], func | 0x80, 0x02]));
+            }
+            if matches!(func, 0x06 | 0x10) && Self::is_setpoint_reg(first) {
+                let mode_reg = match model {
+                    PumpModel::LabQ => None,
+                    PumpModel::LabV => Some(1020),
+                    PumpModel::PdsII => Some(first / 1000 * 1000 + 5),
+                };
+                if mode_reg.is_some_and(|m| self.get(m) != TRANSFERRING) {
+                    return Ok(with_crc(vec![body[0], func | 0x80, 0x03]));
+                }
+            }
         }
 
         match func {
@@ -1466,6 +1516,129 @@ mod tests {
         p.with_target_of(other, |p| p.start()).unwrap();
         assert_eq!(p.target(), own);
         assert_eq!(p.transport().get(2).unwrap().reg(1008), 1);
+    }
+
+    #[test]
+    fn a_strict_labv_refuses_the_labq_start_register() {
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::LabV);
+        let mut p = Pump::new(sim, 1); // the LabQ map on a LabV: the anti-goal
+        assert!(matches!(
+            p.start(),
+            Err(PumpError::Pdu(PduError::Exception(0x02)))
+        ));
+        assert_eq!(p.transport().reg(1008), 0);
+    }
+
+    #[test]
+    fn a_strict_pds_refuses_speed_outside_transferring() {
+        let kind = PumpKind::PdsII { head: 1 };
+        let target = PumpTarget { address: 1, kind, max_rpm: 600.0 };
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::PdsII);
+        sim.set_reg(1005, 1);
+        let mut p = Pump::with_target(sim, target);
+        assert!(matches!(
+            p.set_speed_rpm(50.0),
+            Err(PumpError::Pdu(PduError::Exception(0x03)))
+        ));
+        p.ensure_transferring().unwrap();
+        p.set_speed_rpm(50.0).unwrap();
+        assert!((p.read_speed_rpm().unwrap() - 50.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_strict_labv_refuses_speed_outside_transferring_and_undocumented_registers() {
+        let target = PumpTarget { address: 1, kind: PumpKind::LabV, max_rpm: 150.0 };
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::LabV);
+        sim.set_reg(1020, 2);
+        let mut p = Pump::with_target(sim, target);
+        assert!(matches!(
+            p.set_speed_rpm(50.0),
+            Err(PumpError::Pdu(PduError::Exception(0x03)))
+        ));
+        p.ensure_transferring().unwrap();
+        p.set_speed_rpm(50.0).unwrap();
+        p.start().unwrap();
+        // a PDS II register on a LabV, and a LabV gap register
+        let bad = frame::build_write_single(1, 1006, 1);
+        assert_eq!(
+            frame::parse_write_single_response(
+                &p.transport_mut().transaction(&bad).unwrap(),
+                1,
+                1006,
+                1
+            ),
+            Err(PduError::Exception(0x02))
+        );
+    }
+
+    #[test]
+    fn a_strict_labq_documents_only_1000_to_1009() {
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::LabQ);
+        let mut p = Pump::new(sim, 1);
+        p.start().unwrap();
+        p.set_speed_rpm(10.0).unwrap();
+        let bad = frame::build_write_single(1, 1010, 1);
+        assert_eq!(
+            frame::parse_write_single_response(
+                &p.transport_mut().transaction(&bad).unwrap(),
+                1,
+                1010,
+                1
+            ),
+            Err(PduError::Exception(0x02))
+        );
+    }
+
+    #[test]
+    fn a_pds_head_in_logical_operation_is_silent() {
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::PdsII);
+        sim.logical_heads.insert(2);
+        let mut p = Pump::with_target(
+            sim,
+            PumpTarget { address: 1, kind: PumpKind::PdsII { head: 2 }, max_rpm: 600.0 },
+        );
+        assert!(matches!(
+            p.read_speed_rpm(),
+            Err(PumpError::Transport(TransportError::Timeout))
+        ));
+        let target1 = PumpTarget { address: 1, kind: PumpKind::PdsII { head: 1 }, max_rpm: 600.0 };
+        p.with_target_of(target1, |p| p.read_speed_rpm()).unwrap();
+    }
+
+    /// Records every request and answers with a valid echo / ack.
+    struct Recorder {
+        sent: Vec<Vec<u8>>,
+    }
+
+    impl Transport for Recorder {
+        fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+            self.sent.push(request.to_vec());
+            Ok(match request[1] {
+                0x10 => with_crc(request[..6].to_vec()),
+                _ => request.to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn labq_frames_byte_exact() {
+        let mut p = Pump::new(Recorder { sent: Vec::new() }, 1);
+        p.start().unwrap();
+        p.set_speed_rpm(58.8).unwrap();
+        p.set_direction(true).unwrap();
+        assert_eq!(
+            p.transport().sent,
+            vec![
+                vec![0x01, 0x06, 0x03, 0xEE, 0x00, 0x01, 0x28, 0x7B],
+                vec![0x01, 0x10, 0x03, 0xEA, 0x00, 0x02, 0x04, 0x42, 0x6B, 0x33, 0x33, 0x58, 0x29],
+                vec![0x01, 0x06, 0x03, 0xEF, 0x00, 0x01, 0x79, 0xBB],
+            ]
+        );
     }
 
     #[test]
