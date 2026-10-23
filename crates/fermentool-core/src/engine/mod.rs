@@ -85,6 +85,9 @@ pub enum EngineError {
     /// The feed pump (a LabV or a PDS II head) could not be put in
     /// transferring mode, the only one where it takes a speed.
     PumpMode(PumpKind, PumpError),
+    /// The chosen tubing calibration was measured on another pump model
+    /// (stored tokens: `labq`, `labv`, `pds2`).
+    CalibrationOtherPump { cal_model: String, pump_model: String },
 }
 
 /// Structured error for the HTTP API: a one-line `message` (the [`Display`] of
@@ -133,6 +136,12 @@ impl std::fmt::Display for EngineError {
                 "the {} did not take transferring mode ({e})",
                 pump_name(*kind)
             ),
+            EngineError::CalibrationOtherPump { cal_model, pump_model } => write!(
+                f,
+                "this tube was calibrated on a {}, the feed pump is a {}",
+                model_label(cal_model),
+                model_label(pump_model)
+            ),
             EngineError::PumpRejectedSetpoint {
                 code,
                 control_var,
@@ -168,6 +177,7 @@ impl EngineError {
             EngineError::GravimetricTrimNeedsCalibration => "trim_needs_calibration",
             EngineError::RefillPumpSilent { .. } => "refill_pump_silent",
             EngineError::PumpMode(..) => "pump_mode",
+            EngineError::CalibrationOtherPump { .. } => "calibration_other_pump",
         }
     }
 
@@ -187,6 +197,14 @@ impl EngineError {
                         "Is head {head} set to independent operation, and the controller on its main screen?"
                     )),
                 };
+            }
+            EngineError::CalibrationOtherPump { pump_model, .. } => {
+                return Some(format!(
+                    "A calibration in ml per rpm is only true on the pump head it was measured on. \
+                     Calibrate this tube on the {} (Tubing calibration), or set the feed pump back \
+                     in Settings > Pumps.",
+                    model_label(pump_model)
+                ));
             }
             EngineError::PumpRejectedSetpoint { control_var, .. } => match control_var {
                 ControlVar::MlMin => {
@@ -252,6 +270,12 @@ impl EngineError {
 }
 
 impl std::error::Error for EngineError {}
+
+/// A stored model token as the operator knows it ("labv" is the LabV); an
+/// unknown token is shown as it is.
+fn model_label(token: &str) -> String {
+    fermentool_modbus::PumpModel::parse(token).map_or_else(|| token.to_string(), |m| m.label().to_string())
+}
 
 impl From<PumpError> for EngineError {
     fn from(e: PumpError) -> Self {
@@ -1458,6 +1482,14 @@ impl<T: Transport> Engine<T> {
                         "tubing calibration {cal_id} is archived, restore it first"
                     )));
                 }
+                // ml per rpm is a property of the head it was measured on.
+                let feed_model = self.feed.kind.model();
+                if cal.pump_model != feed_model.as_str() {
+                    return Err(EngineError::CalibrationOtherPump {
+                        cal_model: cal.pump_model.clone(),
+                        pump_model: feed_model.as_str().to_string(),
+                    });
+                }
                 let drives_in_rpm = cfg.control_var == ControlVar::MlMin && cal.control_var == ControlVar::Rpm;
                 if cal.control_var != cfg.control_var && !drives_in_rpm {
                     return Err(EngineError::Config(format!(
@@ -1569,6 +1601,8 @@ impl<T: Transport> Engine<T> {
             density_g_per_ml: cfg.gravimetric_trim.then_some(self.scale_density_g_per_ml),
             auto_refill: cfg.auto_refill,
             refill_draw_g: cfg.auto_refill.then_some(cfg.refill_draw_g).flatten(),
+            pump_model: self.feed.kind.model().as_str().to_string(),
+            pump_head: self.feed.kind.head(),
         }) {
             Ok(id) => id,
             Err(e) => {
@@ -4142,6 +4176,16 @@ mod tests {
         setpoint: f64,
         weight_g: f64,
     ) -> i64 {
+        seed_calibration_on(store, "labq", control_var, setpoint, weight_g)
+    }
+
+    fn seed_calibration_on(
+        store: &Store,
+        pump_model: &str,
+        control_var: ControlVar,
+        setpoint: f64,
+        weight_g: f64,
+    ) -> i64 {
         let mut runs = [0; 3];
         for (i, run) in runs.iter_mut().enumerate() {
             let started = at(-3600 + 600 * i as i64);
@@ -4162,6 +4206,8 @@ mod tests {
                     density_g_per_ml: None,
                     auto_refill: false,
                     refill_draw_g: None,
+                    pump_model: pump_model.into(),
+                    pump_head: None,
                 })
                 .unwrap();
             store
@@ -4183,6 +4229,7 @@ mod tests {
                 weights_g: [weight_g; 3],
                 operator: None,
                 note: None,
+                pump_model: pump_model.into(),
             })
             .unwrap()
     }
@@ -6379,6 +6426,46 @@ mod tests {
     }
 
     #[test]
+    fn calibration_of_another_model_is_refused() {
+        let cfg_for = |cal| RunConfig {
+            control_var: ControlVar::Rpm,
+            tubing_calibration_id: Some(cal),
+            curve: CurveSpec::linear(50.0, 50.0, Duration::from_secs(3600)),
+            ..linear_cfg()
+        };
+        // Measured on a LabQ, the feed pump is a LabV: refused, nothing started.
+        let mut e = engine_on(SimPump::new(1), labv_target(150.0), Store::open_in_memory().unwrap());
+        let cal = seed_calibration_on(&e.store, "labq", ControlVar::Rpm, 50.0, 600.0);
+        let err = e.start_run(cfg_for(cal), t0()).unwrap_err();
+        assert!(matches!(err, EngineError::CalibrationOtherPump { .. }), "{err:?}");
+        assert_eq!(err.to_string(), "this tube was calibrated on a LabQ, the feed pump is a LabV");
+        let d = err.detail();
+        assert_eq!(d.code, "calibration_other_pump");
+        assert!(d.hint.unwrap_or_default().contains("Calibrate this tube on the LabV"));
+        assert!(e.status().active.is_none());
+        assert_eq!(e.store().list_runs(10).unwrap().len(), 3, "only the seeded bursts");
+
+        // Same calibration, a LabQ feed pump: accepted.
+        let mut q = engine();
+        let cal = seed_calibration_on(&q.store, "labq", ControlVar::Rpm, 50.0, 600.0);
+        assert!(q.start_run(cfg_for(cal), t0()).is_ok());
+    }
+
+    #[test]
+    fn a_run_records_its_feed_pump() {
+        let mut e = engine_on(SimPump::new(1), pds_target(2), Store::open_in_memory().unwrap());
+        let id = e.start_run(linear_cfg(), t0()).unwrap();
+        let row = e.store.run(id).unwrap().unwrap();
+        assert_eq!((row.pump_model.as_str(), row.pump_head), ("pds2", Some(2)));
+        e.stop_run(at(10)).unwrap();
+
+        let mut q = engine();
+        let id = q.start_run(linear_cfg(), t0()).unwrap();
+        let row = q.store.run(id).unwrap().unwrap();
+        assert_eq!((row.pump_model.as_str(), row.pump_head), ("labq", None));
+    }
+
+    #[test]
     fn a_curve_over_the_pump_max_is_clamped_or_refused() {
         let mut e = engine_on(SimPump::new(1), labv_target(150.0), Store::open_in_memory().unwrap());
         let cfg = RunConfig { curve: CurveSpec::linear(0.0, 200.0, Duration::from_secs(3600)), ..linear_cfg() };
@@ -6388,7 +6475,7 @@ mod tests {
         e.stop_run(at(10)).unwrap();
 
         // 2.4 ml/min per rpm: 150 rpm deliver 360 ml/min, the curve asks 500.
-        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        let cal = seed_calibration_on(&e.store, "labv", ControlVar::Rpm, 50.0, 600.0);
         let spec = CurveSpec::linear(100.0, 500.0, Duration::from_secs(3600));
         let err = e.start_run(driven_cfg(cal, spec), at(20)).unwrap_err();
         assert!(

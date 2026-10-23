@@ -747,8 +747,11 @@ async fn list_calibrations(
 /// number is recomputed server-side from the runs' own clocks.
 async fn create_calibration(
     State(s): State<AppState>,
-    Json(cal): Json<NewCalibration>,
+    Json(mut cal): Json<NewCalibration>,
 ) -> ApiResult<Response> {
+    // A calibration belongs to the feed pump it is made on: the live
+    // configuration says which, whatever the body claims.
+    cal.pump_model = s.config.read().await.pump.model.model().as_str().to_string();
     let row = s
         .db
         .call(move |db| {
@@ -1973,6 +1976,8 @@ mod tests {
                     density_g_per_ml: None,
                     auto_refill: false,
                     refill_draw_g: None,
+                    pump_model: "labq".into(),
+                    pump_head: None,
                 })
                 .unwrap();
             store
@@ -2056,6 +2061,21 @@ mod tests {
         let list = body_json(res).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!(list[0]["id"].as_i64(), Some(id));
+    }
+
+    #[tokio::test]
+    async fn a_calibration_takes_the_configured_feed_pump_model() {
+        let (state, runs) = state_with_three_bursts();
+        state.config.write().await.pump.model = PumpModelCfg::Labv;
+        let app = router(state);
+        // The body claims another model: ignored.
+        let mut body = calibration_body(runs, [50.0; 3]);
+        body["pump_model"] = json!("labq");
+        let res = app.clone().oneshot(post_json("/api/calibrations", body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(body_json(res).await["pump_model"], "labv");
+        let list = body_json(app.oneshot(get("/api/calibrations")).await.unwrap()).await;
+        assert_eq!(list[0]["pump_model"], "labv");
     }
 
     #[tokio::test]

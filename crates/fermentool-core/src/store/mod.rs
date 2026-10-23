@@ -71,6 +71,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         sql: include_str!("migrations/0013_run_refill_draw.sql"),
     },
+    Migration {
+        version: 14,
+        sql: include_str!("migrations/0014_pump_model.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -223,6 +227,10 @@ pub struct NewRun {
     pub auto_refill: bool,
     /// The automatic refill: what the bottle gives before a refill, g.
     pub refill_draw_g: Option<f64>,
+    /// The feed pump's model token (`labq`, `labv`, `pds2`).
+    pub pump_model: String,
+    /// The PDS II head the run drove (1..=4); `None` on a LabQ or a LabV.
+    pub pump_head: Option<u8>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -247,6 +255,8 @@ pub struct RunRow {
     pub density_g_per_ml: Option<f64>,
     pub auto_refill: bool,
     pub refill_draw_g: Option<f64>,
+    pub pump_model: String,
+    pub pump_head: Option<u8>,
 }
 
 /// A tubing calibration to record: three hand-weighed bursts of one tube at
@@ -276,6 +286,10 @@ pub struct NewCalibration {
     pub weights_g: [f64; 3],
     pub operator: Option<String>,
     pub note: Option<String>,
+    /// The model of the feed pump the three measurements ran on. Set by the
+    /// API from the live configuration, never trusted from the body.
+    #[serde(default)]
+    pub pump_model: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -301,6 +315,8 @@ pub struct CalibrationRow {
     pub note: Option<String>,
     /// Set when the tube is retired: hidden from New run, kept for history.
     pub archived_at: Option<Timestamp>,
+    /// The pump model this tube was calibrated on (`labq`, `labv`, `pds2`).
+    pub pump_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -366,12 +382,13 @@ pub struct Store {
 
 const RUN_COLS: &str = "id, name, created_at, started_at, ended_at, status, control_var, \
      direction, duration_s, tick_interval_s, curve_params, pump_addr, app_version, \
-     gravimetric_trim, kind, tubing_calibration_id, responsible, density_g_per_ml, auto_refill, refill_draw_g";
+     gravimetric_trim, kind, tubing_calibration_id, responsible, density_g_per_ml, auto_refill, refill_draw_g, \
+     pump_model, pump_head";
 
 const CAL_COLS: &str = "id, created_at, tubing_lot_id, control_var, setpoint, \
      density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g, weight_3_g, \
      measured_1_ml_min, measured_2_ml_min, measured_3_ml_min, mean_measured_ml_min, cv_pct, \
-     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref, archived_at, product_ref, brand";
+     c0, operator, note, inner_diameter_mm, outer_diameter_mm, internal_ref, archived_at, product_ref, brand, pump_model";
 
 const TICK_COLS: &str =
     "id, run_id, seq, wall_time, elapsed_s, target, written_ok, readback, note, weight_g, delivered_g";
@@ -467,9 +484,9 @@ impl Store {
                (name, created_at, started_at, status, control_var, direction,
                 duration_s, tick_interval_s, curve_kind, curve_mode, curve_params,
                 pump_addr, app_version, gravimetric_trim, kind, tubing_calibration_id, responsible,
-                density_g_per_ml, auto_refill, refill_draw_g)
+                density_g_per_ml, auto_refill, refill_draw_g, pump_model, pump_head)
              VALUES
-               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+               (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 r.name,
                 created,
@@ -490,6 +507,8 @@ impl Store {
                 r.density_g_per_ml,
                 r.auto_refill as i64,
                 r.refill_draw_g,
+                r.pump_model,
+                r.pump_head,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -670,9 +689,10 @@ impl Store {
                 weight_1_g, weight_2_g, weight_3_g,
                 measured_1_ml_min, measured_2_ml_min, measured_3_ml_min,
                 mean_measured_ml_min, cv_pct, c0, operator, note,
-                inner_diameter_mm, outer_diameter_mm, internal_ref, product_ref, brand)
+                inner_diameter_mm, outer_diameter_mm, internal_ref, product_ref, brand,
+                pump_model)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 Timestamp::now().to_string(),
                 c.tubing_lot_id.trim(),
@@ -698,6 +718,7 @@ impl Store {
                 c.internal_ref.as_deref().map(str::trim).filter(|r| !r.is_empty()),
                 c.product_ref.as_deref().map(str::trim).filter(|r| !r.is_empty()),
                 c.brand.as_deref().map(str::trim).filter(|b| !b.is_empty()),
+                c.pump_model,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -1056,6 +1077,8 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         density_g_per_ml: row.get(17)?,
         auto_refill: row.get::<_, i64>(18)? != 0,
         refill_draw_g: row.get(19)?,
+        pump_model: row.get(20)?,
+        pump_head: row.get::<_, Option<i64>>(21)?.map(|h| h as u8),
     })
 }
 
@@ -1085,6 +1108,7 @@ fn row_to_calibration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalibrationRo
         operator: row.get("operator")?,
         note: row.get("note")?,
         archived_at: row.get::<_, Option<String>>("archived_at")?.map(parse_ts).transpose()?,
+        pump_model: row.get("pump_model")?,
     })
 }
 
@@ -1142,6 +1166,8 @@ mod tests {
             density_g_per_ml: None,
             auto_refill: false,
             refill_draw_g: None,
+            pump_model: "labq".into(),
+            pump_head: None,
         }
     }
 
@@ -1162,7 +1188,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 13);
+        assert_eq!(v, 14);
     }
 
     #[test]
@@ -1174,7 +1200,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 13);
+        assert_eq!(v, 14);
     }
 
     #[test]
@@ -1375,6 +1401,7 @@ mod tests {
             weights_g,
             operator: Some("AZ".into()),
             note: None,
+            pump_model: "labq".into(),
         }
     }
 
@@ -1384,6 +1411,41 @@ mod tests {
             calibration_run(s, 10.0, "2026-09-01T09:10:00Z", 5),
             calibration_run(s, 10.0, "2026-09-01T09:20:00Z", 5),
         ]
+    }
+
+    #[test]
+    fn old_calibrations_are_labq() {
+        // A real older database: the schema as of migration 13, one
+        // calibration row written then (no pump_model column), then opened.
+        let conn = Connection::open_in_memory().unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version <= 13) {
+            conn.execute_batch(m.sql).unwrap();
+        }
+        // The three runs the row names are not needed to read it back.
+        conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA user_version = 13;").unwrap();
+        conn.execute(
+            "INSERT INTO tubing_calibrations
+               (created_at, tubing_lot_id, inner_diameter_mm, outer_diameter_mm, control_var,
+                setpoint, density_g_per_ml, run_1_id, run_2_id, run_3_id, weight_1_g, weight_2_g,
+                weight_3_g, measured_1_ml_min, measured_2_ml_min, measured_3_ml_min,
+                mean_measured_ml_min, cv_pct, c0, product_ref, brand)
+             VALUES ('2026-09-01T09:00:00Z', 'OLD', 1.6, 4.8, 'ml_min', 10.0, 1.0, 1, 2, 3,
+                     50.0, 50.0, 50.0, 10.0, 10.0, 10.0, 10.0, 0.0, 1.0, 'REF', 'BRAND')",
+            [],
+        )
+        .unwrap();
+        let s = Store::from_connection(conn).unwrap();
+        assert_eq!(s.calibration(1).unwrap().unwrap().pump_model, "labq");
+    }
+
+    #[test]
+    fn a_calibration_keeps_the_pump_model_it_was_given() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        let id = s
+            .insert_calibration(&NewCalibration { pump_model: "labv".into(), ..new_calibration(runs, [50.0; 3]) })
+            .unwrap();
+        assert_eq!(s.calibration(id).unwrap().unwrap().pump_model, "labv");
     }
 
     #[test]
