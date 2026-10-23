@@ -117,7 +117,7 @@ pub enum Command {
     /// asking, once the pump answers. Sent at boot and on each config save.
     SetAutoResume(bool, oneshot::Sender<()>),
     /// Apply a `[refill]` section saved from Settings to the live engine.
-    SetRefill(RefillConfig, oneshot::Sender<()>),
+    SetRefill(RefillConfig, oneshot::Sender<Result<(), String>>),
     /// Settings' Test: run the refill pump 3 s, then stop it.
     RefillTest(oneshot::Sender<Result<(), String>>),
     /// Settings > Pumps: does the refill pump answer (a read, never a Start).
@@ -981,8 +981,7 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             true
         }
         Command::SetRefill(cfg, reply) => {
-            engine.set_refill(cfg, Instant::now());
-            let _ = reply.send(());
+            let _ = reply.send(engine.set_refill(cfg, Instant::now()));
             true
         }
         Command::RefillPing(reply) => {

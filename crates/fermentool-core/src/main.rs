@@ -161,7 +161,9 @@ fn build_engine(cfg: &Config, db: &Path) -> anyhow::Result<Engine<WatchdogTransp
     engine.set_serial(cfg.serial.clone(), cfg.pump.target());
     // Only schedules: the refill pump's first Stop is the control loop's
     // first frame on the line, before any resume.
-    engine.set_refill(cfg.refill.clone(), std::time::Instant::now());
+    if let Err(e) = engine.set_refill(cfg.refill.clone(), std::time::Instant::now()) {
+        tracing::warn!("[refill] not applied: {e}");
+    }
     engine.refill_after_boot(std::time::Instant::now());
     // No pump I/O on the startup path, a blocking MODBUS probe here would delay
     // the HTTP server (and the auto-opened browser). `set_serial` already flags

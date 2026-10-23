@@ -1441,7 +1441,7 @@ impl<T: Transport> Engine<T> {
             let plan = self.refill_plan_check(cfg.refill_draw_g)?;
             // Before the feed pump moves: a refill pump that does not answer
             // refuses the run.
-            self.refill_before_run(cfg.pump_addr, std::time::Instant::now())?;
+            self.refill_before_run(std::time::Instant::now())?;
             Some(plan)
         } else {
             None

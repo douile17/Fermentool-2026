@@ -384,6 +384,15 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
             "the settings were changed meanwhile (another page, or Connect): reload them and save again".into(),
         ));
     }
+    // `[refill]` (Settings, Refill) is applied now, before saving: a Stop
+    // goes to a newly enabled or moved refill pump at once, and a model or
+    // head changed while a run drives it is refused (409), so the file never
+    // runs ahead of the engine. First, as its refusal changes nothing.
+    s.control
+        .call(|reply| Command::SetRefill(new.refill.clone(), reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
     // A changed `[scale]` is applied live (Settings, Balance section), before
     // saving: a refusal (trimmed run active) must not leave the file ahead of
     // the engine.
@@ -420,12 +429,6 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
     let _ = s
         .control
         .call(|reply| Command::SetAutoResume(!new.resume.prompt, reply))
-        .await;
-    // And `[refill]` (Settings, Refill): applied now, a Stop goes to a newly
-    // enabled or moved refill pump at once.
-    let _ = s
-        .control
-        .call(|reply| Command::SetRefill(new.refill.clone(), reply))
         .await;
     Ok(Json(json!({
         "saved": true,
