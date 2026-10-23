@@ -1,20 +1,29 @@
 // The refill pump: a second LabQ on the feed pump's cable, at its own MODBUS
 // address, that tops the weighed bottle up from the reservoir. Settings
 // (Refill pump) and the sidebar both describe it through these.
+import { modelOf, samePump } from './pumps.js';
 
 export const REFILL_RPM_MIN = 0.1;
-export const REFILL_RPM_MAX = 350;
 
 /** What the daemon would refuse in `[refill]`, as a sentence; null if fine.
- *  Mirrors `RefillConfig::problem` (config.rs). */
-export function refillProblem({ address, feedAddress, speedRpm }) {
+ *  `feed` is the feed pump, `{ address, model, head }`; `maxRpm` the refill
+ *  pump's own top speed. Mirrors `RefillConfig::problem` (config.rs) and the
+ *  run-time clash check. */
+export function refillProblem({ address, model = 'labq', head = 1, speedRpm, maxRpm, feed }) {
+  const m = modelOf(model);
   const a = Number(address);
-  if (!Number.isInteger(a) || a < 1 || a > 247) return "The refill pump's MODBUS address must be 1 to 247.";
-  if (a === Number(feedAddress))
-    return `Address ${a} is the feed pump's: set another address in the refill pump's own menu, then here.`;
+  if (!Number.isInteger(a) || a < 1 || a > m.maxAddress) return `The refill pump's MODBUS address must be 1 to ${m.maxAddress}.`;
+  if (m.id === 'pds2') {
+    const h = Number(head);
+    if (!Number.isInteger(h) || h < 1 || h > 8) return "The refill pump's PDS II head must be 1 to 8.";
+  }
+  if (feed && samePump({ address: a, model: m.id, head }, feed))
+    return m.id === 'pds2' && feed.model === 'pds2'
+      ? `Head ${Number(head)} of address ${a} is the feed pump's: pick another head.`
+      : `Address ${a} is the feed pump's: set another address in the refill pump's own menu, then here.`;
+  const max = maxRpm ?? m.maxRpm;
   const s = Number(speedRpm);
-  if (!(s >= REFILL_RPM_MIN && s <= REFILL_RPM_MAX))
-    return `The speed must be between ${REFILL_RPM_MIN} and ${REFILL_RPM_MAX} rpm.`;
+  if (!(s >= REFILL_RPM_MIN && s <= max)) return `The speed must be between ${REFILL_RPM_MIN} and ${max} rpm (the refill pump's max).`;
   return null;
 }
 

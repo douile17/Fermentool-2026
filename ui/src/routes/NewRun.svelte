@@ -177,7 +177,8 @@
   }
 
   const unit = $derived(unitFor(f.control_var));
-  const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS);
+  const pumpMaxRpm = $derived(app.status?.pump_max_rpm ?? 350);
+  const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : { ...RPM_LIMITS, max: pumpMaxRpm });
   const durationS = $derived(
     Math.max(
       0,
@@ -340,10 +341,10 @@
   const mlPerRpm = $derived(mlPerRpmOf(chosenCal));
   // What the tube delivers between 0.1 and 350 rpm, and whether the curve
   // fits: the daemon refuses a peak past 350 rpm, this says it first.
-  const tubeFlow = $derived(tubeRange(mlPerRpm));
+  const tubeFlow = $derived(tubeRange(mlPerRpm, pumpMaxRpm));
   const fit = $derived(
     drivePerRpm != null && !previewErr && preview.length
-      ? curveFit({ peak: Math.max(...preview.map((p) => p[1])), mlPerRpm: drivePerRpm, trimLimitPct: trimOn ? trimLimitPct : null })
+      ? curveFit({ peak: Math.max(...preview.map((p) => p[1])), mlPerRpm: drivePerRpm, trimLimitPct: trimOn ? trimLimitPct : null, maxRpm: pumpMaxRpm })
       : null,
   );
   const flowOf = (v) => (f.control_var === 'ml_min' ? v : mlPerRpm != null ? v * mlPerRpm : null);
@@ -563,7 +564,7 @@
             oncalibrate={() => (app.tab = 'calibration')} />
           {#if tubeFlow}
             <p class="k">This tube: <b class="mono">{num(tubeFlow.min, 3)} to {num(tubeFlow.max, 2)} ml/min</b>
-              at {RPM_LIMITS.min} to {RPM_LIMITS.max} rpm, from its calibration{#if drivePerRpm != null}, driven in rpm{/if}.</p>
+              at {RPM_LIMITS.min} to {pumpMaxRpm} rpm, from its calibration{#if drivePerRpm != null}, driven in rpm{/if}.</p>
             {@render fitNote()}
           {:else if f.control_var === 'ml_min' && !trimOn && f.tubing_calibration_id == null}
             <p class="k">The pump turns this ml/min into rpm with its own head and tubing setting: the real flow is
@@ -803,10 +804,10 @@
 {#snippet fitNote()}
   {#if fit?.over}
     <p class="k bad">The curve asks up to {num(fit.rpm * drivePerRpm, 2)} ml/min, {num(fit.rpm, 0)} rpm on this tube:
-      it delivers at most {num(fit.range.max, 2)} ml/min at {RPM_LIMITS.max} rpm. Lower the curve or fit a larger tube.</p>
+      it delivers at most {num(fit.range.max, 2)} ml/min at {pumpMaxRpm} rpm. Lower the curve or fit a larger tube.</p>
   {:else if fit?.tight}
     <p class="k warn-t">Fits, but the regulation can raise the flow up to ×{num(1 + trimLimitPct / 100, 2)}: above
-      {num(fit.safeMax, 2)} ml/min the pump would sit at {RPM_LIMITS.max} rpm and the regulation could not catch up.</p>
+      {num(fit.safeMax, 2)} ml/min the pump would sit at {pumpMaxRpm} rpm and the regulation could not catch up.</p>
   {/if}
 {/snippet}
 

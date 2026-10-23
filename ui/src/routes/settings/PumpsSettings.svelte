@@ -31,6 +31,7 @@
   let speed = $state(350);
   let direction = $state('cw');
   let saved = $state(null);
+  let cfgMaxRpm = $state(350); // the refill pump's max rpm, from config (350 for a LabQ)
 
   let ports = $state([]);
   let refillOpen = $state(false);
@@ -47,6 +48,7 @@
     feedAddress = c.pump?.address ?? 1;
     refillAddress = c.refill?.pump_address ?? 2;
     speed = c.refill?.speed_rpm ?? 350;
+    cfgMaxRpm = c.refill?.pump_max_rpm ?? 350;
     direction = c.refill?.direction ?? 'cw';
     path = p === 'sim' || ports.some((x) => x.name === p) ? p : '__custom';
     custom = path === '__custom' ? p : '';
@@ -132,7 +134,14 @@
   // One Save for the whole card: the cable is reconnected only if its port,
   // baud or the feed pump's address changed.
   async function save() {
-    const problem = refillProblem({ address: refillAddress, feedAddress, speedRpm: speed });
+    const problem = refillProblem({
+      address: refillAddress,
+      model: 'labq',
+      head: 1,
+      speedRpm: speed,
+      maxRpm: cfgMaxRpm,
+      feed: { address: feedAddress, model: 'labq', head: 1 },
+    });
     if (problem) {
       err = problem;
       msg = null;

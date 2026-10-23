@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { cycleLine, directionLabel, inSpans, refillOn, refillPlan, refillProblem, refillToChoose, refillView, splitEstimated } from './refill.js';
 
 describe('refillProblem', () => {
-  const ok = { address: 2, feedAddress: 1, speedRpm: 350 };
+  const ok = { address: 2, model: 'labq', head: 1, speedRpm: 350, maxRpm: 350, feed: { address: 1, model: 'labq', head: 1 } };
   it('accepts a separate address and a LabQ speed', () => {
     expect(refillProblem(ok)).toBeNull();
     expect(refillProblem({ ...ok, address: '247', speedRpm: '0.1' })).toBeNull();
@@ -16,6 +16,22 @@ describe('refillProblem', () => {
     expect(refillProblem({ ...ok, address: 2.5 })).toMatch(/1 to 247/);
     expect(refillProblem({ ...ok, speedRpm: 400 })).toMatch(/rpm/);
     expect(refillProblem({ ...ok, speedRpm: '' })).toMatch(/rpm/);
+  });
+  it('refuses a speed over the refill pump max, with both figures', () => {
+    const p = refillProblem({ ...ok, model: 'labv', speedRpm: 300, maxRpm: 150 });
+    expect(p).toMatch(/150/);
+    expect(p).toBe("The speed must be between 0.1 and 150 rpm (the refill pump's max).");
+    expect(refillProblem({ ...ok, model: 'labv', speedRpm: 150, maxRpm: 150 })).toBeNull();
+  });
+  it('limits the address by model', () => {
+    expect(refillProblem({ ...ok, model: 'labv', address: 33 })).toMatch(/1 to 32/);
+    expect(refillProblem({ ...ok, model: 'labv', address: 32 })).toBeNull();
+  });
+  it('names the head on a shared PDS II', () => {
+    const pds = { address: 3, model: 'pds2', head: 1 };
+    expect(refillProblem({ ...ok, ...pds, maxRpm: 600, feed: pds })).toBe("Head 1 of address 3 is the feed pump's: pick another head.");
+    expect(refillProblem({ ...ok, ...pds, head: 2, maxRpm: 600, feed: pds })).toBeNull();
+    expect(refillProblem({ ...ok, ...pds, head: 9, maxRpm: 600, feed: { address: 1, model: 'labq' } })).toMatch(/head must be 1 to 8/);
   });
 });
 

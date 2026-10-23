@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedCameBack, feedResponding, lineState, lineUp, needsReconnect, pingDelayMs, pingWanted, pumpTone } from './pumps.js';
+import { feedCameBack, feedResponding, lineState, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump } from './pumps.js';
 
 const up = { serial_ok: true, simulator: false, transport: 'COM8', pump_confirmed: true, write_fails: 0 };
 
@@ -65,5 +65,53 @@ describe('refill pump ping', () => {
     expect(feedCameBack(null, true)).toBe(true);
     expect(feedCameBack(true, true)).toBe(false);
     expect(feedCameBack(true, false)).toBe(false);
+  });
+});
+
+describe('models', () => {
+  it('lists the three pumps with their limits', () => {
+    expect(MODELS.map((m) => m.id)).toEqual(['labq', 'labv', 'pds2']);
+    expect(modelOf('labv')).toMatchObject({ label: 'LabV', maxRpm: 150, ceiling: 600, maxAddress: 32 });
+    expect(modelOf('nope').id).toBe('labq');
+  });
+});
+
+describe('samePump', () => {
+  it('two heads of one PDS II share an address but are two pumps', () => {
+    expect(samePump({ address: 3, model: 'pds2', head: 1 }, { address: 3, model: 'pds2', head: 2 })).toBe(false);
+    expect(samePump({ address: 3, model: 'pds2', head: 1 }, { address: 3, model: 'pds2', head: 1 })).toBe(true);
+    expect(samePump({ address: 2, model: 'labv' }, { address: 2, model: 'labq' })).toBe(true);
+    expect(samePump({ address: 2, model: 'labv' }, { address: 3, model: 'labv' })).toBe(false);
+  });
+});
+
+describe('pumpProblem', () => {
+  it('follows the model', () => {
+    expect(pumpProblem({ model: 'labq', address: 200, maxRpm: null })).toBeNull();
+    expect(pumpProblem({ model: 'labv', address: 33 })).toMatch(/1 to 32/);
+    expect(pumpProblem({ model: 'pds2', address: 3, head: 9 })).toMatch(/1 to 8/);
+    expect(pumpProblem({ model: 'labq', address: 1, maxRpm: 400 })).toMatch(/0\.1 and 350/);
+    expect(pumpProblem({ model: 'labv', address: 1, maxRpm: 400 })).toBeNull();
+    expect(pumpProblem({ model: 'labv', address: 1, maxRpm: 700 })).toMatch(/600/);
+  });
+});
+
+describe('notAnsweringHint', () => {
+  it('asks the right questions per model', () => {
+    expect(notAnsweringHint({ model: 'labq', address: 1 })).toBe('Is the LabQ switched on, at address 1 and 9600 baud in its own menu?');
+    expect(notAnsweringHint({ model: 'labv', address: 4 })).toMatch(/^Is the LabV switched on, at address 4/);
+    expect(notAnsweringHint({ model: 'pds2', address: 3, head: 2 })).toMatch(/head 2 set to independent operation/);
+  });
+});
+
+describe('needsReconnect, pump model', () => {
+  const saved = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1, feedMaxRpm: null };
+  const now = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1, feedMaxRpm: null };
+  it('also when the feed model, head or max rpm changed', () => {
+    expect(needsReconnect(saved, now)).toBe(false);
+    expect(needsReconnect(saved, { ...now, feedModel: 'labv' })).toBe(true);
+    expect(needsReconnect(saved, { ...now, feedHead: 2 })).toBe(true);
+    expect(needsReconnect(saved, { ...now, feedMaxRpm: 200 })).toBe(true);
+    expect(needsReconnect(saved, { ...now, feedMaxRpm: '' })).toBe(false);
   });
 });

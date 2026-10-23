@@ -49,3 +49,17 @@ describe('curveFit', () => {
     expect(curveFit({ peak: 50, mlPerRpm: null })).toBeNull();
   });
 });
+
+describe('maxRpm', () => {
+  const mlPerRpm = mlPerRpmOf(CAL);
+  it('a LabV capped at 150 rpm delivers less', () => {
+    expect(tubeRange(mlPerRpm, 150).max).toBeCloseTo(5.83, 1);
+    expect(tubeRange(mlPerRpm).max).toBeCloseTo(13.6, 1);
+  });
+  it('the fit uses it', () => {
+    const fit = curveFit({ peak: 10, mlPerRpm, maxRpm: 150 });
+    expect(fit.over).toBe(true);
+    expect(fit.maxRpm).toBe(150);
+    expect(curveFit({ peak: 10, mlPerRpm, maxRpm: 600 }).over).toBe(false);
+  });
+});
