@@ -158,6 +158,8 @@ try {
 
     // --- History: Run again opens New run on its check (broke once)
     check('History opens', await click('.tab', 'History'));
+    check('History lists the runs without an error', await js(`fetch('${URL}/api/runs?limit=1').then((r) => r.ok)`));
+    check('the calibrations load without an error', await js(`fetch('${URL}/api/calibrations').then((r) => r.ok)`));
     await sleep(1500);
     if (await js(`!!document.querySelector('button.tr')`)) {
       await js(`document.querySelector('button.tr').click()`);

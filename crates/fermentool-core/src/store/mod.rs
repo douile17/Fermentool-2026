@@ -71,9 +71,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         sql: include_str!("migrations/0013_run_refill_draw.sql"),
     },
+    // 0014 is taken by feat/constant-rate-change (setpoint_changes), already
+    // applied on the bench PC; keep this at 15.
     Migration {
-        version: 14,
-        sql: include_str!("migrations/0014_pump_model.sql"),
+        version: 15,
+        sql: include_str!("migrations/0015_pump_model.sql"),
     },
 ];
 
@@ -1216,7 +1218,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
     }
 
     #[test]
@@ -1228,7 +1230,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
     }
 
     #[test]
@@ -1442,11 +1444,43 @@ mod tests {
     }
 
     #[test]
+    fn a_database_at_14_without_the_pump_columns_gets_them() {
+        // The bench: another branch's migration 0014 ran there, so
+        // user_version is 14 while our migrations stop at 13.
+        let dir = std::env::temp_dir().join(format!("fermentool-mig14-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bench.sqlite");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            for m in MIGRATIONS.iter().filter(|m| m.version <= 13) {
+                conn.execute_batch(m.sql).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 14;").unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let has = |table: &str, col: &str| -> bool {
+            s.conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .any(|n| n.unwrap() == col)
+        };
+        assert!(has("runs", "pump_model"));
+        assert!(has("runs", "pump_head"));
+        assert!(has("tubing_calibrations", "pump_model"));
+        assert!(s.list_runs(10).unwrap().is_empty());
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn old_calibrations_are_labq() {
-        // A real older database: the schema as of migration 13, one
+        // A real older database: the schema before the pump model, one
         // calibration row written then (no pump_model column), then opened.
         let conn = Connection::open_in_memory().unwrap();
-        for m in MIGRATIONS.iter().filter(|m| m.version <= 13) {
+        for m in MIGRATIONS.iter().filter(|m| m.version < 15) {
             conn.execute_batch(m.sql).unwrap();
         }
         // The three runs the row names are not needed to read it back.
