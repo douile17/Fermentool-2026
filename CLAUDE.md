@@ -158,8 +158,16 @@ LabQ, LabV and PDS II (Innofluid) share one cable and one daemon. Design:
 `PDS Series MODBUS protocol.md` (repo root).
 - `fermentool-modbus`: `PumpKind` (a PDS II carries its head 1..8),
   `RegisterMap` (per model: speed, flow, start/stop, direction, optional mode
-  register) and `PumpTarget` (address + map). `Pump::with_target` replaces
-  `with_address`; the refill pump still rides the feed pump's transport.
+  register) and `PumpTarget` (address + map). The daemon builds pumps with
+  `Pump::with_target` and reaches the refill pump with `with_target_of` (its
+  own model and head) on the feed pump's transport; `Pump::new` and
+  `with_address` (same kind, another address) remain, used by tests.
+- Each model has its floors and ceilings: `max_rpm` (an rpm curve over it is
+  refused at start, capped on resume, the trim capped at it) and
+  `PumpModel::flow_min` (LabV and PDS II refuse under 0.1 ml/min: the engine
+  stops the pump below it and starts it again, as `drive_paused` does in rpm).
+- A run resumes only on the feed pump it drove (`EngineError::ResumeOtherPump`);
+  a calibration's model comes from its three measurement runs.
 - `config.toml`: `[pump] model | head | max_rpm` and `[refill] pump_model |
   pump_head | pump_max_rpm`, absent = LabQ, 350. Feed and refill may be two
   heads of one PDS II (same address, different heads), nothing else shares.

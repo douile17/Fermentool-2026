@@ -8,7 +8,21 @@
   (avec sa photo), avec son adresse, sa tête (1 à 8, PDS II seulement) et sa
   vitesse maximale (LabQ 350, LabV 150, PDS II 600 tr/min par défaut). Le
   câble est affiché « 9600 baud · 8E1 » (le choix du baud disparaît).
-- Une vitesse au-dessus du maximum de la pompe est refusée (courbe, remplissage).
+- Une vitesse au-dessus du maximum de la pompe est refusée (courbe, remplissage) :
+  une courbe en tr/min qui le dépasse est refusée au démarrage, New run le dit
+  avant Start. Seule la régulation peut demander plus que le maximum : la
+  pompe reste alors à son maximum. Une reprise après crash plafonne la courbe
+  au maximum actuel, sans la refuser.
+- LabV et PDS II n'acceptent pas moins de 0,1 ml/min : sous ce seuil (une
+  marche à 0), la pompe est arrêtée, puis redémarrée quand la courbe remonte.
+- Un run interrompu ne reprend que sur la pompe qu'il pilotait (même modèle,
+  même tête d'un PDS II) ; sinon la reprise est refusée et dit pourquoi.
+  Settings › Pumps verrouille la pompe d'alimentation tant qu'un run attend
+  sa reprise.
+- Une calibration prend le modèle de pompe de ses trois mesures, et non plus celui
+  de la configuration au moment de l'enregistrement.
+- Un `config.toml` corrigé à la main ne change plus jamais le modèle d'une
+  pompe : seul le champ hors limites revient à sa valeur par défaut.
 - Une pompe laissée dans un autre mode que « transferring » est remise en
   transferring au démarrage, à la reprise, au début d'un remplissage et au
   Test (jamais pendant le réglage de la vitesse).
