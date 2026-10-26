@@ -52,6 +52,11 @@ essayé sur une vraie pompe autre que la LabQ) :
    démarre ou arrête l'autre.
 6. Une calibration de tuyau faite sur la LabQ n'est pas proposée pour la
    LabV ni le PDS II.
+7. Débit plancher en ml/min sans calibration de tuyau en rpm : la doc donne
+   0,1 ml/min pour le registre de débit (LabV 1004, PDS II n030), et
+   Fermentool arrête la pompe en dessous. Essayer 0,05 ml/min sur la pompe :
+   si elle l'accepte, abaisser ce plancher (`PumpModel::flow_min`). Avec un
+   tuyau calibré en rpm, ce plancher ne s'applique pas (piloté en rpm).
 
 ### History, calibration, remplissage (20 et 21 octobre)
 
