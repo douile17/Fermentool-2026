@@ -43,7 +43,8 @@ pub mod limits {
     /// Minimum settable motor speed (rpm).
     pub const RPM_MIN: f64 = 0.1;
     // No maximum here: it is the pump's own `PumpTarget::max_rpm`.
-    /// Minimum settable flow rate (ml/min).
+    /// Lowest flow rate any model takes (ml/min), the LabQ's: a curve may go
+    /// down to it. Each model's own floor is [`PumpModel::flow_min`](super::PumpModel::flow_min).
     pub const FLOW_MIN: f64 = 0.0;
     /// Maximum settable flow rate (ml/min).
     pub const FLOW_MAX: f64 = 99_999.0;
@@ -253,6 +254,15 @@ impl PumpModel {
             PumpModel::LabQ => 350.0,
             PumpModel::LabV => 150.0,
             PumpModel::PdsII => 600.0,
+        }
+    }
+
+    /// The lowest flow rate the pump takes in ml/min: the LabQ 0, the LabV
+    /// and the PDS II 0.1 (they refuse a lower one with exception 03).
+    pub fn flow_min(self) -> f64 {
+        match self {
+            PumpModel::LabQ => 0.0,
+            PumpModel::LabV | PumpModel::PdsII => 0.1,
         }
     }
 
@@ -679,8 +689,9 @@ impl<T: Transport> PumpTransport for Pump<T> {
     }
 
     fn set_flow_ml_min(&mut self, ml_min: f32) -> Result<(), PumpError> {
-        if !(limits::FLOW_MIN..=limits::FLOW_MAX).contains(&(ml_min as f64)) {
-            return Err(PumpError::OutOfRange("flow rate must be 0..=99999 ml/min".to_string()));
+        let min = self.target.kind.model().flow_min();
+        if !(min..=limits::FLOW_MAX).contains(&(ml_min as f64)) {
+            return Err(PumpError::OutOfRange(format!("flow rate must be {min}..=99999 ml/min")));
         }
         self.write_f32(self.target.kind.map().flow, ml_min)
     }
@@ -890,6 +901,14 @@ impl Transport for SimPump {
                     PumpModel::PdsII => Some(first / 1000 * 1000 + 5),
                 };
                 if mode_reg.is_some_and(|m| self.get(m) != TRANSFERRING) {
+                    return Ok(with_crc(vec![body[0], func | 0x80, 0x03]));
+                }
+            }
+            // A flow under the model's floor (0.1 ml/min on a LabV / PDS II).
+            let flow_reg = matches!((model, first % 1000), (PumpModel::LabV, 4) | (PumpModel::PdsII, 30));
+            if func == 0x10 && flow_reg && body.len() >= 11 {
+                let v = f32_from_be([body[7], body[8], body[9], body[10]]);
+                if (v as f64) < model.flow_min() - 1e-6 {
                     return Ok(with_crc(vec![body[0], func | 0x80, 0x03]));
                 }
             }
@@ -1452,6 +1471,31 @@ mod tests {
         // the message names the figure
         let msg = p.set_speed_rpm(200.0).unwrap_err().to_string();
         assert!(msg.contains("150"), "{msg}");
+    }
+
+    #[test]
+    fn a_flow_under_the_models_floor_is_refused() {
+        assert_eq!(PumpModel::LabQ.flow_min(), 0.0);
+        assert_eq!(PumpModel::LabV.flow_min(), 0.1);
+        assert_eq!(PumpModel::PdsII.flow_min(), 0.1);
+        let mut q = Pump::new(SimPump::new(1), 1);
+        q.set_flow_ml_min(0.0).unwrap();
+        for kind in [PumpKind::LabV, PumpKind::PdsII { head: 2 }] {
+            let target = PumpTarget { address: 4, kind, max_rpm: 150.0 };
+            let mut sim = SimPump::new(4);
+            sim.strict = Some(kind.model());
+            let mut p = Pump::with_target(sim, target);
+            let msg = p.set_flow_ml_min(0.0).unwrap_err().to_string();
+            assert!(msg.contains("0.1"), "{msg}");
+            p.set_flow_ml_min(0.1).unwrap();
+            // The strict simulator answers a raw 0 the way the pump does.
+            let raw = frame::build_write_f32(4, kind.map().flow, 0.0);
+            let resp = p.transport_mut().transaction(&raw).unwrap();
+            assert_eq!(
+                frame::parse_write_multiple_response(&resp, 4, kind.map().flow, 2),
+                Err(PduError::Exception(0x03))
+            );
+        }
     }
 
     #[test]
