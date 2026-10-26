@@ -34,3 +34,13 @@ export function curveFit({ peak, mlPerRpm, trimLimitPct = null, maxRpm = DEFAULT
   const tight = !over && rpm * headroom > maxRpm + 1e-9;
   return { range, rpm, over, tight, maxRpm, safeMax: range.max / headroom };
 }
+
+/**
+ * What New run says before Start when an rpm curve asks more than the feed
+ * pump's top speed (the daemon refuses it, it does not flatten it), or null.
+ * `label` is the pump's model as the operator reads it ("LabV").
+ */
+export function rpmCurveProblem({ peak, maxRpm = DEFAULT_MAX_RPM, label = 'pump' }) {
+  if (!(peak > maxRpm + 1e-9)) return null;
+  return `The curve asks up to ${Math.round(peak * 10) / 10} rpm; this ${label} goes to ${maxRpm} rpm (Settings > Pumps).`;
+}

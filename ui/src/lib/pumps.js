@@ -84,6 +84,15 @@ export function maxRpmSetting(model, value) {
   return r === modelOf(model).maxRpm ? null : r;
 }
 
+/** The feed pump's model, head, address and max rpm cannot change: a run
+ *  drives it, or an interrupted one waits to be resumed on it (the daemon
+ *  refuses to resume a run on another pump). */
+export const feedLocked = (s) => !!s?.active || !!s?.has_pending_recovery;
+
+/** The refill pump's model and head cannot change: a run drives it, or one
+ *  that drove it was interrupted and no Stop has got through since. */
+export const refillKindLocked = (s) => !!s?.refill?.in_run || !!s?.refill?.recovering;
+
 /** The head a pump is driven on: chosen on a PDS II, 1 for the others. */
 export const headOf = (model, head) => (modelOf(model).id === 'pds2' ? Number(head) : 1);
 

@@ -1626,7 +1626,7 @@
           <div class="hist-wrap">
             <table class="hist mono">
               <thead>
-                <tr><th>#</th><th>date</th><th>brand</th><th>lot</th><th>ref</th><th>internal ref</th><th>size</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th><th>pump</th><th></th></tr>
+                <tr><th>#</th><th>date</th><th>brand</th><th>lot</th><th>ref</th><th>internal ref</th><th>size</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>pump</th><th>c₀</th><th></th></tr>
               </thead>
               <tbody>
                 {#each listed as c (c.id)}

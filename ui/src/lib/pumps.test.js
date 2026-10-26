@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedCameBack, feedResponding, headOf, lineState, maxRpmSetting, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump } from './pumps.js';
+import { feedCameBack, feedLocked, feedResponding, headOf, refillKindLocked, lineState, maxRpmSetting, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump } from './pumps.js';
 
 const up = { serial_ok: true, simulator: false, transport: 'COM8', pump_confirmed: true, write_fails: 0 };
 
@@ -134,5 +134,20 @@ describe('headOf', () => {
     expect(headOf('labq', 4)).toBe(1);
     expect(headOf('labv', 4)).toBe(1);
     expect(headOf('pds2', '4')).toBe(4);
+  });
+});
+
+describe('locks (Settings > Pumps)', () => {
+  it('the feed pump is locked during a run and while an interrupted run waits', () => {
+    expect(feedLocked({ active: null, has_pending_recovery: false })).toBe(false);
+    expect(feedLocked({ active: { id: 1 } })).toBe(true);
+    expect(feedLocked({ active: null, has_pending_recovery: true })).toBe(true);
+    expect(feedLocked(null)).toBe(false);
+  });
+  it("the refill pump's model and head are locked in a refill run and while it recovers", () => {
+    expect(refillKindLocked({ refill: null })).toBe(false);
+    expect(refillKindLocked({ refill: { in_run: true, recovering: false } })).toBe(true);
+    expect(refillKindLocked({ refill: { in_run: false, recovering: true } })).toBe(true);
+    expect(refillKindLocked({ refill: { in_run: false, recovering: false, testing: true } })).toBe(false);
   });
 });

@@ -2,7 +2,7 @@
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
   import { num, dur, vol, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
-  import { mlPerRpmOf, tubeRange, curveFit } from '../lib/tuberange.js';
+  import { mlPerRpmOf, tubeRange, curveFit, rpmCurveProblem } from '../lib/tuberange.js';
   import { canStartRun } from '../lib/link.js';
   import { forFeedPump } from '../lib/calibrations.js';
   import { modelOf } from '../lib/pumps.js';
@@ -180,7 +180,9 @@
 
   const unit = $derived(unitFor(f.control_var));
   const pumpMaxRpm = $derived(app.status?.pump_max_rpm ?? 350);
-  const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : { ...RPM_LIMITS, max: pumpMaxRpm });
+  // An rpm curve is not flattened at the pump's max: the preview shows what
+  // was asked, the daemon refuses a peak over it and `rpmOver` says so first.
+  const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : { ...RPM_LIMITS, max: FLOW_LIMITS.max });
   const durationS = $derived(
     Math.max(
       0,
@@ -254,7 +256,7 @@
       start,
       end,
       duration: durationS,
-      // Safety clamp = the pump's own limits. The engine re-applies this anyway.
+      // Safety clamp: the pump's floor. The engine applies the pump's own limits.
       clamp_min: lim.min,
       clamp_max: lim.max,
       params,
@@ -354,6 +356,12 @@
       ? curveFit({ peak: Math.max(...preview.map((p) => p[1])), mlPerRpm: drivePerRpm, trimLimitPct: trimOn ? trimLimitPct : null, maxRpm: pumpMaxRpm })
       : null,
   );
+  // An rpm curve over the feed pump's top speed: refused by the daemon.
+  const rpmOver = $derived(
+    f.control_var === 'rpm' && !previewErr && preview.length
+      ? rpmCurveProblem({ peak: Math.max(...preview.map((p) => p[1])), maxRpm: pumpMaxRpm, label: feedModelLabel })
+      : null,
+  );
   const flowOf = (v) => (f.control_var === 'ml_min' ? v : mlPerRpm != null ? v * mlPerRpm : null);
   const feed = $derived.by(() => {
     if (previewErr || preview.length < 2) return null;
@@ -427,6 +435,9 @@
     ...(trimOn ? [{ label: 'Tubing calibration', done: !needsCalibration, hint: 'Needed for the regulation in rpm', target: 'nr-tube', go: () => goTo(2) }] : []),
     { label: 'Duration', done: durationS > 0, hint: 'Longer than zero', target: 'nr-duration', go: () => goTo(3) },
     { label: 'Curve', done: curveOk, hint: 'A valid profile', target: 'nr-shape', go: () => goTo(3) },
+    ...(rpmOver
+      ? [{ label: "Within the pump's speed", done: false, hint: `Up to ${pumpMaxRpm} rpm on this pump`, target: 'nr-shape', go: () => goTo(3) }]
+      : []),
     ...(fit?.over
       ? [{ label: 'Within the tube', done: false, hint: `This tube delivers at most ${num(fit.range.max, 2)} ml/min`, target: 'nr-shape', go: () => goTo(3) }]
       : []),
@@ -810,6 +821,9 @@
 </div>
 
 {#snippet fitNote()}
+  {#if rpmOver}
+    <p class="k bad">{rpmOver}</p>
+  {/if}
   {#if fit?.over}
     <p class="k bad">The curve asks up to {num(fit.rpm * drivePerRpm, 2)} ml/min, {num(fit.rpm, 0)} rpm on this tube:
       it delivers at most {num(fit.range.max, 2)} ml/min at {pumpMaxRpm} rpm. Lower the curve or fit a larger tube.</p>

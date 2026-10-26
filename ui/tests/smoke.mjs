@@ -261,6 +261,8 @@ try {
   // each calibration of the history says the pump model it was measured on
   if (await js(`(() => { const b = document.querySelector('.hist-toggle'); if (b && b.getAttribute('aria-expanded') !== 'true') b.click(); return true; })()`) && (await sleep(400), await js(`!!document.querySelector('table.hist tbody tr')`))) {
     check('a calibration row shows its pump model', await js(`[...document.querySelectorAll('table.hist tbody tr')].every((r) => /^(LabQ|LabV|PDS II)$/.test(r.querySelector('td.pm')?.textContent.trim() ?? ''))`));
+    // the "pump" header sits over the pump cells, every column in step
+    check('the pump header is over the pump column', await js(`(() => { const hs = [...document.querySelectorAll('table.hist thead th')].map((t) => t.textContent.trim()); const row = document.querySelector('table.hist tbody tr'); const pm = row ? [...row.children].indexOf(row.querySelector('td.pm')) : -1; return pm >= 0 && hs.indexOf('pump') === pm && hs.length === row.children.length; })()`));
   }
   if (await js(`!!document.querySelector('.panel h3')`)) {
     // leaving with a calibration under way asks first; Stay keeps everything

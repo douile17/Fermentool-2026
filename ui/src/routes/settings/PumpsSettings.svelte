@@ -8,10 +8,10 @@
   import { get, post } from '../../lib/api.js';
   import { loadConfig, patchConfig } from '../../lib/config.js';
   import { app } from '../../lib/state.svelte.js';
-  import { refillProblem } from '../../lib/refill.js';
+  import { aboutRefillSpeed, pumpsProblem } from '../../lib/refill.js';
   import LinkHeader from './LinkHeader.svelte';
   import {
-    MODELS, modelOf, pumpProblem, notAnsweringHint, maxRpmSetting, headOf,
+    MODELS, modelOf, notAnsweringHint, maxRpmSetting, headOf, feedLocked, refillKindLocked,
     lineUp, lineState, pumpTone, feedResponding, needsReconnect, pingWanted, pingDelayMs, feedCameBack,
   } from '../../lib/pumps.js';
   import { radioKeys, rovingTab } from '../../lib/radio.js';
@@ -55,8 +55,13 @@
 
   const portPath = $derived(path === '__custom' ? custom.trim() : path);
   const runActive = $derived(!!app.status?.active);
-  // a run refilling the bottle drives the refill pump: its model and head stay
+  // a run refilling the bottle drives the refill pump: its model and head
+  // stay, as while such a run waits to be resumed (refillKindLocked)
   const refillInRun = $derived(!!app.status?.refill?.in_run);
+  const refillLocked = $derived(refillKindLocked(app.status));
+  // an interrupted run resumes only on the feed pump it drove
+  const recoveryPending = $derived(!!app.status?.has_pending_recovery);
+  const feedFixed = $derived(feedLocked(app.status));
   const testing = $derived(!!app.status?.refill?.testing);
 
   function take(c) {
@@ -184,32 +189,15 @@
     });
   }
 
-  const lower = (t) => t.charAt(0).toLowerCase() + t.slice(1);
-
-  // What the daemon would refuse, as one sentence; null if fine.
-  function problem() {
-    const f = pumpProblem(feedNow);
-    if (f) return `Feed pump: ${lower(f)}`;
-    const r = refillProblem({
-      address: refillNow.address,
-      model: refillNow.model,
-      head: refillNow.head,
-      speedRpm: speed,
-      maxRpm: refillNow.maxRpm,
-      feed: { address: feedNow.address, model: feedNow.model, head: feedNow.head },
-    });
-    if (r) return r;
-    const m = pumpProblem(refillNow);
-    return m ? `Refill pump: ${lower(m)}` : null;
-  }
-
   // One Save for the whole card: the cable is reconnected only if its port
-  // or the feed pump (address, model, head, max rpm) changed.
+  // or the feed pump (address, model, head, max rpm) changed. A refused
+  // refill speed opens the Change panel, where its field is.
   async function save() {
-    const p = problem();
+    const p = pumpsProblem({ feed: feedNow, refill: refillNow, speedRpm: speed });
     if (p) {
-      err = p;
+      err = p.message;
       msg = null;
+      if (p.speed) refillOpen = true;
       return;
     }
     busy = true;
@@ -234,6 +222,7 @@
       await ping();
     } catch (e) {
       err = e.message;
+      if (aboutRefillSpeed(e.message)) refillOpen = true;
     }
     busy = false;
   }
@@ -351,19 +340,19 @@
         </div>
         {@render state(feedTone)}
         <div class="ctl">
-          {@render models('Feed', feedModel, pickFeed, busy || runActive)}
+          {@render models('Feed', feedModel, pickFeed, busy || feedFixed)}
           <label class="lbl addr">Address
-            <input type="number" min="1" max={modelOf(feedModel).maxAddress} bind:value={feedAddress} disabled={busy || runActive} />
+            <input type="number" min="1" max={modelOf(feedModel).maxAddress} bind:value={feedAddress} disabled={busy || feedFixed} />
           </label>
           {#if feedModel === 'pds2'}
             <label class="lbl head">Head
-              <select bind:value={feedHead} disabled={busy || runActive}>
+              <select bind:value={feedHead} disabled={busy || feedFixed}>
                 {#each HEADS as h}<option value={h}>{h}</option>{/each}
               </select>
             </label>
           {/if}
           <label class="lbl maxrpm">Max rpm
-            <input type="number" min="0.1" max={modelOf(feedModel).ceiling} step="any" bind:value={feedMax} disabled={busy || runActive} />
+            <input type="number" min="0.1" max={modelOf(feedModel).ceiling} step="any" bind:value={feedMax} disabled={busy || feedFixed} />
           </label>
         </div>
       </div>
@@ -386,13 +375,13 @@
         </div>
         {@render state(refillTone)}
         <div class="ctl">
-          {@render models('Refill', refillModel, pickRefill, busy || refillInRun)}
+          {@render models('Refill', refillModel, pickRefill, busy || refillLocked)}
           <label class="lbl addr">Address
             <input type="number" min="1" max={modelOf(refillModel).maxAddress} bind:value={refillAddress} disabled={busy} />
           </label>
           {#if refillModel === 'pds2'}
             <label class="lbl head">Head
-              <select bind:value={refillHead} disabled={busy || refillInRun}>
+              <select bind:value={refillHead} disabled={busy || refillLocked}>
                 {#each HEADS as h}<option value={h}>{h}</option>{/each}
               </select>
             </label>
@@ -438,6 +427,10 @@
       <p class="field-note why">A run is active: the cable, the feed pump and the refill pump's model and head are locked until it stops.</p>
     {:else if runActive}
       <p class="field-note why">A run is active: the cable and the feed pump are locked until it stops.</p>
+    {:else if recoveryPending}
+      <p class="field-note why">An interrupted run waits: the feed pump{refillLocked ? " and the refill pump's model and head are" : ' is'} locked until it is resumed or ended.</p>
+    {:else if refillLocked}
+      <p class="field-note why">The refill pump has not confirmed a Stop since its run ended: its model and head are locked until it does.</p>
     {/if}
   {/snippet}
 </SettingsCard>
