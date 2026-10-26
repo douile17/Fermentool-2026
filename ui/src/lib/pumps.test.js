@@ -144,10 +144,14 @@ describe('locks (Settings > Pumps)', () => {
     expect(feedLocked({ active: null, has_pending_recovery: true })).toBe(true);
     expect(feedLocked(null)).toBe(false);
   });
-  it("the refill pump's model and head are locked in a refill run and while it recovers", () => {
+  it("the refill pump's model and head are locked in a refill run and while an interrupted one waits", () => {
     expect(refillKindLocked({ refill: null })).toBe(false);
-    expect(refillKindLocked({ refill: { in_run: true, recovering: false } })).toBe(true);
-    expect(refillKindLocked({ refill: { in_run: false, recovering: true } })).toBe(true);
-    expect(refillKindLocked({ refill: { in_run: false, recovering: false, testing: true } })).toBe(false);
+    expect(refillKindLocked({ refill: { in_run: true, awaiting_resume: false } })).toBe(true);
+    expect(refillKindLocked({ refill: { in_run: false, awaiting_resume: true } })).toBe(true);
+    expect(refillKindLocked({ refill: { in_run: false, awaiting_resume: false, testing: true } })).toBe(false);
+  });
+  it('a Stop still owed after the run ended does not lock the refill model', () => {
+    // A wrong model is what makes that Stop fail: changing it is the way out.
+    expect(refillKindLocked({ refill: { in_run: false, recovering: true, awaiting_resume: false } })).toBe(false);
   });
 });

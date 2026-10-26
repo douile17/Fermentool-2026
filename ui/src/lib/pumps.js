@@ -90,8 +90,10 @@ export function maxRpmSetting(model, value) {
 export const feedLocked = (s) => !!s?.active || !!s?.has_pending_recovery;
 
 /** The refill pump's model and head cannot change: a run drives it, or one
- *  that drove it was interrupted and no Stop has got through since. */
-export const refillKindLocked = (s) => !!s?.refill?.in_run || !!s?.refill?.recovering;
+ *  that drove it was interrupted and waits to be resumed or ended. A Stop
+ *  still owed after a run ended (`recovering`) does not lock them: a wrong
+ *  model is what makes that Stop fail, the new one takes it. */
+export const refillKindLocked = (s) => !!s?.refill?.in_run || !!s?.refill?.awaiting_resume;
 
 /** The head a pump is driven on: chosen on a PDS II, 1 for the others. */
 export const headOf = (model, head) => (modelOf(model).id === 'pds2' ? Number(head) : 1);

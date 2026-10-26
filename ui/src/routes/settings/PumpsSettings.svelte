@@ -430,7 +430,7 @@
     {:else if recoveryPending}
       <p class="field-note why">An interrupted run waits: the feed pump{refillLocked ? " and the refill pump's model and head are" : ' is'} locked until it is resumed or ended.</p>
     {:else if refillLocked}
-      <p class="field-note why">The refill pump has not confirmed a Stop since its run ended: its model and head are locked until it does.</p>
+      <p class="field-note why">A run with automatic refill waits to be resumed: the refill pump's model and head are locked until it resumes or is aborted.</p>
     {/if}
   {/snippet}
 </SettingsCard>

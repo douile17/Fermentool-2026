@@ -46,6 +46,12 @@ pub(super) struct RefillLink {
     /// and no Stop has got through since: one is sent every
     /// [`REASSERT_SILENT`] until one does.
     recovering: bool,
+    /// A run that drove it is left open after a crash and waits to be
+    /// resumed or ended: its model and head are locked, it would resume on
+    /// another pump. Set at boot, cleared once a run drives it again or that
+    /// run ends. Not `recovering`: a Stop owed after a run ended must not
+    /// lock them, a wrong model is what makes that Stop fail.
+    awaiting_resume: bool,
     /// The refill pump's last answer: `None` until asked (since boot, or
     /// since its address changed).
     responding: Option<bool>,
@@ -87,8 +93,11 @@ pub struct RefillStatus {
     /// A Test is running it now.
     pub testing: bool,
     /// A run that drove it was interrupted (or ended) and no Stop has got
-    /// through since: its model and head are locked (Settings > Pumps).
+    /// through since: one is retried every minute.
     pub recovering: bool,
+    /// A run that drove it was interrupted and waits to be resumed or ended:
+    /// its model and head are locked (Settings > Pumps).
+    pub awaiting_resume: bool,
     /// The run's automatic refill, `None` outside such a run.
     pub cycle: Option<super::refill_cycle::CycleStatus>,
 }
@@ -139,11 +148,12 @@ impl<T: Transport> Engine<T> {
                     .into(),
             );
         }
-        // A run that drove it is waiting to be resumed (or its last Stop has
-        // not got through): it would resume on, or be stopped as, another pump.
-        if other_kind && self.refill.recovering {
+        // A run that drove it is waiting to be resumed: it would resume on
+        // another pump. Not a Stop still owed after a run ended: the new
+        // model takes it (`set_refill`), and a wrong model is what made it fail.
+        if other_kind && self.refill.awaiting_resume {
             return Some(
-                "Not while a run with automatic refill is interrupted: the refill pump's model and head are locked until it is resumed or ended, and the refill pump has taken a Stop."
+                "Not while a run with automatic refill is interrupted: the refill pump's model and head are locked until it is resumed or ended."
                     .into(),
             );
         }
@@ -155,13 +165,14 @@ impl<T: Transport> Engine<T> {
     pub fn refill_after_boot(&mut self, now: Instant) {
         if self.store.running_run().ok().flatten().is_some_and(|r| r.auto_refill) {
             self.refill.recovering = true;
+            self.refill.awaiting_resume = true;
             self.refill.next_stop = Some(now);
         }
     }
 
     pub fn refill_status(&self) -> Option<RefillStatus> {
         let r = &self.refill;
-        (r.run || r.recovering || r.stop_owed).then(|| RefillStatus {
+        (r.run || r.recovering || r.stop_owed || r.awaiting_resume).then(|| RefillStatus {
             in_run: r.run,
             address: r.cfg.pump_address,
             model: r.cfg.target().kind.model().as_str(),
@@ -169,6 +180,7 @@ impl<T: Transport> Engine<T> {
             responding: r.responding,
             testing: r.test_until.is_some(),
             recovering: r.recovering,
+            awaiting_resume: r.awaiting_resume,
             cycle: self.refill_cycle_status(),
         })
     }
@@ -303,6 +315,7 @@ impl<T: Transport> Engine<T> {
     pub(super) fn refill_run_started(&mut self, now: Instant) {
         self.refill.run = true;
         self.refill.recovering = false;
+        self.refill.awaiting_resume = false;
         self.refill.next_stop = Some(now + REASSERT);
     }
 
@@ -331,6 +344,8 @@ impl<T: Transport> Engine<T> {
         if self.refill.plan.is_some() {
             self.refill_plan_end();
         }
+        // Before the early return: its boot Stop may already have got through.
+        self.refill.awaiting_resume = false;
         if !(self.refill.run || self.refill.recovering) {
             return;
         }
@@ -845,10 +860,79 @@ mod tests {
         let labv = RefillConfig { pump_model: PumpModelCfg::Labv, speed_rpm: 100.0, ..at(2) };
         assert!(b.refill_change_refused(&labv).is_some(), "the check alone says it too");
         assert!(b.refill_change_refused(&RefillConfig { speed_rpm: 120.0, ..at(2) }).is_none());
-        let err = b.set_refill(labv, t0).unwrap_err();
+        let err = b.set_refill(labv.clone(), t0).unwrap_err();
         assert!(err.contains("model and head are locked"), "{err}");
         assert_eq!(b.refill.cfg.pump_model, PumpModelCfg::Labq, "nothing applied");
-        assert!(b.refill_status().unwrap().recovering);
+        assert!(b.refill_status().unwrap().awaiting_resume);
+        // The boot Stop got through: the run still waits, the lock holds.
+        b.refill_service(t0);
+        assert!(!b.refill_status().unwrap().recovering);
+        assert!(b.refill_change_refused(&labv).is_some(), "locked until resumed or ended");
+    }
+
+    /// A crashed auto-refill run left open, and an engine booted on it.
+    fn booted_on_a_crashed_refill_run(db: &super::super::tests::TempDb) -> Engine<SimBus> {
+        {
+            let mut a = Engine::new(Pump::new(SimBus::new(), 1), db.store(), "test");
+            a.set_refill(at(2), Instant::now()).unwrap();
+            let cfg = refill_run(&mut a);
+            a.start_run(cfg, Timestamp::now()).unwrap();
+        } // crash: the run is left open
+        let mut b = Engine::new(Pump::new(SimBus::new(), 1), db.store(), "test");
+        b.set_refill(at(2), Instant::now()).unwrap();
+        b.refill_after_boot(Instant::now());
+        b
+    }
+
+    fn labv_at(addr: u8) -> RefillConfig {
+        RefillConfig { pump_model: PumpModelCfg::Labv, speed_rpm: 100.0, ..at(addr) }
+    }
+
+    #[test]
+    fn the_refill_model_lock_is_gone_once_the_interrupted_run_is_resumed_then_stopped() {
+        let db = super::super::tests::TempDb::new();
+        let mut b = booted_on_a_crashed_refill_run(&db);
+        b.resume(Timestamp::now(), Duration::from_secs(300)).unwrap();
+        assert!(b.refill_change_refused(&labv_at(2)).is_some(), "the resumed run drives it");
+        b.stop_run(Timestamp::now()).unwrap();
+        assert!(b.refill_change_refused(&labv_at(2)).is_none());
+        assert!(b.refill_status().is_none_or(|s| !s.awaiting_resume));
+    }
+
+    #[test]
+    fn the_refill_model_lock_is_gone_once_the_interrupted_run_is_aborted() {
+        let db = super::super::tests::TempDb::new();
+        let mut b = booted_on_a_crashed_refill_run(&db);
+        // Its Stop at boot got through: `recovering` is already clear.
+        b.refill_service(Instant::now());
+        b.discard_recovery(Timestamp::now(), RunStatus::Aborted).unwrap();
+        assert!(b.refill_change_refused(&labv_at(2)).is_none());
+        assert!(b.refill_status().is_none_or(|s| !s.awaiting_resume));
+    }
+
+    #[test]
+    fn a_wrong_refill_model_can_be_corrected_after_its_run_ended() {
+        // The run ended, and its last Stop never got through: the pump is a
+        // LabV set up as a LabQ (exception 02 on the LabQ register). The
+        // model must be correctable, and the owed Stop go to the new model.
+        let mut e = engine();
+        e.set_refill(at(2), Instant::now()).unwrap();
+        let cfg = refill_run(&mut e);
+        e.start_run(cfg, Timestamp::now()).unwrap();
+        let labv = e.pump.transport_mut().pump(2);
+        labv.strict = Some(PumpModel::LabV);
+        labv.set_reg(1008, 1); // running
+        e.stop_run(Timestamp::now()).unwrap();
+        let st = e.refill_status().unwrap();
+        assert!(st.recovering && !st.awaiting_resume, "a Stop is owed, nothing waits");
+
+        let t1 = Instant::now();
+        assert!(e.refill_change_refused(&labv_at(2)).is_none());
+        e.set_refill(labv_at(2), t1).unwrap();
+        assert_eq!(e.refill_next_due(), Some(t1), "the owed Stop goes out at once");
+        e.refill_service(t1);
+        assert_eq!(refill_pump(&e, 2).reg(1008), 0, "stopped on the LabV register");
+        assert!(e.refill_status().is_none(), "nothing owed once stopped");
     }
 
     #[test]
