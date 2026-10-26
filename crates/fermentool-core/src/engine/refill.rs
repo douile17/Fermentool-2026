@@ -78,7 +78,7 @@ pub struct RefillStatus {
     /// The active run drives it.
     pub in_run: bool,
     pub address: u8,
-    /// Its model, as the operator reads it ("LabQ", "LabV", "PDS II").
+    /// Its model token (`labq`, `labv`, `pds2`), as `EngineStatus.pump_model`.
     pub model: &'static str,
     /// Its head on a PDS II, `None` on the others.
     pub head: Option<u8>,
@@ -86,6 +86,9 @@ pub struct RefillStatus {
     pub responding: Option<bool>,
     /// A Test is running it now.
     pub testing: bool,
+    /// A run that drove it was interrupted (or ended) and no Stop has got
+    /// through since: its model and head are locked (Settings > Pumps).
+    pub recovering: bool,
     /// The run's automatic refill, `None` outside such a run.
     pub cycle: Option<super::refill_cycle::CycleStatus>,
 }
@@ -96,14 +99,11 @@ impl<T: Transport> Engine<T> {
     /// driving the refill pump asks the new address at once. A new model or
     /// head is refused while a run drives the refill pump: nothing applied.
     pub fn set_refill(&mut self, cfg: RefillConfig, now: Instant) -> std::result::Result<(), String> {
+        if let Some(refused) = self.refill_change_refused(&cfg) {
+            return Err(refused);
+        }
         let (old, new) = (self.refill.cfg.target(), cfg.target());
         let other_kind = self.refill.cfg.pump_model != cfg.pump_model || old.kind != new.kind;
-        if other_kind && self.refill.run {
-            return Err(
-                "Not during a run with automatic refill: the refill pump's model and head are locked until it stops."
-                    .into(),
-            );
-        }
         // Another model or head is another pump, as another address is.
         let moved = old.address != new.address || other_kind;
         let new_speed = (self.refill.cfg.speed_rpm != cfg.speed_rpm).then_some(cfg.speed_rpm);
@@ -127,6 +127,29 @@ impl<T: Transport> Engine<T> {
         Ok(())
     }
 
+    /// Why [`set_refill`](Self::set_refill) would refuse `cfg`, without
+    /// applying anything: a Settings save checks it first, then saves the
+    /// file, then applies it, so a refusal anywhere leaves both as they were.
+    pub fn refill_change_refused(&self, cfg: &RefillConfig) -> Option<String> {
+        let (old, new) = (self.refill.cfg.target(), cfg.target());
+        let other_kind = self.refill.cfg.pump_model != cfg.pump_model || old.kind != new.kind;
+        if other_kind && self.refill.run {
+            return Some(
+                "Not during a run with automatic refill: the refill pump's model and head are locked until it stops."
+                    .into(),
+            );
+        }
+        // A run that drove it is waiting to be resumed (or its last Stop has
+        // not got through): it would resume on, or be stopped as, another pump.
+        if other_kind && self.refill.recovering {
+            return Some(
+                "Not while a run with automatic refill is interrupted: the refill pump's model and head are locked until it is resumed or ended, and the refill pump has taken a Stop."
+                    .into(),
+            );
+        }
+        None
+    }
+
     /// At boot: a run left open that drove the refill pump may have left it
     /// running (step 3's cycle): a Stop is the first frame on the line.
     pub fn refill_after_boot(&mut self, now: Instant) {
@@ -141,10 +164,11 @@ impl<T: Transport> Engine<T> {
         (r.run || r.recovering || r.stop_owed).then(|| RefillStatus {
             in_run: r.run,
             address: r.cfg.pump_address,
-            model: r.cfg.target().kind.model().label(),
+            model: r.cfg.target().kind.model().as_str(),
             head: r.cfg.target().kind.head(),
             responding: r.responding,
             testing: r.test_until.is_some(),
+            recovering: r.recovering,
             cycle: self.refill_cycle_status(),
         })
     }
@@ -215,19 +239,26 @@ impl<T: Transport> Engine<T> {
     /// Record whether the refill pump answered, journalling a change.
     fn refill_answered(&mut self, ok: bool) {
         let was = self.refill.responding.replace(ok);
-        let addr = self.refill.cfg.pump_address;
+        let target = self.refill.cfg.target();
+        let addr = target.address;
+        // A PDS II head: which one, and the setting that silences it.
+        let (at, also) = match target.kind.head() {
+            Some(head) => (
+                format!("address {addr}, head {head}"),
+                format!(", its MODBUS address and that head {head} is set to independent operation"),
+            ),
+            None => (format!("address {addr}"), " and its MODBUS address".to_string()),
+        };
         let (kind, level, detail) = match (was, ok) {
             (Some(true) | None, false) => (
                 "refill_pump_lost",
                 EventLevel::Warn,
-                format!(
-                    "the refill pump (address {addr}) does not answer: check its power, its RS-485 wiring and its MODBUS address"
-                ),
+                format!("the refill pump ({at}) does not answer: check its power, its RS-485 wiring{also}"),
             ),
             (Some(false), true) => (
                 "refill_pump_ok",
                 EventLevel::Info,
-                format!("the refill pump (address {addr}) answers again"),
+                format!("the refill pump ({at}) answers again"),
             ),
             _ => return,
         };
@@ -263,7 +294,7 @@ impl<T: Transport> Engine<T> {
         }
         self.refill.test_until = None;
         if !self.refill_stop(now) {
-            return Err(EngineError::RefillPumpSilent { address: addr });
+            return Err(EngineError::RefillPumpSilent { address: addr, pump: refill.kind });
         }
         Ok(())
     }
@@ -523,8 +554,10 @@ mod tests {
         e.set_refill(at(2), Instant::now()).unwrap();
         let cfg = refill_run(&mut e);
         let err = e.start_run(cfg, Timestamp::now()).unwrap_err();
-        assert!(matches!(err, EngineError::RefillPumpSilent { address: 2 }), "{err}");
-        assert!(err.hint().is_some());
+        assert!(matches!(err, EngineError::RefillPumpSilent { address: 2, .. }), "{err}");
+        let hint = err.hint().unwrap();
+        assert!(hint.contains("a LabQ on the feed pump's cable"), "{hint}");
+        assert!(!hint.contains("second LabQ") && !hint.contains("  "), "{hint}");
         assert!(e.status().active.is_none());
         assert!(e.pump.transport().get(1).is_none_or(|p| !p.running()), "the feed pump never started");
     }
@@ -714,7 +747,7 @@ mod tests {
         assert_eq!(p.reg(2005), fermentool_modbus::TRANSFERRING);
         assert_eq!(p.reg(1003), 7, "the feed head was never written");
         let st = e.refill_status().unwrap();
-        assert_eq!((st.model, st.head), ("PDS II", Some(2)));
+        assert_eq!((st.model, st.head), ("pds2", Some(2)), "the token, as the feed pump's");
         assert_eq!(e.pump.target(), e.feed, "the feed head is addressed again");
     }
 
@@ -769,6 +802,53 @@ mod tests {
         assert_eq!(e.refill.cfg.pump_model, PumpModelCfg::Labq, "nothing applied");
         e.set_refill(RefillConfig { speed_rpm: 120.0, ..at(2) }, Instant::now()).unwrap();
         assert_eq!(e.refill.cfg.speed_rpm, 120.0);
+    }
+
+    #[test]
+    fn a_silent_pds_refill_head_is_named_with_its_head() {
+        let mut e = engine_on_pds();
+        e.pump.transport_mut().pump(3).logical_heads.insert(2);
+        e.set_refill(pds_head(2), Instant::now()).unwrap();
+        let cfg = refill_run(&mut e);
+        let err = e.start_run(cfg, Timestamp::now()).unwrap_err();
+        assert_eq!(err.to_string(), "the refill pump (address 3, head 2) does not answer");
+        let hint = err.hint().unwrap();
+        assert!(hint.contains("head 2 of a PDS II") && hint.contains("independent operation"), "{hint}");
+        assert!(!hint.contains("LabQ"), "{hint}");
+        let lost: Vec<String> = e
+            .store
+            .events(None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == "refill_pump_lost")
+            .filter_map(|ev| ev.detail)
+            .collect();
+        assert!(
+            lost.iter().any(|d| d.contains("(address 3, head 2)") && d.contains("independent operation")),
+            "{lost:?}"
+        );
+    }
+
+    #[test]
+    fn the_refill_model_is_locked_while_a_crashed_refill_run_waits() {
+        let db = super::super::tests::TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimBus::new(), 1), db.store(), "test");
+            a.set_refill(at(2), Instant::now()).unwrap();
+            let cfg = refill_run(&mut a);
+            a.start_run(cfg, Timestamp::now()).unwrap();
+        } // crash: the run is left open
+        let mut b = Engine::new(Pump::new(SimBus::new(), 1), db.store(), "test");
+        let t0 = Instant::now();
+        b.set_refill(at(2), t0).unwrap();
+        b.refill_after_boot(t0);
+        let labv = RefillConfig { pump_model: PumpModelCfg::Labv, speed_rpm: 100.0, ..at(2) };
+        assert!(b.refill_change_refused(&labv).is_some(), "the check alone says it too");
+        assert!(b.refill_change_refused(&RefillConfig { speed_rpm: 120.0, ..at(2) }).is_none());
+        let err = b.set_refill(labv, t0).unwrap_err();
+        assert!(err.contains("model and head are locked"), "{err}");
+        assert_eq!(b.refill.cfg.pump_model, PumpModelCfg::Labq, "nothing applied");
+        assert!(b.refill_status().unwrap().recovering);
     }
 
     #[test]

@@ -229,7 +229,7 @@ pub struct NewRun {
     pub refill_draw_g: Option<f64>,
     /// The feed pump's model token (`labq`, `labv`, `pds2`).
     pub pump_model: String,
-    /// The PDS II head the run drove (1..=4); `None` on a LabQ or a LabV.
+    /// The PDS II head the run drove (1..=8); `None` on a LabQ or a LabV.
     pub pump_head: Option<u8>,
 }
 
@@ -610,12 +610,40 @@ impl Store {
 
     // ---- tubing calibrations ----
 
+    /// The pump model three calibration measurements ran on, as each run
+    /// recorded it. Refused when a run is missing or they ran on different
+    /// models: one calibration is one pump head.
+    pub fn measurements_pump_model(&self, run_ids: [i64; 3]) -> Result<String> {
+        let mut models = Vec::with_capacity(3);
+        for run_id in run_ids {
+            let run = self
+                .run(run_id)?
+                .ok_or_else(|| StoreError::Invalid(format!("run {run_id} does not exist")))?;
+            models.push(run.pump_model);
+        }
+        if models.iter().any(|m| *m != models[0]) {
+            let labels: Vec<String> = models
+                .iter()
+                .map(|m| fermentool_modbus::PumpModel::parse(m).map_or_else(|| m.clone(), |p| p.label().to_string()))
+                .collect();
+            return Err(StoreError::Invalid(format!(
+                "the three measurements ran on different pumps ({}): measure all three on one",
+                labels.join(", ")
+            )));
+        }
+        Ok(models.swap_remove(0))
+    }
+
     /// Record a tubing calibration. Every derived number (per-burst flow,
     /// mean, CV%, `c0`) is computed here from the three runs' own
     /// `started_at`/`ended_at` and the typed-in weights, never taken from the
     /// client, so the record stays traceable to the raw bursts.
     pub fn insert_calibration(&self, c: &NewCalibration) -> Result<i64> {
         let invalid = |m: String| StoreError::Invalid(m);
+        // ml per rpm is only true on the pump it was measured on.
+        if c.pump_model.trim().is_empty() {
+            return Err(invalid("the pump model the measurements ran on is required".into()));
+        }
         if c.tubing_lot_id.trim().is_empty() {
             return Err(invalid("the tubing lot is required".into()));
         }
@@ -1446,6 +1474,19 @@ mod tests {
             .insert_calibration(&NewCalibration { pump_model: "labv".into(), ..new_calibration(runs, [50.0; 3]) })
             .unwrap();
         assert_eq!(s.calibration(id).unwrap().unwrap().pump_model, "labv");
+    }
+
+    #[test]
+    fn a_calibration_without_a_pump_model_is_refused() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        let err = s
+            .insert_calibration(&NewCalibration { pump_model: " ".into(), ..new_calibration(runs, [50.0; 3]) })
+            .unwrap_err();
+        assert!(matches!(&err, StoreError::Invalid(m) if m.contains("pump model")), "{err:?}");
+        assert!(s.list_calibrations(None).unwrap().is_empty());
+        // The model of three measurements on one pump is theirs.
+        assert_eq!(s.measurements_pump_model(runs).unwrap(), "labq");
     }
 
     #[test]

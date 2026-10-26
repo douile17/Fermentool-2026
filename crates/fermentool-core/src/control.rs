@@ -118,6 +118,8 @@ pub enum Command {
     SetAutoResume(bool, oneshot::Sender<()>),
     /// Apply a `[refill]` section saved from Settings to the live engine.
     SetRefill(RefillConfig, oneshot::Sender<Result<(), String>>),
+    /// Would [`Command::SetRefill`] refuse this `[refill]`? Nothing applied.
+    CheckRefill(RefillConfig, oneshot::Sender<Result<(), String>>),
     /// Settings' Test: run the refill pump 3 s, then stop it.
     RefillTest(oneshot::Sender<Result<(), String>>),
     /// Settings > Pumps: does the refill pump answer (a read, never a Start).
@@ -983,6 +985,10 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         Command::SetRefill(cfg, reply) => {
             let _ = reply.send(engine.set_refill(cfg, Instant::now()));
             true
+        }
+        Command::CheckRefill(cfg, reply) => {
+            let _ = reply.send(engine.refill_change_refused(&cfg).map_or(Ok(()), Err));
+            false
         }
         Command::RefillPing(reply) => {
             let _ = reply.send(engine.refill_ping());

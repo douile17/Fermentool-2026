@@ -233,6 +233,35 @@ fn pump_problem(who: &str, address: u8, model: PumpModelCfg, head: u8, max_rpm: 
     None
 }
 
+/// [`Config::sanitize`] for one pump: each field out of range for `model`
+/// back to its default (`default_address`, head 1, the model's own max),
+/// the model itself never touched. Returns `section.field` of each.
+fn sanitize_pump(
+    section: &str,
+    fields: [&str; 3],
+    address: &mut u8,
+    default_address: u8,
+    model: PumpModelCfg,
+    head: &mut u8,
+    max_rpm: &mut Option<f64>,
+) -> Vec<String> {
+    let m = model.model();
+    let mut fixed = Vec::new();
+    if !(1..=m.max_address()).contains(address) {
+        *address = default_address;
+        fixed.push(format!("{section}.{}", fields[0]));
+    }
+    if model == PumpModelCfg::Pds2 && !(1..=8).contains(head) {
+        *head = 1;
+        fixed.push(format!("{section}.{}", fields[1]));
+    }
+    if max_rpm.is_some_and(|r| !(r.is_finite() && (0.1..=m.max_rpm_ceiling()).contains(&r))) {
+        *max_rpm = None;
+        fixed.push(format!("{section}.{}", fields[2]));
+    }
+    fixed
+}
+
 /// Same physical pump: same address, and on a PDS II (one address, several
 /// heads) the same head.
 pub fn same_pump(a: &PumpTarget, b: &PumpTarget) -> bool {
@@ -628,9 +657,18 @@ impl Config {
             self.serial.baud = d.serial.baud;
             note("serial.baud");
         }
-        if self.pump.problem().is_some() {
-            self.pump = d.pump.clone();
-            note("pump");
+        // Field by field, never the model: a LabV or PDS II reset to a LabQ
+        // would be driven through the wrong register map.
+        for what in sanitize_pump(
+            "pump",
+            ["address", "head", "max_rpm"],
+            &mut self.pump.address,
+            d.pump.address,
+            self.pump.model,
+            &mut self.pump.head,
+            &mut self.pump.max_rpm,
+        ) {
+            note(&what);
         }
         if self.scale.baud == 0 {
             self.scale.baud = d.scale.baud;
@@ -653,9 +691,24 @@ impl Config {
             self.display.tube_sizes = d.display.tube_sizes.clone();
             note("display.tube_sizes");
         }
-        if self.refill.problem().is_some() {
-            self.refill = RefillConfig::default();
-            note("refill");
+        for what in sanitize_pump(
+            "refill",
+            ["pump_address", "pump_head", "pump_max_rpm"],
+            &mut self.refill.pump_address,
+            d.refill.pump_address,
+            self.refill.pump_model,
+            &mut self.refill.pump_head,
+            &mut self.refill.pump_max_rpm,
+        ) {
+            note(&what);
+        }
+        let max = self.refill.max_rpm();
+        let speed = self.refill.speed_rpm;
+        if !(speed.is_finite() && (REFILL_RPM_MIN..=max).contains(&speed)) {
+            self.refill.speed_rpm = max;
+            fixed.push(format!(
+                "config.toml: refill.speed_rpm out of range, the refill pump's max ({max} rpm) used"
+            ));
         }
         fixed
     }
@@ -754,8 +807,23 @@ mod tests {
         c.pump = pump_cfg(PumpModelCfg::Pds2, 3);
         c.pump.head = 9;
         assert!(c.validate().is_err());
-        assert_eq!(c.sanitize().len(), 1);
-        assert_eq!(c.pump.model, PumpModelCfg::Labq);
+        assert_eq!(c.sanitize(), vec!["config.toml: pump.head out of range, default used".to_string()]);
+        assert_eq!((c.pump.model, c.pump.head, c.pump.address), (PumpModelCfg::Pds2, 1, 3), "never the model");
+    }
+
+    #[test]
+    fn sanitize_resets_the_bad_field_and_keeps_the_model() {
+        let mut c = Config::default();
+        c.pump = PumpConfig { address: 3, model: PumpModelCfg::Pds2, head: 2, max_rpm: Some(700.0) };
+        assert_eq!(c.sanitize(), vec!["config.toml: pump.max_rpm out of range, default used".to_string()]);
+        assert_eq!(c.pump.model, PumpModelCfg::Pds2);
+        assert_eq!((c.pump.address, c.pump.head, c.pump.max_rpm), (3, 2, None));
+        assert!(c.validate().is_ok());
+
+        // A LabV refill pump at 40 (over its 32): the address, not the model.
+        c.refill = RefillConfig { pump_address: 40, pump_model: PumpModelCfg::Labv, speed_rpm: 100.0, ..RefillConfig::default() };
+        assert_eq!(c.sanitize(), vec!["config.toml: refill.pump_address out of range, default used".to_string()]);
+        assert_eq!((c.refill.pump_model, c.refill.pump_address, c.refill.speed_rpm), (PumpModelCfg::Labv, 2, 100.0));
     }
 
     #[test]
@@ -774,8 +842,12 @@ mod tests {
         c.refill.speed_rpm = 300.0;
         let e = c.validate().unwrap_err();
         assert!(e.contains("300") && e.contains("150"), "{e}");
-        assert_eq!(c.sanitize().len(), 1);
-        assert_eq!(c.refill.pump_model, PumpModelCfg::Labq);
+        assert_eq!(
+            c.sanitize(),
+            vec!["config.toml: refill.speed_rpm out of range, the refill pump's max (150 rpm) used".to_string()]
+        );
+        assert_eq!(c.refill.pump_model, PumpModelCfg::Labv, "never the model");
+        assert_eq!(c.refill.speed_rpm, 150.0);
         assert!(c.validate().is_ok());
     }
 

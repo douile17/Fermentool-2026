@@ -384,12 +384,12 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
             "the settings were changed meanwhile (another page, or Connect): reload them and save again".into(),
         ));
     }
-    // `[refill]` (Settings, Refill) is applied now, before saving: a Stop
-    // goes to a newly enabled or moved refill pump at once, and a model or
-    // head changed while a run drives it is refused (409), so the file never
-    // runs ahead of the engine. First, as its refusal changes nothing.
+    // `[refill]`: a model or head changed while a run drives it (or one that
+    // did waits to be resumed) is refused (409). Only checked here: it is
+    // applied once the file is saved, so neither a refused balance below nor
+    // a failed save leaves the engine ahead of config.toml.
     s.control
-        .call(|reply| Command::SetRefill(new.refill.clone(), reply))
+        .call(|reply| Command::CheckRefill(new.refill.clone(), reply))
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
@@ -418,6 +418,14 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
     *current = new.clone();
     s.config_rev.fetch_add(1, Ordering::SeqCst);
     drop(current);
+    // Saved: now `[refill]` reaches the engine (a Stop goes to a moved
+    // refill pump at once). Checked above; only a run started in between
+    // can still refuse it, and then the engine keeps the pump it drives.
+    s.control
+        .call(|reply| Command::SetRefill(new.refill.clone(), reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
     // `serial.allow_simulator` gates Start/Resume in the live engine, so a save
     // that flips it must reach the control thread, otherwise the Settings
     // checkbox looks broken until the next reconnect.
@@ -749,12 +757,13 @@ async fn create_calibration(
     State(s): State<AppState>,
     Json(mut cal): Json<NewCalibration>,
 ) -> ApiResult<Response> {
-    // A calibration belongs to the feed pump it is made on: the live
-    // configuration says which, whatever the body claims.
-    cal.pump_model = s.config.read().await.pump.model.model().as_str().to_string();
     let row = s
         .db
         .call(move |db| {
+            // A calibration belongs to the pump its three measurements ran
+            // on, as each run recorded it: never the body, nor the feed pump
+            // configured by the time it is recorded.
+            cal.pump_model = db.measurements_pump_model(cal.run_ids)?;
             db.insert_calibration(&cal).and_then(|id| {
                 // Only one session is ever in progress: once it is recorded
                 // the draft has served its purpose.
@@ -1573,6 +1582,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_settings_save_that_fails_leaves_the_refill_pump_as_it_was() {
+        // config.toml cannot be written: its folder is a file.
+        let blocker = std::env::temp_dir().join(format!("ft-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, "not a folder").unwrap();
+        let mut st = test_state();
+        st.config_path = Arc::new(blocker.join("config.toml"));
+        let app = router(st);
+        let put = |body: serde_json::Value| {
+            Request::builder()
+                .method("PUT")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let mut cfg = body_json(app.clone().oneshot(get("/api/config")).await.unwrap()).await;
+        // The feed pump's address: a ping there is refused, so it shows
+        // whether the engine took it.
+        cfg["refill"]["pump_address"] = json!(1);
+        assert_eq!(app.clone().oneshot(put(cfg)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        let saved = body_json(app.clone().oneshot(get("/api/config")).await.unwrap()).await;
+        assert_eq!(saved["refill"]["pump_address"], 2, "nothing saved");
+        let res = app.oneshot(post_json("/api/refill/ping", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "the engine still has the refill pump at 2");
+        assert_eq!(body_json(res).await["responding"], false);
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[tokio::test]
     async fn a_stop_for_another_run_is_refused() {
         let app = router(test_state());
         let start = post_json(
@@ -1952,6 +1990,11 @@ mod tests {
     /// bursts are seeded directly because their durations must be real
     /// minutes, which an API-driven start/stop in a test cannot give.
     fn state_with_three_bursts() -> (AppState, [i64; 3]) {
+        state_with_bursts_on(["labq"; 3])
+    }
+
+    /// [`state_with_three_bursts`], each burst run on the pump model given.
+    fn state_with_bursts_on(models: [&str; 3]) -> (AppState, [i64; 3]) {
         use crate::store::{ControlVar, Direction, NewRun, RunKind};
         let db = test_db();
         let store = Store::open(&db).unwrap();
@@ -1976,7 +2019,7 @@ mod tests {
                     density_g_per_ml: None,
                     auto_refill: false,
                     refill_draw_g: None,
-                    pump_model: "labq".into(),
+                    pump_model: models[i].into(),
                     pump_head: None,
                 })
                 .unwrap();
@@ -2064,18 +2107,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_calibration_takes_the_configured_feed_pump_model() {
-        let (state, runs) = state_with_three_bursts();
-        state.config.write().await.pump.model = PumpModelCfg::Labv;
+    async fn a_calibration_takes_the_model_its_measurements_ran_on() {
+        // Measured on a LabV; by Record time the feed pump is a LabQ again.
+        let (state, runs) = state_with_bursts_on(["labv"; 3]);
+        state.config.write().await.pump.model = PumpModelCfg::Labq;
         let app = router(state);
         // The body claims another model: ignored.
         let mut body = calibration_body(runs, [50.0; 3]);
-        body["pump_model"] = json!("labq");
+        body["pump_model"] = json!("pds2");
         let res = app.clone().oneshot(post_json("/api/calibrations", body)).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         assert_eq!(body_json(res).await["pump_model"], "labv");
         let list = body_json(app.oneshot(get("/api/calibrations")).await.unwrap()).await;
         assert_eq!(list[0]["pump_model"], "labv");
+    }
+
+    #[tokio::test]
+    async fn measurements_on_two_models_are_no_calibration() {
+        let (state, runs) = state_with_bursts_on(["labq", "labv", "labq"]);
+        let app = router(state);
+        let res = app.clone().oneshot(post_json("/api/calibrations", calibration_body(runs, [50.0; 3]))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(res).await.to_string();
+        assert!(msg.contains("LabQ") && msg.contains("LabV"), "{msg}");
+        // A measurement that does not exist: refused the same way.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/calibrations", calibration_body([runs[0], runs[2], 999], [50.0; 3])))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let list = body_json(app.oneshot(get("/api/calibrations")).await.unwrap()).await;
+        assert!(list.as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
