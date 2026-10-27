@@ -7047,6 +7047,7 @@ mod tests {
             .map(|&(at_seconds, value)| fermentool_curves::StepSegment { at_seconds, value })
             .collect();
         CurveSpec {
+            overrides: Vec::new(),
             params: fermentool_curves::CurveParams::Step { segments },
             ..CurveSpec::constant(steps[0].1, Duration::from_secs(3600))
         }

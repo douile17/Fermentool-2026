@@ -184,6 +184,12 @@ pub struct CurveSpec {
     pub clamp_min: f64,
     pub clamp_max: f64,
     pub params: CurveParams,
+    /// Rates held from a time on, whatever the curve does after it: the last
+    /// one at or before the elapsed time replaces the curve's value. Set by
+    /// [`CurveSpec::with_rate_changes`] for the shapes that cannot be turned
+    /// into a Step profile; empty (and not serialised) otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<StepSegment>,
 }
 
 impl CurveSpec {
@@ -202,6 +208,7 @@ impl CurveSpec {
             clamp_min: 0.0,
             clamp_max: f64::MAX,
             params,
+            overrides: Vec::new(),
         }
     }
 
@@ -275,10 +282,19 @@ impl CurveSpec {
     /// Constant) is returned as is. Pure, so a resume rebuilds the same curve
     /// from the journalled changes. The duration is stretched to the last
     /// change, a change made in the hold phase counts from its time only.
+    /// Any other shape keeps its curve and its duration untouched: the
+    /// changes become `overrides`, each held from its time on.
     pub fn with_rate_changes(&self, changes: &[(f64, f64)]) -> CurveSpec {
         let (Some(&(last_at, last_value)), CurveParams::Constant) = (changes.last(), &self.params)
         else {
-            return self.clone();
+            let mut c = self.clone();
+            if !changes.is_empty() {
+                c.overrides = changes
+                    .iter()
+                    .map(|&(at_seconds, value)| StepSegment { at_seconds, value })
+                    .collect();
+            }
+            return c;
         };
         let mut segments = vec![StepSegment {
             at_seconds: 0.0,
@@ -301,6 +317,7 @@ impl CurveSpec {
             clamp_min: self.clamp_min,
             clamp_max: self.clamp_max,
             params: CurveParams::Step { segments },
+            overrides: Vec::new(),
         }
     }
 
@@ -332,6 +349,15 @@ impl CurveSpec {
         let mut c = self.clone();
         c.end = self.effective_end();
         c
+    }
+
+    /// The value of the last override at or before `elapsed_s`, if any.
+    fn override_at(&self, elapsed_s: f64) -> Option<f64> {
+        self.overrides
+            .iter()
+            .rev()
+            .find(|o| o.at_seconds <= elapsed_s)
+            .map(|o| o.value)
     }
 
     /// Setpoint for a given elapsed time, already clamped to `[clamp_min, clamp_max]`.
@@ -372,6 +398,7 @@ impl CurveSpec {
         // `value_at` total anyway: a non-finite `end` can make `lerp` yield NaN
         // (`s + inf·0`), and a NaN setpoint must never leave this function.
         // Fall back to `start`, a known-good value.
+        let raw = self.override_at(elapsed.as_secs_f64()).unwrap_or(raw);
         let raw = if raw.is_nan() { s } else { raw };
         // Not `f64::clamp`, it panics if a bound is NaN or `min > max`.
         // `validate()` forbids both, but a spec that skipped validation (e.g.
@@ -398,11 +425,17 @@ impl CurveSpec {
             CurveParams::Custom { points, .. } => times.extend(points.iter().map(|p| p.at_seconds)),
             _ => {}
         }
-        times
+        let curve_peak = times
             .into_iter()
             .filter(|t| t.is_finite())
             .map(|t| self.value_at(Duration::from_secs_f64(t.clamp(0.0, d))))
-            .fold(f64::MIN, f64::max)
+            .fold(f64::MIN, f64::max);
+        // An override may sit past the end, where the samples never look.
+        self.overrides
+            .iter()
+            .filter(|o| o.at_seconds.is_finite() && o.at_seconds >= 0.0)
+            .map(|o| self.value_at(Duration::from_secs_f64(o.at_seconds)))
+            .fold(curve_peak, f64::max)
     }
 
     /// Sample the curve into `(elapsed_seconds, value)` pairs for the UI preview
@@ -696,6 +729,7 @@ mod tests {
     #[test]
     fn linear_physio_derives_end_from_slope() {
         let c = CurveSpec {
+            overrides: Vec::new(),
             mode: ParamMode::Physio,
             start: 10.0,
             end: 0.0,
@@ -734,7 +768,67 @@ mod tests {
         let c = CurveSpec::constant(5.0, hours(3));
         assert_eq!(c.with_rate_changes(&[]), c);
         let l = CurveSpec::linear(1.0, 9.0, hours(2));
-        assert_eq!(l.with_rate_changes(&[(60.0, 3.0)]), l);
+        let o = l.with_rate_changes(&[(60.0, 3.0)]);
+        assert_eq!(
+            o.overrides,
+            vec![StepSegment {
+                at_seconds: 60.0,
+                value: 3.0
+            }]
+        );
+        assert_eq!(o.params, l.params);
+        assert_eq!(o.duration, l.duration);
+    }
+
+    #[test]
+    fn an_override_holds_from_its_time() {
+        let c = CurveSpec::exponential_endpoints(1.0, 8.0, hours(1));
+        let o = c.with_rate_changes(&[(4000.0, 2.5)]);
+        assert!(close(o.value_at(hours(1)), 8.0));
+        assert!(close(o.value_at(Duration::from_secs(3999)), 8.0));
+        assert!(close(o.value_at(Duration::from_secs(4000)), 2.5));
+        assert!(close(o.value_at(Duration::from_secs(90_000)), 2.5));
+        let two = c.with_rate_changes(&[(4000.0, 2.5), (5000.0, 3.0)]);
+        assert!(close(two.value_at(Duration::from_secs(4500)), 2.5));
+        assert!(close(two.value_at(Duration::from_secs(5000)), 3.0));
+    }
+
+    #[test]
+    fn an_override_never_reshapes_the_curve() {
+        let c = CurveSpec::exponential_endpoints(1.0, 8.0, hours(1));
+        let o = c.with_rate_changes(&[(4000.0, 2.5)]);
+        assert_eq!(o.duration, c.duration);
+        for t in (0..=3600).step_by(60) {
+            let e = Duration::from_secs(t);
+            assert_eq!(o.value_at(e), c.value_at(e));
+        }
+    }
+
+    #[test]
+    fn an_override_is_clamped() {
+        let c = CurveSpec::exponential_endpoints(1.0, 8.0, hours(1)).with_clamp(0.5, 10.0);
+        let o = c.with_rate_changes(&[(4000.0, 20.0)]);
+        assert!(close(o.value_at(Duration::from_secs(5000)), 10.0));
+    }
+
+    #[test]
+    fn peak_counts_the_overrides() {
+        let c = CurveSpec::linear(1.0, 8.0, hours(1));
+        let o = c.with_rate_changes(&[(5000.0, 12.0)]);
+        assert!(close(o.peak_value(), 12.0));
+    }
+
+    #[test]
+    fn old_json_has_no_overrides() {
+        let c = CurveSpec::linear(1.0, 8.0, hours(1));
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(!json.contains("overrides"));
+        let back: CurveSpec = serde_json::from_str(&json).unwrap();
+        assert!(back.overrides.is_empty());
+        let o = c.with_rate_changes(&[(5000.0, 12.0)]);
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(json.contains("overrides"));
+        assert_eq!(serde_json::from_str::<CurveSpec>(&json).unwrap(), o);
     }
 
     #[test]
@@ -776,6 +870,7 @@ mod tests {
     #[test]
     fn sigmoid_physio_stays_within_endpoints_and_crosses_mean_at_midpoint() {
         let c = CurveSpec {
+            overrides: Vec::new(),
             mode: ParamMode::Physio,
             start: 0.0,
             end: 100.0,
@@ -808,6 +903,7 @@ mod tests {
         // Inflection well off-centre: a raw logistic would start far from `start`
         // and finish short of `end`; the normalised form pins both.
         let rising = CurveSpec {
+            overrides: Vec::new(),
             mode: ParamMode::Physio,
             start: 10.0,
             end: 40.0,
@@ -827,6 +923,7 @@ mod tests {
         // Negative rate with the same endpoints: still runs start -> end,
         // monotonically (the normalisation flips sign with the denominator).
         let falling_rate = CurveSpec {
+            overrides: Vec::new(),
             params: CurveParams::Sigmoid(SigmoidParams {
                 k_per_hour: -1.0,
                 midpoint_hours: 6.0,
@@ -848,6 +945,7 @@ mod tests {
     #[test]
     fn step_holds_each_segment_and_is_order_independent() {
         let c = CurveSpec {
+            overrides: Vec::new(),
             mode: ParamMode::Endpoints,
             start: 5.0,
             end: 5.0,
@@ -891,6 +989,7 @@ mod tests {
             },
         ];
         let lin = CurveSpec {
+            overrides: Vec::new(),
             mode: ParamMode::Endpoints,
             start: 10.0,
             end: 20.0,
@@ -907,6 +1006,7 @@ mod tests {
         assert!(close(lin.value_at(Duration::from_secs(200)), 20.0));
 
         let hold = CurveSpec {
+            overrides: Vec::new(),
             params: CurveParams::Custom {
                 points: pts,
                 interp: Interp::Hold,
@@ -954,6 +1054,7 @@ mod tests {
         // ran at 3.5 to the last second.
         let d = 56_664.0;
         let c = CurveSpec {
+            overrides: Vec::new(),
             mode: ParamMode::Endpoints,
             start: 3.5,
             end: 0.0,
@@ -1012,12 +1113,14 @@ mod tests {
             .is_err());
 
         let empty_step = CurveSpec {
+            overrides: Vec::new(),
             params: CurveParams::Step { segments: vec![] },
             ..CurveSpec::constant(1.0, hours(1))
         };
         assert!(empty_step.validate().is_err());
 
         let bad_custom = CurveSpec {
+            overrides: Vec::new(),
             duration: Duration::from_secs(100),
             params: CurveParams::Custom {
                 points: vec![
@@ -1043,6 +1146,7 @@ mod tests {
         assert!(exp_overflow.validate().is_err());
 
         let lin_overflow = CurveSpec {
+            overrides: Vec::new(),
             mode: ParamMode::Physio,
             params: CurveParams::Linear(LinearParams { rate_per_hour: 1e307 }),
             ..CurveSpec::linear(1.0, 1.0, hours(100))
@@ -1062,6 +1166,7 @@ mod tests {
         // returns a number instead of panicking in `f64::clamp` when a caller
         // skips validation.
         let bad_clamp = CurveSpec {
+            overrides: Vec::new(),
             clamp_max: f64::NAN,
             ..CurveSpec::linear(1.0, 2.0, hours(1))
         };
@@ -1074,6 +1179,7 @@ mod tests {
     fn the_peak_includes_a_narrow_step_between_samples() {
         // 1 h at 10, with a 2 s spike to 900 that no even sample lands on.
         let c = CurveSpec {
+            overrides: Vec::new(),
             params: CurveParams::Step {
                 segments: vec![
                     StepSegment { at_seconds: 1001.0, value: 900.0 },
@@ -1094,6 +1200,7 @@ mod tests {
             CurveSpec::sigmoid_endpoints(1.0, 2.0, hours(1)),
             CurveSpec::constant(3.0, hours(1)),
             CurveSpec {
+                overrides: Vec::new(),
                 params: CurveParams::Step {
                     segments: vec![StepSegment {
                         at_seconds: 0.0,
@@ -1103,6 +1210,7 @@ mod tests {
                 ..CurveSpec::constant(1.0, hours(1))
             },
             CurveSpec {
+                overrides: Vec::new(),
                 params: CurveParams::Custom {
                     points: vec![
                         CustomPoint {
