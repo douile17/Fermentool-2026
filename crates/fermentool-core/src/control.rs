@@ -608,7 +608,7 @@ fn control_loop<T: Transport + SwapTransport>(
                                 None => Err(crate::engine::EngineError::Idle.detail()),
                                 Some(s) => {
                                     let elapsed_s = now.duration_since(s).as_secs_f64().max(0.0);
-                                    engine.set_constant_rate(value, elapsed_s, now).map_err(|e| e.detail())
+                                    engine.set_rate(value, elapsed_s, now).map_err(|e| e.detail())
                                 }
                             };
                             let ok = res.is_ok();

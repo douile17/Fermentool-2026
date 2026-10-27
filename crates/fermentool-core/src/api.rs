@@ -612,7 +612,8 @@ struct RateBody {
     value: f64,
 }
 
-/// Change the rate of the active Constant run. Refusals come back as for a
+/// Change the rate of the active run: a Constant one, or any curve once it
+/// holds its end value. Refusals come back as for a
 /// start (`{ error, code, hint }`).
 async fn set_active_rate(State(s): State<AppState>, Json(b): Json<RateBody>) -> ApiResult<Response> {
     let (from, to) = s
