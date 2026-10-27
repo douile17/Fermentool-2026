@@ -898,6 +898,22 @@ struct Tracker {
     /// measure (refill, touch, anchor held): its write-off waits for the
     /// first `Normal` read, once the anchor is settled.
     reset_pending: Option<f64>,
+    /// The last write-off done, so a slow-rise refill recognised after it
+    /// can take back the gain it counted as owed feed.
+    last_reset: Option<ChangeReset>,
+}
+
+/// A rate change's write-off, as done.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ChangeReset {
+    /// Run elapsed time of the change (its row).
+    change_s: f64,
+    /// Time of the last `Normal` read the owed feed was measured on.
+    at_s: f64,
+    /// Grams written off.
+    g: f64,
+    /// c from the change on.
+    c: f64,
 }
 
 impl Tracker {
@@ -1690,18 +1706,26 @@ impl<T: Transport> Engine<T> {
     /// so they see only the new rate. An alarm in force stays.
     fn reset_trim_at_change(&mut self, run_id: i64, elapsed_s: f64, c: f64) {
         self.trim_c = c;
-        let measuring = self.scale_state == trim::ScaleState::Normal && self.tracker.anchor.is_none();
-        let tr = &mut self.tracker;
-        if measuring {
-            let owed = tr.owed_g();
-            tr.reset_g += owed;
-            tr.reset_pending = None;
-            if let Err(e) = self.store.set_change_reset(run_id, elapsed_s, owed) {
-                tracing::warn!("rate change write-off not recorded: {e}");
-            }
-        } else {
-            tr.reset_pending = Some(elapsed_s);
+        // A write-off waiting from an earlier change in the same unmeasured
+        // stretch is superseded by this one: that row wrote off nothing.
+        if let Some(prev) = self.tracker.reset_pending.take() {
+            self.record_change_reset(run_id, prev, 0.0);
         }
+        let measuring = self.scale_state == trim::ScaleState::Normal && self.tracker.anchor.is_none();
+        if self.tracker.alarm.is_some() {
+            // Nothing written off under an alarm: its own write-off
+            // (`forgiven_g`) covers the missed feed when it clears, and a
+            // wrong-side count means nothing.
+            self.tracker.last_reset = None;
+            self.record_change_reset(run_id, elapsed_s, 0.0);
+        } else if measuring {
+            let at_s = self.tracker.last_t_s.unwrap_or(elapsed_s);
+            self.write_off_owed(run_id, elapsed_s, at_s);
+        } else {
+            self.tracker.last_reset = None;
+            self.tracker.reset_pending = Some(elapsed_s);
+        }
+        let tr = &mut self.tracker;
         tr.points.clear();
         tr.saturated_updates = 0;
         tr.saturated_since_t = None;
@@ -1711,6 +1735,22 @@ impl<T: Transport> Engine<T> {
             tr.c_hist.push_back((elapsed_s, c));
         }
         self.save_trim_state();
+    }
+
+    /// Write off the owed feed for the change at `change_s`, measured on the
+    /// read at `at_s`, and record it on the change's row.
+    fn write_off_owed(&mut self, run_id: i64, change_s: f64, at_s: f64) {
+        let tr = &mut self.tracker;
+        let g = tr.owed_g();
+        tr.reset_g += g;
+        tr.last_reset = Some(ChangeReset { change_s, at_s, g, c: self.trim_c });
+        self.record_change_reset(run_id, change_s, g);
+    }
+
+    fn record_change_reset(&self, run_id: i64, change_s: f64, g: f64) {
+        if let Err(e) = self.store.set_change_reset(run_id, change_s, g) {
+            tracing::warn!("rate change write-off not recorded: {e}");
+        }
     }
 
     /// [`TICK_INTERVAL`] while a run is active, so the control loop knows how
@@ -2660,15 +2700,12 @@ impl<T: Transport> Engine<T> {
         // A rate change made while the balance could not measure: the gap
         // is measured now, written off now.
         if let Some(change_s) = tr.reset_pending.take() {
-            let owed = tr.owed_g();
-            tr.reset_g += owed;
             save = true;
             if let Some(run_id) = self.active.as_ref().map(|a| a.id) {
-                if let Err(e) = self.store.set_change_reset(run_id, change_s, owed) {
-                    tracing::warn!("rate change write-off not recorded: {e}");
-                }
+                self.write_off_owed(run_id, change_s, t);
             }
         }
+        let tr = &mut self.tracker;
         if let Some(last) = self.recent_reads.back_mut() {
             last.1 = Some(tr.delivered_g);
         }
@@ -2946,8 +2983,21 @@ impl<T: Transport> Engine<T> {
         tr.last_normal_commanded_g = low.commanded_g;
         tr.points.retain(|p| p.t_s <= low.t_s);
         tr.anchor = None;
-        if let Some(c) = tracking::c_at(&tr.c_hist, low.t_s) {
-            self.trim_c = c;
+        match tr.last_reset.filter(|r| r.at_s > low.t_s) {
+            // A rate change was written off on reads that counted the
+            // pour as owed feed: take it back, the settled anchor writes
+            // off what is really owed. c stays the change's.
+            Some(r) => {
+                tr.reset_g -= r.g;
+                tr.reset_pending = Some(r.change_s);
+                tr.last_reset = None;
+                self.trim_c = r.c;
+            }
+            None => {
+                if let Some(c) = tracking::c_at(&tr.c_hist, low.t_s) {
+                    self.trim_c = c;
+                }
+            }
         }
         self.refill_before_g = Some(low.weight_g * self.scale_cfg.position.sign());
     }
@@ -7230,6 +7280,13 @@ mod tests {
         assert!(raised.first().is_some_and(|&t| t > CUT_AT), "{:?}", alarm_events(&e, id));
     }
 
+    /// The balance reads `w`, then the second's tick.
+    fn read_and_tick(e: &mut Engine<SimPump>, w: f64, i: i64) {
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+        e.scale_tick(at(i));
+        e.tick(at(i)).unwrap();
+    }
+
     /// One second of a trimmed run with a 97 % pump, stopped for 12 s that
     /// the read before `owe_until` sees (1 g owed at 5 ml/min): the grams the
     /// bottle loses.
@@ -7258,9 +7315,7 @@ mod tests {
                 e.set_rate(2.0, i as f64, at(i)).unwrap();
                 changed = Some(i);
             }
-            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
-            e.scale_tick(at(i));
-            e.tick(at(i)).unwrap();
+            read_and_tick(&mut e, w, i);
             if changed.is_some() && written.is_none() {
                 let reset = change_reset(&e, id, 0);
                 if e.scale_state == trim::ScaleState::Normal && e.tracker.anchor.is_none() {
@@ -7284,6 +7339,100 @@ mod tests {
         assert!(truth > 0.8, "1 g owed, truth {truth}");
         assert!((reset - truth).abs() <= 0.1, "written off {reset} g at {normal_at} s, owed {truth} g there");
         assert_eq!(event_times(&e, id, "refill").len(), 1, "the real refill only");
+        assert!(alarm_events(&e, id).is_empty(), "{:?}", alarm_events(&e, id));
+    }
+
+    #[test]
+    fn a_change_superseded_during_a_refill_writes_off_nothing() {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: five_ml_min(), ..trim_cfg() }, t0()).unwrap();
+        let refill_at = 1800;
+        let mut w = 1_000.0;
+        let (mut requested, mut fed) = (0.0, 0.0);
+        let mut written = None;
+        for i in 0..refill_at + 300 {
+            if i == refill_at {
+                w += 300.0;
+            }
+            if i == refill_at + 3 {
+                e.set_rate(2.0, i as f64, at(i)).unwrap();
+            }
+            if i == refill_at + 6 {
+                e.set_rate(3.0, i as f64, at(i)).unwrap();
+                assert_eq!(change_reset(&e, id, 0), Some(0.0), "superseded: nothing written off on it");
+                assert_eq!(change_reset(&e, id, 1), None);
+            }
+            read_and_tick(&mut e, w, i);
+            if i > refill_at + 6 && written.is_none() && e.scale_state == trim::ScaleState::Normal && e.tracker.anchor.is_none() {
+                written = Some(requested - fed);
+            }
+            let rate = e.active.as_ref().unwrap().spec.value_at(Duration::from_secs(i as u64));
+            requested += rate / 60.0;
+            let out = feed_owing(&e, i, refill_at);
+            w -= out;
+            fed += out;
+        }
+        let truth = written.expect("the balance came back to Normal");
+        let reset = change_reset(&e, id, 1).expect("written off on the last change");
+        assert_eq!(change_reset(&e, id, 0), Some(0.0));
+        assert!((reset - truth).abs() <= 0.1, "written off {reset} g, owed {truth} g there");
+        assert!((e.tracker.reset_g - reset).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_change_during_a_slow_rise_writes_off_only_the_feed_owed() {
+        // 60 ml/min on a 90 % pump, 2 s stopped (about 2 g owed, a minute
+        // before the rise: out of the rewind's 30 s window, whose lowest
+        // level would sit before a stop), then a
+        // transfer pump adds 5 g a read: under the 5 g perturbation limit,
+        // read as feed running backwards until the rise is recognised. The
+        // rate changes in between.
+        let spec = CurveSpec::constant(60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec, ..trim_cfg() }, t0()).unwrap();
+        let (rise_at, change_at) = (1800, 1805);
+        let mut w = 5_000.0;
+        let (mut requested, mut fed) = (0.0, 0.0);
+        let mut c_change = None;
+        let mut refilling = false;
+        let mut written = None;
+        let mut owed_after = Vec::new();
+        for i in 0..rise_at + 1800 {
+            if (rise_at..rise_at + 60).contains(&i) {
+                w += 5.0;
+            }
+            if i == change_at {
+                assert_eq!(e.scale_state, trim::ScaleState::Normal, "the rise is not seen yet");
+                e.set_rate(90.0, i as f64, at(i)).unwrap();
+                c_change = Some(e.trim_c());
+            }
+            read_and_tick(&mut e, w, i);
+            refilling |= e.scale_state != trim::ScaleState::Normal;
+            if refilling {
+                if written.is_none() && e.scale_state == trim::ScaleState::Normal && e.tracker.anchor.is_none() {
+                    written = Some((i, requested - fed, e.trim_c()));
+                } else if written.is_some() {
+                    owed_after.push(e.tracker.owed_g());
+                }
+            }
+            let rate = e.active.as_ref().unwrap().spec.value_at(Duration::from_secs(i as u64));
+            requested += rate / 60.0;
+            let out = if (rise_at - 60..rise_at - 58).contains(&i) { 0.0 } else { 0.9 * rate / 60.0 * e.trim_c() };
+            w -= out;
+            fed += out;
+        }
+        let (normal_at, truth, c_normal) = written.expect("the balance came back to Normal");
+        assert!(truth > 1.0, "about 2 g owed, truth {truth}");
+        let reset = e.tracker.reset_g;
+        assert!((reset - truth).abs() <= 0.1, "written off {reset} g at {normal_at} s, owed {truth} g there");
+        assert_eq!(change_reset(&e, id, 0), Some(reset), "the row holds the corrected write-off");
+        let c_change = c_change.unwrap();
+        assert!((c_normal - c_change).abs() < 0.01, "c {c_normal} after the refill, {c_change} at the change");
+        let worst = owed_after.iter().map(|g| g.abs()).fold(0.0, f64::max);
+        assert!(worst <= 0.3, "owed up to {worst} g after the refill");
+        assert_eq!(event_times(&e, id, "refill").len(), 1);
         assert!(alarm_events(&e, id).is_empty(), "{:?}", alarm_events(&e, id));
     }
 
@@ -7312,6 +7461,9 @@ mod tests {
         assert_eq!(raised.len(), 1, "{raised:?}");
         assert!(raised[0] < change, "raised at {}", raised[0]);
         assert_eq!(cs[change as usize], cs[change as usize - 1], "c frozen through the change");
+        // Nothing written off under the alarm: its own write-off covers it.
+        assert_eq!(change_reset(&e, id, 0), Some(0.0));
+        assert_eq!(e.tracker.reset_g, 0.0);
         // Cleared only once the feed flows: the alarm stood through the change.
         let cleared = event_times(&e, id, "alarm_cleared");
         assert_eq!(cleared.len(), 1, "{cleared:?}");
@@ -7373,9 +7525,7 @@ mod tests {
                     assert_eq!(a.scale_state, trim::ScaleState::RefillPending);
                     a.set_rate(2.0, i as f64, at(i)).unwrap();
                 }
-                a.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
-                a.scale_tick(at(i));
-                a.tick(at(i)).unwrap();
+                read_and_tick(&mut a, w, i);
                 let rate = a.active.as_ref().unwrap().spec.value_at(Duration::from_secs(i as u64));
                 requested += rate / 60.0;
                 let out = feed_owing(&a, i, refill_at);
@@ -7398,9 +7548,7 @@ mod tests {
         assert_eq!(b.tracker.reset_pending, Some(change_at as f64), "the pending write-off was restored");
         let mut written = None;
         for i in resume_at..resume_at + 300 {
-            b.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
-            b.scale_tick(at(i));
-            b.tick(at(i)).unwrap();
+            read_and_tick(&mut b, w, i);
             if written.is_none() {
                 if b.scale_state == trim::ScaleState::Normal && b.tracker.anchor.is_none() {
                     let reset = change_reset(&b, id, 0).expect("written off at the first Normal read");
