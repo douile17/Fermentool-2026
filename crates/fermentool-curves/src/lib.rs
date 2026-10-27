@@ -578,6 +578,16 @@ impl CurveSpec {
                 }
             }
         }
+        let mut prev = 0.0;
+        for o in &self.overrides {
+            if !o.at_seconds.is_finite() || !o.value.is_finite() {
+                return Err("rate change times and values must be finite".into());
+            }
+            if o.at_seconds < prev {
+                return Err("rate change times must be >= 0 and in time order".into());
+            }
+            prev = o.at_seconds;
+        }
         Ok(())
     }
 }
@@ -809,6 +819,22 @@ mod tests {
         let c = CurveSpec::exponential_endpoints(1.0, 8.0, hours(1)).with_clamp(0.5, 10.0);
         let o = c.with_rate_changes(&[(4000.0, 20.0)]);
         assert!(close(o.value_at(Duration::from_secs(5000)), 10.0));
+    }
+
+    #[test]
+    fn bad_overrides_are_refused() {
+        let c = CurveSpec::linear(1.0, 8.0, hours(1));
+        assert!(c.with_rate_changes(&[(3600.0, 2.0), (4000.0, 3.0)]).validate().is_ok());
+        for bad in [
+            vec![(f64::NAN, 2.0)],
+            vec![(f64::INFINITY, 2.0)],
+            vec![(-1.0, 2.0)],
+            vec![(4000.0, 2.0), (3700.0, 3.0)],
+            vec![(4000.0, f64::NAN)],
+            vec![(4000.0, f64::INFINITY)],
+        ] {
+            assert!(c.with_rate_changes(&bad).validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

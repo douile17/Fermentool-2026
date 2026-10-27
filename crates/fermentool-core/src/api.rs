@@ -577,6 +577,11 @@ async fn notify_ack(State(s): State<AppState>, Json(a): Json<NotifyAck>) -> ApiR
 }
 
 async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -> ApiResult<Response> {
+    // Overrides are only ever built by the engine from the rate changes it
+    // recorded: a new run starts on its curve alone.
+    if !cfg.curve.overrides.is_empty() {
+        return Err(ApiError::Bad("a new run cannot carry rate changes (overrides)".into()));
+    }
     // A dosing run names who it belongs to, so its alerts reach them and no
     // one else: required once anyone is set up for notifications. The name
     // is stored as configured (its case), a calibration burst goes without.
@@ -1497,6 +1502,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_run_with_overrides_is_refused() {
+        // Overrides are the engine's, built from the changes it recorded.
+        let app = router(test_state());
+        let mut curve = linear_curve();
+        curve["overrides"] = json!([{ "at_seconds": 4000, "value": 2 }]);
+        let start = post_json(
+            "/api/runs",
+            json!({
+                "name": "t", "control_var": "rpm", "direction": "cw",
+                "pump_addr": 1, "curve": curve
+            }),
+        );
+        let res = app.clone().oneshot(start).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = app.oneshot(get("/api/status")).await.unwrap();
+        assert!(body_json(res).await["active"].is_null());
+    }
+
+    #[tokio::test]
     async fn run_lifecycle_over_http() {
         let app = router(test_state());
 
@@ -2396,11 +2420,21 @@ mod tests {
             .add_setpoint_change(id, 60.0, 2.0, started + jiff::SignedDuration::from_secs(60))
             .unwrap();
         store.set_change_reset(id, 60.0, 0.5).unwrap();
+        // ahead at a change: a negative write-off, listed with its sign;
+        // an exact 0 (a change superseded before it measured) is not listed
+        store
+            .add_setpoint_change(id, 90.0, 3.0, started + jiff::SignedDuration::from_secs(90))
+            .unwrap();
+        store.set_change_reset(id, 90.0, -0.25).unwrap();
+        store
+            .add_setpoint_change(id, 100.0, 4.0, started + jiff::SignedDuration::from_secs(100))
+            .unwrap();
+        store.set_change_reset(id, 100.0, 0.0).unwrap();
         drop(store);
         let app = router(test_state_at(&db));
         let res = app.oneshot(get(&format!("/api/runs/{id}/tracking"))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_json(res).await;
-        assert_eq!(body["resets"], json!([[60.0, 0.5]]));
+        assert_eq!(body["resets"], json!([[60.0, 0.5], [90.0, -0.25]]));
     }
 }

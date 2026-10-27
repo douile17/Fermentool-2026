@@ -553,6 +553,10 @@ pub struct ActiveStatus {
     pub tick_interval_s: u32,
     pub last_seq: Option<i64>,
     pub last_target: Option<f64>,
+    /// The curve's value at the last tick (rate changes and clamps
+    /// included, before the balance correction c): what the run asks for,
+    /// the hold rate once its curve is done. `last_target` is it times c.
+    pub curve_value: Option<f64>,
     /// Commanded volume delivered so far, mL. `Some` only for
     /// `ControlVar::MlMin`. An open-loop estimate (trapezoid integral of the
     /// setpoint the daemon wrote), not a measured flow.
@@ -598,6 +602,9 @@ struct ActiveRun {
     duration_s: i64,
     next_seq: i64,
     last_target: Option<f64>,
+    /// See [`ActiveStatus::curve_value`]: set by `tick`, `set_rate`, a
+    /// start and a resume.
+    curve_value: f64,
     /// Setpoint last written to the pump, already snapped to [`setpoint_grid`].
     /// [`Engine::apply_setpoint`] compares against this to skip no-op writes.
     last_write_q: Option<f64>,
@@ -1556,6 +1563,7 @@ impl<T: Transport> Engine<T> {
             tick_interval_s: TICK_INTERVAL.as_secs() as u32,
             last_seq: (a.next_seq > 0).then_some(a.next_seq - 1),
             last_target: a.last_target,
+            curve_value: Some(a.curve_value),
             volume_added_ml: a.volume_added_ml,
             gravimetric_trim: a.gravimetric_trim,
             kind: a.kind,
@@ -1623,6 +1631,12 @@ impl<T: Transport> Engine<T> {
         }
         // Changes stay in time order, as `with_rate_changes` reads them.
         let elapsed_s = a.rate_changes.last().map_or(elapsed_s.max(0.0), |&(t, _)| elapsed_s.max(t));
+        // A hold change never lands inside the curve, whatever time it came with.
+        let elapsed_s = if matches!(a.base_spec.params, CurveParams::Constant) {
+            elapsed_s
+        } else {
+            elapsed_s.max(a.duration_s as f64)
+        };
         let id = a.id;
         let from = a.spec.value_at(Duration::from_secs_f64(elapsed_s));
         let control_var = a.control_var;
@@ -1657,6 +1671,7 @@ impl<T: Transport> Engine<T> {
         let a = self.active.as_mut().expect("checked above");
         a.rate_changes.push((elapsed_s, value));
         a.spec = a.base_spec.with_rate_changes(&a.rate_changes);
+        a.curve_value = a.spec.value_at(Duration::from_secs_f64(elapsed_s));
         // Close the commanded volume at the old rate up to the change, so
         // the next tick's trapezoid starts on the new one instead of
         // averaging the two over that second.
@@ -1900,7 +1915,8 @@ impl<T: Transport> Engine<T> {
 
         let duration_s = spec.duration.as_secs() as i64;
         let c = if cfg.gravimetric_trim { seed_c } else { 1.0 };
-        let first = quantize(spec.value_at(Duration::ZERO) * c, drive_grid(cfg.control_var, drive, self.feed.kind.model()));
+        let curve_start = spec.value_at(Duration::ZERO);
+        let first = quantize(curve_start * c, drive_grid(cfg.control_var, drive, self.feed.kind.model()));
 
         // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
         // head-type / tubing-size registers are deliberately left untouched, see
@@ -2010,6 +2026,7 @@ impl<T: Transport> Engine<T> {
             control_var: cfg.control_var,
             duration_s,
             next_seq: 0,
+            curve_value: curve_start,
             last_target: Some(first),
             last_write_q: Some(first),
             vol_elapsed_s: 0.0,
@@ -2039,7 +2056,8 @@ impl<T: Transport> Engine<T> {
         let trimmed = active.gravimetric_trim;
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
-        let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
+        active.curve_value = active.spec.value_at(Duration::from_secs_f64(elapsed_s));
+        let raw = active.curve_value * c;
         let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm, self.feed.kind.model()));
         let seq = active.next_seq;
         active.next_seq += 1;
@@ -2987,7 +3005,15 @@ impl<T: Transport> Engine<T> {
         if level(&last) - level(&low) <= trim::PERTURBATION_MIN_G {
             return; // a sudden pour: the last Normal read is the right anchor
         }
+        // A rate change at or after the anchor (made out of Normal, or on
+        // its very read): c from the change on, never the one before it.
+        let last_change_s = self.active.as_ref().and_then(|a| a.rate_changes.last()).map(|&(t, _)| t);
         let tr = &mut self.tracker;
+        let c_from_s = match (tr.reset_pending, last_change_s) {
+            (Some(t), _) => t.max(low.t_s),
+            (None, Some(t)) if t >= low.t_s => t,
+            _ => low.t_s,
+        };
         tr.delivered_g = delivered;
         tr.last_weight_g = Some(low.weight_g);
         tr.last_normal_commanded_g = low.commanded_g;
@@ -3004,7 +3030,7 @@ impl<T: Transport> Engine<T> {
                 self.trim_c = r.c;
             }
             None => {
-                if let Some(c) = tracking::c_at(&tr.c_hist, low.t_s) {
+                if let Some(c) = tracking::c_at(&tr.c_hist, c_from_s) {
                     self.trim_c = c;
                 }
             }
@@ -3420,8 +3446,9 @@ impl<T: Transport> Engine<T> {
         let rate_changes: Vec<(f64, f64)> =
             run.setpoint_changes.iter().map(|c| (c.elapsed_s, c.value)).collect();
         let curve = base_spec.with_rate_changes(&rate_changes);
+        let curve_value = curve.value_at(Duration::from_secs_f64(elapsed_s));
         let target = quantize(
-            curve.value_at(Duration::from_secs_f64(elapsed_s)) * c,
+            curve_value * c,
             drive_grid(run.control_var, self.drive_ml_per_rpm, self.feed.kind.model()),
         );
 
@@ -3498,6 +3525,7 @@ impl<T: Transport> Engine<T> {
             control_var: run.control_var,
             duration_s: run.duration_s,
             next_seq,
+            curve_value,
             last_target: Some(target),
             last_write_q: Some(target),
             vol_elapsed_s: elapsed_s,
@@ -6970,8 +6998,54 @@ mod tests {
         assert!((b.pump.transport().flow_ml_min() as f64 - 3.0).abs() < 1e-3);
         let st = b.status().active.unwrap();
         assert_eq!(st.last_target, Some(3.0));
+        assert_eq!(st.curve_value, Some(3.0));
         assert_eq!(st.rate_changes, 1);
         assert_eq!(st.duration_s, 1800);
+    }
+
+    #[test]
+    fn the_status_says_the_curve_value_driven() {
+        // A Physio exponential: its `end` field is whatever New run sent
+        // (50, never used), its real end e^2 = 7.39 is clamped to 6.
+        let mut curve = CurveSpec::exponential_physio(1.0, 4.0, Duration::from_secs(1800)).with_clamp(0.0, 6.0);
+        curve.end = 50.0;
+        let mut e = engine();
+        e.start_run(RunConfig { control_var: ControlVar::MlMin, curve, ..linear_cfg() }, t0()).unwrap();
+        assert_eq!(e.status().active.unwrap().curve_value, Some(1.0));
+        for i in 1..=900 {
+            e.tick(at(i)).unwrap();
+        }
+        let v = e.status().active.unwrap().curve_value.unwrap();
+        assert!((v - 1.0f64.exp()).abs() < 1e-9, "{v} at 15 min");
+        for i in 901..=2000 {
+            e.tick(at(i)).unwrap();
+        }
+        let st = e.status().active.unwrap();
+        assert!(st.curve_done);
+        assert_eq!(st.curve_value, Some(6.0), "the resolved, clamped end");
+        e.set_rate(3.0, 2000.0, at(2000)).unwrap();
+        assert_eq!(e.status().active.unwrap().curve_value, Some(3.0), "the new rate at once");
+        e.tick(at(2001)).unwrap();
+        assert_eq!(e.status().active.unwrap().curve_value, Some(3.0));
+    }
+
+    #[test]
+    fn a_hold_change_never_lands_inside_the_curve() {
+        let mut e = engine();
+        let id = e.start_run(exp_hold_cfg(), t0()).unwrap();
+        for i in 1..=2000 {
+            e.tick(at(i)).unwrap();
+        }
+        // An elapsed time before the curve's end, however it came.
+        e.set_rate(3.0, 1000.0, at(2000)).unwrap();
+        assert_eq!(e.store().setpoint_changes(id).unwrap()[0].elapsed_s, 1800.0);
+        let eff = e.store().run(id).unwrap().unwrap().effective_curve();
+        let curve = exp_hold_cfg().curve;
+        for t in [1000, 1500, 1799] {
+            let d = Duration::from_secs(t);
+            assert!((eff.value_at(d) - curve.value_at(d)).abs() < 1e-9, "at {t} s");
+        }
+        assert!((eff.value_at(Duration::from_secs(1800)) - 3.0).abs() < 1e-9);
     }
 
     #[test]
@@ -7460,6 +7534,52 @@ mod tests {
         let worst = owed_after.iter().map(|g| g.abs()).fold(0.0, f64::max);
         assert!(worst <= 0.3, "owed up to {worst} g after the refill");
         assert_eq!(event_times(&e, id, "refill").len(), 1);
+        assert!(alarm_events(&e, id).is_empty(), "{:?}", alarm_events(&e, id));
+    }
+
+    #[test]
+    fn a_change_in_a_perturbation_keeps_its_c_through_a_slow_rise() {
+        // 60 ml/min on a 90 % pump, 3 s stopped a minute before (feed owed,
+        // so c carries a catch-up share), then a transfer pump: nine reads
+        // of +4.5 g (under the 5 g perturbation limit), one of +7 g (a
+        // perturbation), the rate changed there, another +7 g: past 50 g
+        // within 30 s, a refill, rewound to the lowest Normal read, from
+        // before the change.
+        let spec = CurveSpec::constant(60.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(RunConfig { curve: spec, ..trim_cfg() }, t0()).unwrap();
+        let rise_at = 1800;
+        let change_at = rise_at + 10;
+        let mut w = 5_000.0;
+        let mut c_change = None;
+        let mut c_before = None;
+        for i in 0..=change_at {
+            if (rise_at..rise_at + 9).contains(&i) {
+                w += 4.5;
+            }
+            if i == rise_at + 9 || i == change_at {
+                w += 7.0;
+            }
+            if i == rise_at {
+                c_before = Some(e.trim_c());
+            }
+            if i == change_at {
+                assert_eq!(e.scale_state, trim::ScaleState::Perturbation, "the change is made in a perturbation");
+                e.set_rate(90.0, i as f64, at(i)).unwrap();
+                assert!(e.tracker.reset_pending.is_some());
+                c_change = Some(e.trim_c());
+            }
+            read_and_tick(&mut e, w, i);
+            let rate = e.active.as_ref().unwrap().spec.value_at(Duration::from_secs(i as u64));
+            let out = if (rise_at - 60..rise_at - 57).contains(&i) { 0.0 } else { 0.9 * rate / 60.0 * e.trim_c() };
+            w -= out;
+        }
+        assert_eq!(e.scale_state, trim::ScaleState::RefillPending, "the rise is a refill");
+        let (c_before, c_change) = (c_before.unwrap(), c_change.unwrap());
+        assert!((c_before - c_change).abs() > 1e-3, "c {c_before} before, {c_change} at the change: the test needs them apart");
+        assert!((e.trim_c() - c_change).abs() < 1e-9, "c {} after the rewind, {c_change} at the change", e.trim_c());
+        assert_eq!(e.tracker.reset_pending, Some(change_at as f64));
         assert!(alarm_events(&e, id).is_empty(), "{:?}", alarm_events(&e, id));
     }
 
