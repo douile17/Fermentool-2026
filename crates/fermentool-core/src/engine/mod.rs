@@ -953,6 +953,9 @@ pub struct TrackingReport {
     pub weight_start_g: Option<f64>,
     pub weight_end_g: Option<f64>,
     pub refills: Vec<RefillRecord>,
+    /// `[t_s, written_off_ml]` for each rate change that wrote off owed feed
+    /// (negative: the run was ahead), in time order: where the gap restarts.
+    pub resets: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2447,7 +2450,14 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
         refills.push(RefillRecord { t_s, before_g, after_g, drawn_g });
     }
     let (weight_start_g, weight_end_g) = store.weight_bounds(run_id)?;
+    let mut resets: Vec<[f64; 2]> = run
+        .setpoint_changes
+        .iter()
+        .filter_map(|c| c.reset_g.filter(|g| g.is_finite() && *g != 0.0).map(|g| [c.elapsed_s, g / rho]))
+        .collect();
+    resets.sort_by(|a, b| a[0].total_cmp(&b[0]));
     Ok(Some(TrackingReport {
+        resets,
         estimated,
         markers,
         weight_start_g,
@@ -7222,6 +7232,23 @@ mod tests {
     fn a_cut_with_feed_owed_starts_clean() {
         let (e, id, cs, owed) = trim_bench(five_ml_min(), &[(CUT_AT, 0.5)], off_before_the_cut(0.0), CUT_AT + 1801);
         the_cut_starts_clean(&e, id, &cs, &owed, 1.0);
+    }
+
+    #[test]
+    fn the_report_lists_each_write_off() {
+        let (e, id, _, _) = trim_bench(five_ml_min(), &[(CUT_AT, 0.5)], off_before_the_cut(0.0), CUT_AT + 1801);
+        let report = e.tracking_report(id).unwrap().expect("report");
+        assert_eq!(report.resets.len(), 1, "{:?}", report.resets);
+        let [t, ml] = report.resets[0];
+        assert!((t - CUT_AT as f64).abs() < 1.0, "at {t} s");
+        assert!((ml - 1.0).abs() <= 0.1, "{ml} mL written off at density 1");
+    }
+
+    #[test]
+    fn a_run_without_change_reports_no_resets() {
+        let (e, id, _, _) = trim_bench(five_ml_min(), &[], |_, g| 0.97 * g, 600);
+        let report = e.tracking_report(id).unwrap().expect("report");
+        assert!(report.resets.is_empty(), "{:?}", report.resets);
     }
 
     #[test]

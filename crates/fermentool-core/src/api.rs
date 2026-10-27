@@ -2347,4 +2347,60 @@ mod tests {
         let res = app.oneshot(get("/api/runs/1/tracking")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn tracking_lists_the_write_off_of_each_rate_change() {
+        use crate::store::{ControlVar, Direction, NewRun, NewTick, RunKind};
+        let db = test_db();
+        let store = Store::open(&db).unwrap();
+        let started: jiff::Timestamp = "2026-09-01T09:00:00Z".parse().unwrap();
+        let id = store
+            .insert_run(&NewRun {
+                name: "dosing".into(),
+                started_at: started,
+                control_var: ControlVar::MlMin,
+                direction: Direction::Cw,
+                tick_interval_s: 1,
+                pump_addr: 1,
+                app_version: "test".into(),
+                curve: CurveSpec::constant(5.0, Duration::from_secs(600)),
+                gravimetric_trim: true,
+                kind: RunKind::Dosing,
+                tubing_calibration_id: None,
+                responsible: None,
+                density_g_per_ml: Some(1.0),
+                auto_refill: false,
+                refill_draw_g: None,
+                pump_model: "labq".into(),
+                pump_head: None,
+            })
+            .unwrap();
+        for seq in 0..120 {
+            store
+                .append_tick(&NewTick {
+                    run_id: id,
+                    seq,
+                    wall_time: started + jiff::SignedDuration::from_secs(seq),
+                    elapsed_s: seq as f64,
+                    target: 5.0,
+                    written_ok: true,
+                    readback: None,
+                    note: None,
+                    weight_g: Some(1000.0 - seq as f64),
+                    delivered_g: Some(seq as f64 * 0.08),
+                    delivered_estimated: false,
+                })
+                .unwrap();
+        }
+        store
+            .add_setpoint_change(id, 60.0, 2.0, started + jiff::SignedDuration::from_secs(60))
+            .unwrap();
+        store.set_change_reset(id, 60.0, 0.5).unwrap();
+        drop(store);
+        let app = router(test_state_at(&db));
+        let res = app.oneshot(get(&format!("/api/runs/{id}/tracking"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["resets"], json!([[60.0, 0.5]]));
+    }
 }
