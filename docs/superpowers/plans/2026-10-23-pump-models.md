@@ -4,7 +4,7 @@
 
 **Goal:** The feed pump and the refill pump can each be a LabQ, a LabV or a head of a PDS II, chosen in Settings > Pumps, and are driven exactly like the LabQ today.
 
-**Architecture:** `fermentool-modbus` gains a `PumpKind` (model + PDS II head) that yields a `RegisterMap`; a `Pump` addresses a `PumpTarget` (address, kind, max rpm) instead of a bare address, so a wrong map cannot be written. `config.toml` carries model / head / max rpm per pump; the engine bounds every rpm by the pump's own max, switches LabV / PDS II to transferring mode before driving, and refuses a tubing calibration made on another pump model. The UI follows mockup v3.
+**Architecture:** `fermentool-modbus` gains a `PumpKind` (model + PDS II head) that yields a `RegisterMap`; a `Pump` addresses a `PumpTarget` (address, kind) instead of a bare address, so a wrong map cannot be written. `config.toml` carries model / head per pump; max rpm and rpm step are constants of the model, in the code; the engine bounds every rpm by the model's max and snaps it to the model's step, switches LabV / PDS II to transferring mode before driving, and refuses a tubing calibration made on another pump model. The UI follows mockup v3.
 
 **Tech Stack:** Rust (workspace crates `fermentool-modbus`, `fermentool-core`, axum, rusqlite), Svelte 5 + Vite, vitest, headless-Edge smoke test.
 
@@ -14,7 +14,8 @@
 
 - Never build a frame for a head or tubing register (LabQ/LabV 1000, 1001; PDS II n000, n001) nor for PDS II register 0010 (all start/stop), in daemon code.
 - Register maps, decimal: LabQ speed 1002, flow 1004, start/stop 1006, direction 1007, no mode. LabV speed 1002, flow 1004, start/stop 1008, direction 1009, mode 1020. PDS II head n (1..=8): speed n·1000+32, flow n·1000+30, start/stop n·1000+3, direction n·1000+4, mode n·1000+5. Transferring mode value = 0 for both.
-- Default max rpm: LabQ 350, LabV 150, PDS II 600. Ceiling: LabQ 350, LabV and PDS II 600. Floor 0.1.
+- Max rpm fixed per model, in the code, no setting (decided 2026-10-26): LabQ 350, LabV 150 (the bench's LabV is a LabV1-II, 0.1..150 rpm), PDS II 600. Floor 0.1.
+- Setpoint step per model: rpm LabQ 0.1 (today's grid, unchanged), LabV 0.01 (checked on a LabV1-II on 2026-10-26: 68.39 rpm typed is kept), PDS II 0.01 (checked on the bench's PDS II on 2026-10-26, rpm and ml/min); ml/min LabQ 0.001 (today's grid, unchanged), LabV 0.01 (its manual: flow rate resolution 0.01 ml/min), PDS II 0.01. The floor stays 0.1 rpm for every model: the step is the grid, not the minimum.
 - Addresses: LabQ 1..=247, LabV and PDS II 1..=32.
 - Config strings: `"labq"`, `"labv"`, `"pds2"`. A config without them is LabQ + LabQ, max 350.
 - Cable shown as "9600 baud · 8E1"; `serial.baud` stays in `config.toml`.
@@ -27,7 +28,7 @@
 
 1. An existing install (no model in `config.toml`) after the update: the LabQ frames must be byte-for-byte what they are today. Test in Task 1 (`labq_frames_unchanged`).
 2. Feed and refill on the same address: refused for LabQ / LabV, and for two PDS II on the same head; allowed for two PDS II heads. Tests in Task 3 (`same_pump_rule`) and Task 7 (`pumpClash`).
-3. A max rpm lowered under the refill speed already saved: the save is refused with a message naming both figures, never a silent clamp. Tests in Task 3 (`refill_speed_over_its_max_is_refused`) and Task 7.
+3. The refill pump changed to a model whose max is under the refill speed already saved (a LabQ at 300 rpm made a LabV): the save is refused with a message naming both figures, never a silent clamp. Tests in Task 3 (`refill_speed_over_its_max_is_refused`) and Task 7.
 4. A crash-resume on a LabV / PDS II already in transferring mode: no mode write, no Stop, the feed is not interrupted. Test in Task 4 (`resume_in_transferring_mode_writes_no_mode`).
 5. The feed pump's model changed after a calibration was chosen in New run (a stale page, or the API): the daemon refuses it with a hint. Test in Task 6 (`calibration_of_another_model_is_refused`).
 
@@ -41,13 +42,13 @@
 
 **Interfaces:**
 - Produces:
-  - `pub enum PumpModel { LabQ, LabV, PdsII }` with `pub fn as_str(self) -> &'static str` (`"labq"`, `"labv"`, `"pds2"`), `pub fn parse(s: &str) -> Option<PumpModel>`, `pub fn default_max_rpm(self) -> f64`, `pub fn max_rpm_ceiling(self) -> f64`, `pub fn max_address(self) -> u8` (247 / 32 / 32), `pub fn label(self) -> &'static str` ("LabQ", "LabV", "PDS II").
+  - `pub enum PumpModel { LabQ, LabV, PdsII }` with `pub fn as_str(self) -> &'static str` (`"labq"`, `"labv"`, `"pds2"`), `pub fn parse(s: &str) -> Option<PumpModel>`, `pub fn max_rpm(self) -> f64` (350 / 150 / 600), `pub fn max_address(self) -> u8` (247 / 32 / 32), `pub fn rpm_step(self) -> f64` (0.1 / 0.01 / 0.01), `pub fn flow_step(self) -> f64` (0.001 / 0.01 / 0.01), `pub fn label(self) -> &'static str` ("LabQ", "LabV", "PDS II").
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PumpKind { LabQ, LabV, PdsII { head: u8 } }` with `pub fn new(model: PumpModel, head: u8) -> Result<PumpKind, PumpError>` (head 1..=8 checked for PDS II, ignored otherwise), `pub fn model(self) -> PumpModel`, `pub fn map(self) -> RegisterMap`, `pub fn head(self) -> Option<u8>`.
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct RegisterMap { pub speed: u16, pub flow: u16, pub start_stop: u16, pub direction: u16, pub mode: Option<u16> }`, `pub const TRANSFERRING: u16 = 0;`.
-  - `#[derive(Debug, Clone, Copy, PartialEq)] pub struct PumpTarget { pub address: u8, pub kind: PumpKind, pub max_rpm: f64 }` with `pub fn labq(address: u8) -> PumpTarget` (max 350).
+  - `#[derive(Debug, Clone, Copy, PartialEq)] pub struct PumpTarget { pub address: u8, pub kind: PumpKind }` with `pub fn labq(address: u8) -> PumpTarget`.
   - `Pump::new(transport, address)` unchanged (LabQ target, max 350); `Pump::with_target(transport, PumpTarget) -> Pump<T>`; `pump.target() -> PumpTarget`; `pump.set_target(PumpTarget)`; `pump.with_target_of<R>(target: PumpTarget, f: impl FnOnce(&mut Self) -> R) -> R` (the refill pump; restores the own target). `address()`, `set_address()` and `with_address()` keep working (same kind and max, other address).
   - `PumpTransport::ensure_transferring(&mut self) -> Result<bool, PumpError>`: `Ok(false)` without a mode register or when it reads 0; otherwise Stop, write 0, `Ok(true)`.
-  - `set_speed_rpm` refuses outside `0.1..=target.max_rpm` with `PumpError::OutOfRange` (message built from the figure: make `OutOfRange` carry a `String`, update its users).
+  - `set_speed_rpm` refuses outside `0.1..=target.kind.model().max_rpm()` with `PumpError::OutOfRange` (message built from the figure: make `OutOfRange` carry a `String`, update its users).
   - `limits::RPM_MAX` is removed; keep `RPM_MIN`, `FLOW_MIN`, `FLOW_MAX`. `reg::*` LabQ constants stay (tests and the simulator use them) with a note that the daemon goes through `RegisterMap`.
   - `SimPump` stores every holding register (`BTreeMap<u16, u16>`, any address accepted); existing LabQ accessors (`speed_rpm()`, `running()`, ...) unchanged; new `pub fn reg(&self, reg: u16) -> u16`, `pub fn set_reg(&mut self, reg: u16, value: u16)`, `pub fn speed_rpm_of(&self, map: RegisterMap) -> f32`, `pub fn running_of(&self, map: RegisterMap) -> bool`. Faults (`reject_setpoint_writes`, `frozen_readback`) apply to any map's speed / flow pair (`is_setpoint_reg`: register % 1000 in {2, 4, 30, 32}).
 
@@ -75,7 +76,7 @@ fn labq_frames_unchanged() {
 }
 
 #[test]
-fn a_labv_target_writes_the_labv_registers() { /* Pump::with_target(SimPump::new(4), PumpTarget { address: 4, kind: PumpKind::LabV, max_rpm: 150.0 }); start(); transport().reg(1008) == 1 and reg(1006) == 0 */ }
+fn a_labv_target_writes_the_labv_registers() { /* Pump::with_target(SimPump::new(4), PumpTarget { address: 4, kind: PumpKind::LabV }); start(); transport().reg(1008) == 1 and reg(1006) == 0 */ }
 
 #[test]
 fn speed_over_the_target_max_is_refused() { /* LabV max 150: set_speed_rpm(150.1) is Err(OutOfRange), 150.0 is Ok */ }
@@ -103,7 +104,7 @@ Expected: compile errors naming `PumpKind`, `RegisterMap`.
 - [ ] **Step 4: Run the crate's tests**
 
 Run: `cargo test -p fermentool-modbus --no-default-features`
-Expected: PASS. (`fermentool-core` does not compile yet where it used `limits::RPM_MAX`: Task 4 fixes it. Do not commit a broken workspace: in this task, add a temporary `pub const RPM_MAX: f64 = 350.0;` marked `#[deprecated(note = "use the pump's max_rpm")]`, removed in Task 4.)
+Expected: PASS. (`fermentool-core` does not compile yet where it used `limits::RPM_MAX`: Task 4 fixes it. Do not commit a broken workspace: in this task, add a temporary `pub const RPM_MAX: f64 = 350.0;` marked `#[deprecated(note = "use the pump model's max_rpm()")]`, removed in Task 4.)
 
 - [ ] **Step 5: `cargo test` for the workspace passes, commit**
 
@@ -158,7 +159,7 @@ Run: `cargo test -p fermentool-modbus --no-default-features`
 git commit -am "test(modbus): simulate the LabV and the PDS II heads"
 ```
 
-### Task 3: Config per pump: model, head, max rpm
+### Task 3: Config per pump: model, head
 
 **Files:**
 - Modify: `crates/fermentool-core/src/config.rs` (`PumpConfig`, `RefillConfig`, `validate`, `sanitize`, defaults, `REFILL_RPM_MAX`)
@@ -168,20 +169,20 @@ git commit -am "test(modbus): simulate the LabV and the PDS II heads"
 - Consumes: Task 1 (`PumpModel`, `PumpKind`, `PumpTarget`).
 - Produces:
   - `#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)] #[serde(rename_all = "lowercase")] pub enum PumpModelCfg { #[default] Labq, Labv, Pds2 }` with `pub fn model(self) -> PumpModel` (the modbus crate stays without serde).
-  - `PumpConfig { address: u8, model: PumpModelCfg, head: u8 /* default 1 */, max_rpm: Option<f64> /* None = model default */ }`, `pub fn target(&self) -> PumpTarget`, `pub fn max_rpm(&self) -> f64`.
-  - `RefillConfig` gains `pump_model: PumpModelCfg`, `pump_head: u8`, `pump_max_rpm: Option<f64>`, same `target()` / `max_rpm()`.
+  - `PumpConfig { address: u8, model: PumpModelCfg, head: u8 /* default 1 */ }`, `pub fn target(&self) -> PumpTarget`. No `max_rpm` key: a `max_rpm` left in an edited `config.toml` is ignored (serde default, unknown keys tolerated as today).
+  - `RefillConfig` gains `pump_model: PumpModelCfg`, `pump_head: u8`, same `target()`.
   - `pub fn same_pump(a: &PumpTarget, b: &PumpTarget) -> bool`: same address and (not both PDS II, or same head).
-  - `REFILL_RPM_MAX` removed: the refill speed is bounded by `refill.max_rpm()`.
-  - `validate()` refuses: address over the model's `max_address()`; head outside 1..=8 for a PDS II; `max_rpm` outside `0.1..=ceiling`; refill `speed_rpm > refill.max_rpm()` ("the refill pump's speed 300 rpm is over its max 150 rpm"). `sanitize()` resets each of these to its default with a note, as today. The feed/refill clash stays a run-time check (Task 5), as today, so a config with both at 2 still saves.
+  - `REFILL_RPM_MAX` removed: the refill speed is bounded by the refill pump model's `max_rpm()`.
+  - `validate()` refuses: address over the model's `max_address()`; head outside 1..=8 for a PDS II; refill `speed_rpm` over the refill pump model's `max_rpm()` ("the refill pump's speed 300 rpm is over its max 150 rpm"). `sanitize()` resets each of these to its default with a note, as today. The feed/refill clash stays a run-time check (Task 5), as today, so a config with both at 2 still saves.
 
 - [ ] **Step 1: Failing tests**
 
 ```rust
 #[test]
-fn an_old_config_is_labq_and_labq() { /* Config::from_toml("[pump]\naddress = 1\n") -> model Labq, head 1, max_rpm() 350.0; refill same */ }
+fn an_old_config_is_labq_and_labq() { /* Config::from_toml("[pump]\naddress = 1\n") -> model Labq, head 1, target().kind.model().max_rpm() 350.0; refill same */ }
 
 #[test]
-fn model_defaults_and_ceilings() { /* labv: max_rpm() 150; pds2: 600; max_rpm = 400 on labq -> validate Err; on labv Ok */ }
+fn max_rpm_is_the_model_s() { /* PumpModel::LabQ.max_rpm() 350, LabV 150, PdsII 600; rpm_step 0.1 / 0.01 / 0.01, flow_step 0.001 / 0.01 / 0.01; a config.toml with max_rpm = 400 under [pump] loads and is ignored */ }
 
 #[test]
 fn addresses_follow_the_model() { /* labq 200 Ok; labv 33 Err; pds2 head 9 Err */ }
@@ -192,7 +193,7 @@ fn same_pump_rule() {
 }
 
 #[test]
-fn refill_speed_over_its_max_is_refused() { /* refill labv, max default 150, speed_rpm 300 -> validate Err containing "300" and "150"; sanitize resets [refill] with a note */ }
+fn refill_speed_over_its_max_is_refused() { /* refill labv (max 150), speed_rpm 300 -> validate Err containing "300" and "150"; sanitize resets [refill] with a note */ }
 ```
 
 - [ ] **Step 2: Run, expect failures**
@@ -206,7 +207,7 @@ Run: `cargo test -p fermentool-core config::`
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "feat(config): model, head and max rpm for the feed and refill pumps"
+git commit -am "feat(config): model and head for the feed and refill pumps"
 ```
 
 ### Task 4: The engine drives the feed pump by its target
@@ -219,10 +220,11 @@ git commit -am "feat(config): model, head and max rpm for the feed and refill pu
 - Consumes: Task 1 `PumpTarget`, `ensure_transferring`; Task 3 `PumpConfig::target()`.
 - Produces:
   - `Engine::set_serial(&mut self, serial: SerialConfig, feed: PumpTarget)`; `Engine::swap_transport(&mut self, serial: &SerialConfig, feed: PumpTarget)`; `Command::Reconnect { serial, feed: PumpTarget, reply }`. The engine's `pump_addr: u8` field becomes `feed: PumpTarget` (`self.feed.address` where the address was used).
-  - `fn drive_rpm(ml_min: f64, ml_per_rpm: f64, max_rpm: f64) -> f64`; `start_run` clamps rpm curves to `(RPM_MIN, self.feed.max_rpm)` and refuses a driven curve over it, message "this tube delivers at most X ml/min at N rpm" with N the pump's max.
+  - `setpoint_grid` and `drive_grid` take the rpm step: `fn setpoint_grid(control_var: ControlVar, model: PumpModel) -> f64` (`Rpm` → `model.rpm_step()`, `MlMin` → `model.flow_step()`), `fn drive_grid(control_var: ControlVar, drive: Option<f64>, model: PumpModel) -> f64`, every caller passes `self.feed.kind.model()`. A LabQ keeps today's grids exactly (0.1 rpm, 0.001 ml/min).
+  - `fn drive_rpm(ml_min: f64, ml_per_rpm: f64, max_rpm: f64, rpm_step: f64) -> f64`; `start_run` clamps rpm curves to `(RPM_MIN, self.feed.kind.model().max_rpm())` and refuses a driven curve over it, message "this tube delivers at most X ml/min at N rpm" with N the pump's max.
   - `start_run` and `resume` call `self.pump.ensure_transferring()` before the first write: start before the start sequence; resume only on the path that writes to the pump (a pump answering 0 sees no write). A failure is `EngineError::PumpMode(PumpError)` with `hint()`: LabV "Put the LabV on its main screen; Fermentool sets transferring mode itself, it could not.", PDS II "Is head n set to independent operation, and the controller on its main screen?".
-  - `EngineStatus` gains `pump_model: &'static str` (`"labq"`...), `pump_head: Option<u8>`, `pump_max_rpm: f64`.
-  - `ReconnectReq` gains `pump_model: Option<String>`, `pump_head: Option<u8>`, `pump_max_rpm: Option<f64>` (`null` max = model default). `serial_reconnect` sets them into `cfg.pump`, runs `cfg.validate()` (400 on refusal) before the swap. A run active: refused by the engine as today (409).
+  - `EngineStatus` gains `pump_model: &'static str` (`"labq"`...), `pump_head: Option<u8>`, `pump_max_rpm: f64`, `pump_rpm_step: f64`, `pump_flow_step: f64` (from the model, read only, for the UI).
+  - `ReconnectReq` gains `pump_model: Option<String>`, `pump_head: Option<u8>`. `serial_reconnect` sets them into `cfg.pump`, runs `cfg.validate()` (400 on refusal) before the swap. A run active: refused by the engine as today (409).
   - `create_run` keeps `cfg.pump_addr = ...address` (journal compatibility).
   - Remove the temporary deprecated `limits::RPM_MAX` from Task 1.
 
@@ -245,10 +247,13 @@ fn resume_in_transferring_mode_writes_no_mode() { /* strict PdsII head 1 running
 fn a_silent_pds_head_refuses_the_start_with_a_hint() { /* logical_heads {1}: start_run Err(PumpMode(..)), detail().hint mentions "independent operation" */ }
 
 #[test]
-fn status_reports_the_feed_model() { /* pump_model "pds2", pump_head Some(2), pump_max_rpm 600.0 */ }
+fn the_rpm_grid_follows_the_model() { /* LabV feed: an rpm run whose curve asks 68.394 writes 68.39 (speed_rpm_of(LabV map)); an ml/min run driven in rpm moves by 0.01 rpm steps; an ml/min run on a PDS II writes 12.35 for 12.346; the same on a LabQ writes 68.4 and 12.346, as today */ }
+
+#[test]
+fn status_reports_the_feed_model() { /* pump_model "pds2", pump_head Some(2), pump_max_rpm 600.0, pump_rpm_step 0.01, pump_flow_step 0.01 */ }
 ```
 
-API test: `POST /api/serial/reconnect` with `{"pump_model":"labv","pump_head":1,"pump_max_rpm":null}` saves `model = "labv"` in `config.toml` and `/api/status` says `"pump_model":"labv"`; with `"pump_model":"labv"` and an address 40 answers 400.
+API test: `POST /api/serial/reconnect` with `{"pump_model":"labv","pump_head":1}` saves `model = "labv"` in `config.toml` and `/api/status` says `"pump_model":"labv"`; with `"pump_model":"labv"` and an address 40 answers 400.
 
 - [ ] **Step 2: Run, expect failures**
 
@@ -261,7 +266,7 @@ Run: `cargo test -p fermentool-core engine:: control:: api::`
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "feat(engine): drive the feed pump by its model, head and max rpm"
+git commit -am "feat(engine): drive the feed pump by its model and head"
 ```
 
 ### Task 5: The refill pump by its target
@@ -307,7 +312,7 @@ Run: `cargo test -p fermentool-core refill`
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "feat(refill): the refill pump by its model, head and max rpm"
+git commit -am "feat(refill): the refill pump by its model and head"
 ```
 
 ### Task 6: Calibrations belong to a pump model; runs record theirs
@@ -371,14 +376,14 @@ git commit -am "feat(calibration): a tube calibration belongs to the pump model 
 - Create: `ui/src/lib/calibrations.js` + `calibrations.test.js`
 
 **Interfaces:**
-- Consumes: the status / config fields of Tasks 4 to 6 (`pump_model`, `pump_head`, `pump_max_rpm`, `refill.pump_model`...).
+- Consumes: the status / config fields of Tasks 4 to 6 (`pump_model`, `pump_head`, `pump_max_rpm`, `pump_rpm_step`, `pump_flow_step`, `refill.pump_model`...).
 - Produces (all plain functions):
-  - `MODELS = [{ id: 'labq', label: 'LabQ', maxRpm: 350, ceiling: 350, maxAddress: 247 }, { id: 'labv', label: 'LabV', maxRpm: 150, ceiling: 600, maxAddress: 32 }, { id: 'pds2', label: 'PDS II', maxRpm: 600, ceiling: 600, maxAddress: 32 }]`, `modelOf(id)`.
+  - `MODELS = [{ id: 'labq', label: 'LabQ', maxRpm: 350, maxAddress: 247, rpmStep: 0.1, flowStep: 0.001 }, { id: 'labv', label: 'LabV', maxRpm: 150, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 }, { id: 'pds2', label: 'PDS II', maxRpm: 600, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 }]`, `modelOf(id)`. Constants, mirroring `PumpModel` (no setting).
   - `samePump(a, b)` with `{ address, model, head }`, the Task 3 rule.
-  - `pumpProblem({ model, address, head, maxRpm })` → message or null.
-  - `refillProblem({ address, model, head, speedRpm, maxRpm, feed })` replaces today's signature (feed = `{ address, model, head }`), messages as Task 5 and "The speed must be between 0.1 and {maxRpm} rpm (the refill pump's max)."
+  - `pumpProblem({ model, address, head })` → message or null.
+  - `refillProblem({ address, model, head, speedRpm, feed })` (max from `modelOf(model).maxRpm`) replaces today's signature (feed = `{ address, model, head }`), messages as Task 5 and "The speed must be between 0.1 and {maxRpm} rpm (the refill pump's max)."
   - `notAnsweringHint({ model, address, head })`: LabQ / LabV "Is the {label} switched on, at address {address} and 9600 baud in its own menu?"; PDS II "Is the PDS II switched on, at address {address}, 9600 baud, and head {head} set to independent operation?".
-  - `needsReconnect(saved, now)` also true when the feed model, head or max rpm changed.
+  - `needsReconnect(saved, now)` also true when the feed model or head changed.
   - `RPM_LIMITS` stays the floor only; `tubeRange(...)` takes `maxRpm` (from `app.status.pump_max_rpm`, 350 when absent) and its messages say it.
   - `calibrations.js`: `forFeedPump(cals, pumpModel)` keeps rows whose `pump_model` equals it (a row without it counts as `'labq'`).
 
@@ -391,7 +396,7 @@ test('pumpClash: two heads of one PDS II share an address', () => {
   expect(samePump({ address: 2, model: 'labv' }, { address: 2, model: 'labq' })).toBe(true);
 });
 test('refill speed over its max is refused with both figures', () => {
-  expect(refillProblem({ address: 2, model: 'labv', head: 1, speedRpm: 300, maxRpm: 150, feed: { address: 1, model: 'labq' } })).toMatch(/150/);
+  expect(refillProblem({ address: 2, model: 'labv', head: 1, speedRpm: 300, feed: { address: 1, model: 'labq' } })).toMatch(/150/);
 });
 test('the PDS II hint names the head', () => {
   expect(notAnsweringHint({ model: 'pds2', address: 3, head: 2 })).toMatch(/head 2 set to independent operation/);
@@ -431,7 +436,7 @@ In the Pumps block of `ui/tests/smoke.mjs`, looking only, changing nothing:
 
 - [ ] **Step 2: Implement the rows as the mockup**
 
-Photo tile 120 × 96, white (`--surface` is not white in dark mode: add a `--photo-bg: #ffffff` token to all three theme blocks of `app.css`), border `--line`, a problem row draws its border `--danger`. Model segmented control with `radioKeys` / `rovingTab` (as the direction control), Address (`max` from the model), Head select only for PDS II, Max rpm number field next to Address (refilled with the model's default when the model changes). The cable line: port select, rescan, and a `.bus` text "9600 baud · 8E1". The not-answering line uses `notAnsweringHint`. Save: `needsReconnect` → `POST /api/serial/reconnect` with `pump_model`, `pump_head`, `pump_max_rpm`; refill fields through `patchConfig` (`pump_model`, `pump_head`, `pump_max_rpm`). Model, head, max rpm and address of the feed pump disabled during a run (as the address today); the refill pump's model and head disabled while `app.status.refill?.in_run`.
+Photo tile 120 × 96, white (`--surface` is not white in dark mode: add a `--photo-bg: #ffffff` token to all three theme blocks of `app.css`), border `--line`, a problem row draws its border `--danger`. Model segmented control with `radioKeys` / `rovingTab` (as the direction control), Address (`max` from the model), Head select only for PDS II, no max rpm field (it is the model's). The refill speed field's `max` and `step` are the refill pump model's `maxRpm` and `rpmStep` (today `step="1"`). The cable line: port select, rescan, and a `.bus` text "9600 baud · 8E1". The not-answering line uses `notAnsweringHint`. Save: `needsReconnect` → `POST /api/serial/reconnect` with `pump_model`, `pump_head`; refill fields through `patchConfig` (`pump_model`, `pump_head`). Model, head and address of the feed pump disabled during a run (as the address today); the refill pump's model and head disabled while `app.status.refill?.in_run`.
 
 - [ ] **Step 3: `npm run check`, `npm test`, `npm run build` pass**
 
@@ -440,7 +445,7 @@ Photo tile 120 × 96, white (`--surface` is not white in dark mode: add a `--pho
 - [ ] **Step 5: Commit (with `ui/dist`)**
 
 ```bash
-git commit -am "feat(settings): choose each pump's model, head and max rpm, with its photo"
+git commit -am "feat(settings): choose each pump's model and head, with its photo"
 ```
 
 ### Task 9: New run, Tubing calibration, History
@@ -453,7 +458,7 @@ git commit -am "feat(settings): choose each pump's model, head and max rpm, with
 
 - [ ] **Step 1: Smoke checks** (looking only): New run's tube list holds only calibrations of the status `pump_model`; a calibration row on the Tubing calibration page shows its model label; a run detail's Settings fold shows "Feed pump: LabQ" (or "PDS II, head 2").
 
-- [ ] **Step 2: Implement.** `calMatches` = `forFeedPump(...)` then today's filter. When calibrations exist but none for this model, the tube list says "No tube calibrated on the {label} yet: calibrate one in Tubing calibration." The run detail line comes from a tested `rundetail.js` function `pumpLine(run)` ("LabQ", "LabV", "PDS II, head 2"), add its vitest case.
+- [ ] **Step 2: Implement.** `calMatches` = `forFeedPump(...)` then today's filter. When calibrations exist but none for this model, the tube list says "No tube calibrated on the {label} yet: calibrate one in Tubing calibration." The run detail line comes from a tested `rundetail.js` function `pumpLine(run)` ("LabQ", "LabV", "PDS II, head 2"), add its vitest case. In New run, the curve's Start / End / Value fields take `step` from `modelOf(app.status.pump_model)`: `rpmStep` for an rpm curve (0.01 on a LabV or PDS II, so 68.39 is valid; 0.1 on a LabQ, as today), `flowStep` for an ml/min curve.
 
 - [ ] **Step 3: `npm run check`, `npm test`, `npm run build` pass**
 
@@ -467,7 +472,7 @@ git commit -am "feat(ui): calibrations and runs show their pump model"
 
 **Files:**
 - Create: `docs/LabV Series MODBUS protocol.md` (from the PDF, `pdftotext -layout`), `docs/PDS Series MODBUS protocol.md` (the user's copy)
-- Modify: `docs/wiring.md` (LabV DB9: pin 7 GND1 RS-485 signal ground, 8 B, 9 A; PDS II: to be filled from the pump), `CLAUDE.md` (Conventions: the head/tubing rule for all three models, the 0010 ban, max rpm per pump replaces "Refused if the curve needs more than 350 rpm"; the `limits::RPM_MAX` mentions), `CHANGELOG.md`, `crates/fermentool-modbus/Cargo.toml` description
+- Modify: `docs/wiring.md` (LabV DB9: pin 7 GND1 RS-485 signal ground, 8 B, 9 A; PDS II: to be filled from the pump), `CLAUDE.md` (Conventions: the head/tubing rule for all three models, the 0010 ban, the model's max rpm (LabQ 350, LabV 150, PDS II 600) and rpm step (0.1 / 0.01 / 0.01) and ml/min step (0.001 / 0.01 / 0.01) replace "Refused if the curve needs more than 350 rpm"; the `limits::RPM_MAX` mentions), `CHANGELOG.md`, `crates/fermentool-modbus/Cargo.toml` description
 
 - [ ] **Step 1: Write the docs**
 

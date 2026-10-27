@@ -80,10 +80,18 @@ and 1004 are ignored.
   12-channel head (mockup v3).
 - **PDS II and LabV not in transferring mode: Fermentool switches them to
   transferring itself** before driving them (LabV 1020, PDS II n005).
-- **Maximum speed is set per pump**: a "Max rpm" field for each pump in
-  Settings > Pumps, prefilled from the model when it is chosen (LabQ 350,
-  LabV 150, PDS II 600), corrected by hand when a pump differs (the LabV1 is
-  sold as 150 rpm, the protocol says 600, PDS II heads vary).
+- **Maximum speed is fixed per model, in the code** (decided 2026-10-26,
+  replaces a "Max rpm" field): LabQ 350, LabV 150, PDS II 600. The bench's
+  pumps will not change: the LabV is a LabV1-II, sold as 0.1..150 rpm (its
+  manual, section 7), though the protocol, common to the range, says 600.
+  Another variant (LabV3 350, LabV6 600) would be a code change.
+- **Setpoint step fixed per model** (decided 2026-10-26), rpm and ml/min:
+  LabQ 0.1 rpm and 0.001 ml/min, as today; LabV 0.01 rpm, checked on the
+  LabV1-II (68.39 rpm typed is kept), and 0.01 ml/min (its manual: flow rate
+  resolution); PDS II 0.01 rpm and 0.01 ml/min, checked on the bench's
+  PDS II. The floor stays 0.1 rpm for every model: the step is the grid, not
+  the minimum. A value finer than the pump keeps would only be rounded by
+  its firmware and rewritten for nothing.
 - **A tubing calibration belongs to a pump model.** Each calibration records
   the model of the pump it was measured on; New run only offers the
   calibrations made on the feed pump's current model.
@@ -118,7 +126,9 @@ and 1004 are ignored.
   wrong mode was not delivering the curve anyway). On a resume the pump is
   normally still in transferring mode, so nothing is written and the feed is
   not interrupted.
-- Range checks: speed 0.1..the pump's configured max rpm, flow 0..99999.
+- Range checks: speed 0.1..the model's max rpm, flow 0..99999.
+- `PumpModel::max_rpm()`, `rpm_step()` and `flow_step()` are constants of the
+  model, nothing in `config.toml` or the UI changes them.
 - `SimPump` / `SimBus` simulate each model's map, including the PDS II
   heads behind one address, refusing a speed write outside transferring mode
   (exception 03), and ignoring a head in logical operation, so the engine
@@ -131,17 +141,16 @@ and 1004 are ignored.
 address = 1
 model = "labq"      # "labq" | "labv" | "pds2"; absent = "labq"
 head = 1            # PDS II only, 1..8; ignored otherwise
-max_rpm = 350       # absent = the model's default (LabQ 350, LabV 150, PDS II 600)
 
 [refill]
 pump_address = 2
 pump_model = "labq"
 pump_head = 1
-pump_max_rpm = 350
 ```
 
-- `max_rpm` is bounded 0.1..350 for a LabQ and 0.1..600 for LabV / PDS II.
-  The refill `speed_rpm` must stay at or under `pump_max_rpm`.
+- The refill `speed_rpm` must stay at or under the refill pump model's max
+  rpm (changing the refill pump to a LabV with a 300 rpm speed saved is
+  refused, naming both figures).
 
 - Validation: address 1..247 for a LabQ, 1..32 for LabV / PDS II. Feed and
   refill may share an address **only** when both are PDS II on different
@@ -156,10 +165,14 @@ pump_max_rpm = 350
 
 ### Engine and daemon
 
-- `limits::RPM_MAX` becomes the pump's configured `max_rpm` wherever it bounds a
+- `limits::RPM_MAX` becomes the pump model's `max_rpm()` wherever it bounds a
   setpoint, a curve clamp, the "driven in rpm" refusal (`drive_ml_per_rpm`:
   "Refused if the curve needs more than N rpm"), and the refill speed
   (`REFILL_RPM_MAX`). Messages say the pump's figure.
+- The setpoint grid (`setpoint_grid`, `drive_grid`, `drive_rpm`, today a
+  fixed 0.1 rpm and 0.001 ml/min) becomes the feed pump model's
+  `rpm_step()` / `flow_step()`: a LabV or PDS II is written 68.39 rpm or
+  12.35 ml/min, a LabQ 68.4 rpm or 12.346 ml/min as today.
 - `ensure_transferring()` runs before the pump is first driven: run start,
   resume, a refill fill's start, the refill Test. Not on the 150 ms setpoint
   path. A refusal is a structured `EngineError` with a `hint()` naming the
@@ -191,14 +204,15 @@ pump_max_rpm = 350
 
 - Per pump row: the photo (bundled under `ui/src/assets/pumps/`, JPEG, a
   few kB each, white tile in both themes), the name, a LabQ / LabV / PDS II
-  segmented choice, Address, Head (1..8) only for a PDS II, and Max rpm
-  (refilled with the model's default when the model changes; not in the
-  mockup, placed beside Address).
+  segmented choice, Address, Head (1..8) only for a PDS II. No max rpm
+  field: it is the model's.
 - The baud select goes; the cable line shows "9600 baud · 8E1".
 - "Not answering" hint per model: LabQ / LabV "switched on, at address N
   and 9600 baud in its own menu?"; PDS II adds "head n set to independent
   operation".
-- The refill speed field's max follows the refill pump's model.
+- The refill speed field's max and step follow the refill pump's model; in
+  New run, the curve's fields take the feed pump model's step in the run's
+  unit (0.01 on a LabV or a PDS II, in rpm and in ml/min).
 - Logic (address clash rule, hint text, max rpm per model) lives in
   `ui/src/lib/pumps.js` with vitest tests; the photos are display only.
 - UI words in English; no "burst"; no em dash.
@@ -211,7 +225,8 @@ pump_max_rpm = 350
 - engine: a run, a resume and a refill on a simulated LabV and on two heads
   of a simulated PDS II; a PDS II or LabV out of transferring mode is
   switched once, a resume in transferring mode writes nothing; a curve over
-  the pump's max rpm is refused; a calibration of another model is refused.
+  the pump's max rpm is refused; a LabV or PDS II is written on the 0.01
+  grid (rpm and ml/min), a LabQ on today's 0.1 rpm / 0.001 ml/min; a calibration of another model is refused.
 - config: an old `config.toml` loads as LabQ + LabQ; the address clash rule.
 - UI: vitest for `pumps.js`; smoke: the model choice and the Head field appear
   and switch (changes nothing saved).
