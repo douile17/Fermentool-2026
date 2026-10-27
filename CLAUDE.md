@@ -314,18 +314,22 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   report merges the `refill` events of one unweighed stretch
   (`group_refills`); the run detail's journal continues the line on
   "resuming the interrupted refill". Run 210 read as two refills.
+- A rate change resets the correction (write-off, c, windows): see "Rate
+  change" below (`reset_g` vs `forgiven_g`).
 - Events journalled for the chart markers and notifications: `trim_start`,
   `trim_ratio`, `alarm_*`, `alarm_cleared`, `refill` (`refill_detail` /
   `parse_refill` must stay in step), `refill_cancelled`, `trim_limit`, `scale_lost`,
   `scale_recovered`.
 
-## Rate change of a Constant run (2026-10-22)
+## Rate change: Constant runs, and the hold of any curve (2026-10-22, 2026-10-27)
 
 Spec `docs/superpowers/specs/2026-10-22-constant-rate-change-design.md`,
 plan `docs/superpowers/plans/2026-10-22-constant-rate-change.md`.
-- Constant dosing runs only (`CurveParams::Constant`). `POST
-  /api/runs/active/rate {value}` → `Engine::set_constant_rate(value,
-  elapsed_s, now)`, `elapsed_s` from the control loop's `run_now()` (the
+- Constant dosing runs at any time, and since part 2 (2026-10-27) any
+  other shape **once `curve_done`**, never before (`EngineError::RateNotYet`,
+  code `rate_not_yet`: a running exponential has no single rate). Never a
+  calibration measurement. `POST /api/runs/active/rate {value}` →
+  `Engine::set_rate(value, elapsed_s, now)` (was `set_constant_rate`), `elapsed_s` from the control loop's `run_now()` (the
   guarded clock), never a raw wall-clock difference.
 - **The pump is asked first**: the new setpoint is written (`drive_write`,
   times c, driven in rpm when the run is) before anything is recorded; a
@@ -339,12 +343,62 @@ plan `docs/superpowers/plans/2026-10-22-constant-rate-change.md`.
   counts from its own time): the engine, resume, `pending_recovery`, the
   tracking report, and the UI (`effective_curve` from `GET /api/runs/:id`).
   `curve_done` still comes from `duration_s`.
+- **Any other shape**: `CurveSpec.overrides` (`Vec<StepSegment>`, serde
+  default, skipped when empty), the changes from their `at_seconds` on,
+  checked on the raw elapsed time before the duration clamp. The duration
+  and the shape before the change never move (stretching it would rescale
+  an exponential or a sigmoid). `value_at` stays pure, `runs.curve_params`
+  is never rewritten, old JSON reads as no overrides. The event and its
+  notification say `in the hold`.
 - In the hold phase `apply_setpoint` returns early: a change there reaches
   the pump at the next tick (within 1 s).
 - An exe older than this feature resuming a run with changes would resume
   at the start rate (it ignores the table): do not roll back mid-run.
-- UI logic in `ui/src/lib/ratechange.js` (tested); Run again with changes
-  asks which rate to start from.
+- UI logic in `ui/src/lib/ratechange.js` (tested): `canChangeRate` follows
+  the daemon's `rate_bounds`, not the curve kind. Run again with changes
+  asks which rate to start from on a Constant run only (`runAgainPicks`); a
+  non-constant run changed in the hold opens its original curve. History
+  chip `hold 2.500 ml/min`; Overview `holding since 26 h 10`.
+
+### The correction resets at a change (trimmed runs)
+
+A change resets the integral and nothing else: without it, a 5 to 0.5
+ml/min cut with 1 g behind sent c from +2 % to +20 % and a rise overfed
+2 to 3 g.
+- `Tracker.reset_g` is the owed feed written off at changes, **separate
+  from `forgiven_g`** (the alarms' write-off, unchanged, still shown as a
+  gap). `Tracker::owed_g() = required_g - delivered_g - forgiven_g -
+  reset_g` is the one deficit every law uses.
+- Balance `Normal` at the change: `reset_g += owed_g()` at once. Out of
+  `Normal` (refill, touch, anchor held): `reset_pending = Some(elapsed_s)`,
+  done at the first `Normal` read once the anchor is settled (the gap is
+  measured then, not frozen). Persisted, so a crash resumes it.
+- c goes to `1/k` (clamped to the bounds) when the pump ratio is measured,
+  else to the run's seed c; never back to the tubing calibration's c0, the
+  learned ratio stays the feed-forward. The windows restart (`points`,
+  saturation count and since, `flow_ref`).
+- **Order**: the post-change c is computed without mutating, the pump is
+  written with it, and the reset is applied only once the row is recorded:
+  a refused change leaves the trim untouched.
+- **With a trim alarm in force no write-off is taken** (row records 0): c
+  stays frozen, the alarm's own `forgiven_g` covers its missed feed. A
+  change superseded by a later one in the same unmeasured stretch records
+  0 (not NULL: NULL reads as no reset).
+- A refill that is really a slow rise (`rewind_slow_rise`) takes the
+  pending write-off back, as it does the count.
+- **Frequent changes** (under about 3 min apart) keep restarting the
+  feed-stop and saturation windows, so an alarm cannot raise between them.
+  Wanted; a real stop or saturation after the last change is still caught.
+- Each write-off is on its change's row: `setpoint_changes.reset_g`
+  (migration 0016, NULL on older rows), set by `Store::set_change_reset`.
+  `TrackingStatus.reset_ml`; its `deficit_pct` is `owed_g()` +
+  `forgiven_g`.
+- Report: `TrackingReport.resets: [[elapsed_s, ml]]` per change with a
+  recorded write-off; `points` stay the true cumulative totals. In
+  `rundetail.js` the gap at t is `d - r + sum(resets up to t)`
+  (`gapSeries`, `gapExtremes`, `verdict`): each rate step is judged from 0,
+  `requested`/`delivered` stay true. The gap chart marks each change like
+  the Feed rate chart; Regulation lists `Written off at rate changes`.
 
 ## History run detail (`History.svelte`, `lib/rundetail.js`)
 
