@@ -10,7 +10,7 @@
   import { weighedFlow, flowWindowS } from '../lib/runview.js';
   import {
     TOLERANCE, alarmCount, atRun, gapExtremes, grouped, journalLines, mins,
-    refillRows, regulationFigures, verdict, whenLine, curveChips, blindLegend,
+    refillRows, regulationFigures, verdict, whenLine, curveChips, blindLegend, pumpLine,
   } from '../lib/rundetail.js';
   import { rateLabel, rateMarks, rateSteps, runAgainSeed } from '../lib/ratechange.js';
 
@@ -583,6 +583,8 @@
             <span class="peek">{[sel.cal ? 'tube' : null, sel.run.tubing_calibration_id != null ? 'calibration' : null, sel.run.gravimetric_trim ? 'balance' : null, sel.run.auto_refill ? 'refill' : null].filter(Boolean).join(', ') || 'details'}</span>
           </summary>
           <dl>
+            <dt>Feed pump</dt>
+            <dd>{pumpLine(sel.run)}</dd>
             {#if sel.cal}
               <dt>Tube</dt>
               <dd>{[sel.cal.brand, sel.cal.product_ref].filter(Boolean).join(' ') || 'Tube'}{sel.cal.inner_diameter_mm != null ? `, ${sel.cal.inner_diameter_mm} mm ID` : ''}{sel.cal.tubing_lot_id ? `, lot ${sel.cal.tubing_lot_id}` : ''}</dd>

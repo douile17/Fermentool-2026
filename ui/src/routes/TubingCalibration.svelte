@@ -12,6 +12,7 @@
   import { get, post, del } from '../lib/api.js';
   import { num, dur, stamp, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { canStartRun } from '../lib/link.js';
+  import { modelOf, setpointStep } from '../lib/pumps.js';
   import ErrorText from '../components/ErrorText.svelte';
   import Hint from '../components/Hint.svelte';
   import PumpHead from '../components/PumpHead.svelte';
@@ -214,7 +215,7 @@
     const slot = freeSlot ?? d.bursts.length;
     const n = slot + 1;
     const setpoint = Number(d.setpoint);
-    const lim = d.control_var === 'ml_min' ? FLOW_LIMITS : RPM_LIMITS;
+    const lim = d.control_var === 'ml_min' ? FLOW_LIMITS : { ...RPM_LIMITS, max: app.status?.pump_max_rpm ?? RPM_LIMITS.max };
     // before the pump moves: the mean of the stable readings, as at the end
     const startG = avgW ? Number(avgW.g.toFixed(2)) : scaleW;
     try {
@@ -1127,7 +1128,7 @@
                 An ml/min run is driven in rpm with this tube's ml per rpm: the pump's head and
                 tubing table never come into it.
               </Hint>{/if}</span>
-              <input type="number" step="0.1" min="0" bind:value={d.setpoint} disabled={locked} placeholder="e.g. 100"
+              <input type="number" step={setpointStep(app.status?.pump_model, d.control_var)} min="0" bind:value={d.setpoint} disabled={locked} placeholder="e.g. 100"
                 class:missing={!(Number(d.setpoint) > 0)} onchange={() => { d.setpoint_set = true; persist(); }} />
             </label>
             <label class="field" id="cal-burst"><span>Each measurement lasts, min<Hint label="About the measurement time">
@@ -1625,7 +1626,7 @@
           <div class="hist-wrap">
             <table class="hist mono">
               <thead>
-                <tr><th>#</th><th>date</th><th>brand</th><th>lot</th><th>ref</th><th>internal ref</th><th>size</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>c₀</th><th></th></tr>
+                <tr><th>#</th><th>date</th><th>brand</th><th>lot</th><th>ref</th><th>internal ref</th><th>size</th><th>setpoint</th><th>mean ml/min</th><th>CV %</th><th>pump</th><th>c₀</th><th></th></tr>
               </thead>
               <tbody>
                 {#each listed as c (c.id)}
@@ -1641,6 +1642,7 @@
                     <td>{num(c.setpoint, digitsFor(c.control_var))} {unitFor(c.control_var)}</td>
                     <td>{num(c.mean_measured_ml_min, sig(c.mean_measured_ml_min, Math.min(...(c.weights_g ?? []))))}</td>
                     <td class:bad={cvBad(c.cv_pct)}>{num(c.cv_pct, 2)}</td>
+                    <td class="pm">{modelOf(c.pump_model).label}</td>
                     <td class:bad={c0Bad(c.control_var, c.c0)}>{c.control_var === 'ml_min' ? num(c.c0, sig(c.c0, Math.min(...(c.weights_g ?? [])))) : '·'}</td>
                     <td class="row-action">
                       {#if c.archived_at}

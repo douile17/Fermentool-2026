@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, Notify, RwLock};
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::serial::available_ports;
 
-use crate::config::Config;
+use crate::config::{Config, PumpModelCfg, SERIAL_BAUDS};
 use crate::control::{Command, ControlHandle, DaemonStatus};
 use crate::engine::{ErrDetail, RunConfig};
 use crate::store::{NewCalibration, RunKind, RunStatus, Store, StoreError, CALIBRATION_DRAFT_KEY};
@@ -385,6 +385,15 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
             "the settings were changed meanwhile (another page, or Connect): reload them and save again".into(),
         ));
     }
+    // `[refill]`: a model or head changed while a run drives it (or one that
+    // did waits to be resumed) is refused (409). Only checked here: it is
+    // applied once the file is saved, so neither a refused balance below nor
+    // a failed save leaves the engine ahead of config.toml.
+    s.control
+        .call(|reply| Command::CheckRefill(new.refill.clone(), reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
     // A changed `[scale]` is applied live (Settings, Balance section), before
     // saving: a refusal (trimmed run active) must not leave the file ahead of
     // the engine.
@@ -410,6 +419,14 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
     *current = new.clone();
     s.config_rev.fetch_add(1, Ordering::SeqCst);
     drop(current);
+    // Saved: now `[refill]` reaches the engine (a Stop goes to a moved
+    // refill pump at once). Checked above; only a run started in between
+    // can still refuse it, and then the engine keeps the pump it drives.
+    s.control
+        .call(|reply| Command::SetRefill(new.refill.clone(), reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Conflict)?;
     // `serial.allow_simulator` gates Start/Resume in the live engine, so a save
     // that flips it must reach the control thread, otherwise the Settings
     // checkbox looks broken until the next reconnect.
@@ -421,12 +438,6 @@ async fn put_config(State(s): State<AppState>, Json(raw): Json<serde_json::Value
     let _ = s
         .control
         .call(|reply| Command::SetAutoResume(!new.resume.prompt, reply))
-        .await;
-    // And `[refill]` (Settings, Refill): applied now, a Stop goes to a newly
-    // enabled or moved refill pump at once.
-    let _ = s
-        .control
-        .call(|reply| Command::SetRefill(new.refill.clone(), reply))
         .await;
     Ok(Json(json!({
         "saved": true,
@@ -766,11 +777,15 @@ async fn list_calibrations(
 /// number is recomputed server-side from the runs' own clocks.
 async fn create_calibration(
     State(s): State<AppState>,
-    Json(cal): Json<NewCalibration>,
+    Json(mut cal): Json<NewCalibration>,
 ) -> ApiResult<Response> {
     let row = s
         .db
         .call(move |db| {
+            // A calibration belongs to the pump its three measurements ran
+            // on, as each run recorded it: never the body, nor the feed pump
+            // configured by the time it is recorded.
+            cal.pump_model = db.measurements_pump_model(cal.run_ids)?;
             db.insert_calibration(&cal).and_then(|id| {
                 // Only one session is ever in progress: once it is recorded
                 // the draft has served its purpose.
@@ -1078,6 +1093,14 @@ struct ReconnectReq {
     /// New MODBUS slave address; omitted = keep the current one.
     #[serde(default)]
     pump_addr: Option<u8>,
+    /// The feed pump's model, `"labq"`, `"labv"` or `"pds2"`; omitted = keep.
+    #[serde(default)]
+    pump_model: Option<String>,
+    /// PDS II head, 1..=8; omitted = keep.
+    #[serde(default)]
+    pump_head: Option<u8>,
+    // No max rpm: it is the model's. A `pump_max_rpm` sent by an older page
+    // is ignored.
 }
 
 /// Persist `serial.*` to `config.toml` and rebuild the live pump transport
@@ -1096,21 +1119,39 @@ async fn serial_reconnect(
         cfg.serial.baud = b;
     }
     if let Some(a) = req.pump_addr {
-        if !(1..=247).contains(&a) {
-            return Err(ApiError::Bad("MODBUS address must be 1..=247".into()));
-        }
         cfg.pump.address = a;
+    }
+    if let Some(m) = req.pump_model {
+        cfg.pump.model = match m.as_str() {
+            "labq" => PumpModelCfg::Labq,
+            "labv" => PumpModelCfg::Labv,
+            "pds2" => PumpModelCfg::Pds2,
+            _ => return Err(ApiError::Bad(format!("\"{m}\" is not a pump model (labq, labv, pds2)"))),
+        };
+    }
+    if let Some(h) = req.pump_head {
+        cfg.pump.head = h;
+    }
+    // Only what a reconnect changes (the baud, the feed pump's address per
+    // model and head), refused before anything changes. The rest
+    // of the config is PUT /api/config's business: a bad [notify] must not
+    // stop the pump from connecting.
+    if !SERIAL_BAUDS.contains(&cfg.serial.baud) {
+        return Err(ApiError::Bad(format!("the pump baud must be one of {SERIAL_BAUDS:?}")));
+    }
+    if let Some(p) = cfg.pump.problem() {
+        return Err(ApiError::Bad(p));
     }
 
     // Swap first, a refused reconnect (e.g. a run is active) must not touch
     // `config.toml`, so the file always matches the live transport.
     let serial = cfg.serial.clone();
-    let pump_addr = cfg.pump.address;
+    let feed = cfg.pump.target();
     let msg = s
         .control
         .call(move |reply| Command::Reconnect {
             serial,
-            pump_addr,
+            feed,
             reply,
         })
         .await
@@ -1133,9 +1174,9 @@ async fn serial_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
     let cfg = s.config.read().await.clone();
     let mut serial = cfg.serial.clone();
     serial.path = "sim".into();
-    let pump_addr = cfg.pump.address;
+    let feed = cfg.pump.target();
     s.control
-        .call(move |reply| Command::Reconnect { serial, pump_addr, reply })
+        .call(move |reply| Command::Reconnect { serial, feed, reply })
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
@@ -1273,7 +1314,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         state_for(engine, &db)
     }
@@ -1553,6 +1594,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_settings_save_that_fails_leaves_the_refill_pump_as_it_was() {
+        // config.toml cannot be written: its folder is a file.
+        let blocker = std::env::temp_dir().join(format!("ft-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, "not a folder").unwrap();
+        let mut st = test_state();
+        st.config_path = Arc::new(blocker.join("config.toml"));
+        let app = router(st);
+        let put = |body: serde_json::Value| {
+            Request::builder()
+                .method("PUT")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let mut cfg = body_json(app.clone().oneshot(get("/api/config")).await.unwrap()).await;
+        // The feed pump's address: a ping there is refused, so it shows
+        // whether the engine took it.
+        cfg["refill"]["pump_address"] = json!(1);
+        assert_eq!(app.clone().oneshot(put(cfg)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        let saved = body_json(app.clone().oneshot(get("/api/config")).await.unwrap()).await;
+        assert_eq!(saved["refill"]["pump_address"], 2, "nothing saved");
+        let res = app.oneshot(post_json("/api/refill/ping", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "the engine still has the refill pump at 2");
+        assert_eq!(body_json(res).await["responding"], false);
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[tokio::test]
     async fn a_stop_for_another_run_is_refused() {
         let app = router(test_state());
         let start = post_json(
@@ -1792,6 +1862,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconnect_sets_the_feed_pump_model() {
+        let dir = std::env::temp_dir().join(format!("ft-reconnect-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfgp = dir.join("config.toml");
+        let mut st = test_state();
+        st.config_path = Arc::new(cfgp.clone());
+        let app = router(st.clone());
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/serial/reconnect",
+                json!({ "pump_model": "labv", "pump_head": 1 }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let written = std::fs::read_to_string(&cfgp).unwrap();
+        assert!(written.contains("model = \"labv\""), "{written}");
+        let status = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
+        assert_eq!(status["pump_model"], "labv", "{status}");
+        assert_eq!(status["pump_max_rpm"], 150.0, "{status}");
+        assert_eq!(status["pump_rpm_step"], 0.01, "{status}");
+        assert_eq!(status["pump_flow_step"], 0.01, "{status}");
+        assert!(status["pump_head"].is_null(), "{status}");
+
+        // A LabV answers at 1..=32 only: refused, nothing changes.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/serial/reconnect", json!({ "pump_model": "labv", "pump_addr": 40 })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(res).await.to_string();
+        assert!(msg.contains("feed pump") && msg.contains("LabV"), "{msg}");
+        assert_eq!(st.config.read().await.pump.address, 1);
+
+        // Omitted fields keep their value; a max rpm sent by an older page
+        // is ignored: the max is the model's.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/serial/reconnect", json!({ "pump_max_rpm": 120 })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cfg = st.config.read().await.clone();
+        assert_eq!((cfg.pump.model, cfg.pump.max_rpm()), (PumpModelCfg::Labv, 150.0));
+
+        let res = app
+            .oneshot(post_json("/api/serial/reconnect", json!({ "pump_model": "masterflex" })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reconnect_ignores_a_notify_section_that_would_not_save() {
+        let dir = std::env::temp_dir().join(format!("ft-reconnect-notify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut st = test_state();
+        st.config_path = Arc::new(dir.join("config.toml"));
+        st.config.write().await.notify.ntfy_server = "http://not-https".into();
+        assert!(st.config.read().await.validate().is_err(), "precondition");
+        let res = router(st)
+            .oneshot(post_json("/api/serial/reconnect", json!({ "path": "sim" })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn reconnect_rejects_a_non_json_body() {
         let app = router(test_state());
         let req = Request::builder()
@@ -1915,6 +2058,11 @@ mod tests {
     /// bursts are seeded directly because their durations must be real
     /// minutes, which an API-driven start/stop in a test cannot give.
     fn state_with_three_bursts() -> (AppState, [i64; 3]) {
+        state_with_bursts_on(["labq"; 3])
+    }
+
+    /// [`state_with_three_bursts`], each burst run on the pump model given.
+    fn state_with_bursts_on(models: [&str; 3]) -> (AppState, [i64; 3]) {
         use crate::store::{ControlVar, Direction, NewRun, RunKind};
         let db = test_db();
         let store = Store::open(&db).unwrap();
@@ -1939,6 +2087,8 @@ mod tests {
                     density_g_per_ml: None,
                     auto_refill: false,
                     refill_draw_g: None,
+                    pump_model: models[i].into(),
+                    pump_head: None,
                 })
                 .unwrap();
             store
@@ -2022,6 +2172,41 @@ mod tests {
         let list = body_json(res).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!(list[0]["id"].as_i64(), Some(id));
+    }
+
+    #[tokio::test]
+    async fn a_calibration_takes_the_model_its_measurements_ran_on() {
+        // Measured on a LabV; by Record time the feed pump is a LabQ again.
+        let (state, runs) = state_with_bursts_on(["labv"; 3]);
+        state.config.write().await.pump.model = PumpModelCfg::Labq;
+        let app = router(state);
+        // The body claims another model: ignored.
+        let mut body = calibration_body(runs, [50.0; 3]);
+        body["pump_model"] = json!("pds2");
+        let res = app.clone().oneshot(post_json("/api/calibrations", body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(body_json(res).await["pump_model"], "labv");
+        let list = body_json(app.oneshot(get("/api/calibrations")).await.unwrap()).await;
+        assert_eq!(list[0]["pump_model"], "labv");
+    }
+
+    #[tokio::test]
+    async fn measurements_on_two_models_are_no_calibration() {
+        let (state, runs) = state_with_bursts_on(["labq", "labv", "labq"]);
+        let app = router(state);
+        let res = app.clone().oneshot(post_json("/api/calibrations", calibration_body(runs, [50.0; 3]))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(res).await.to_string();
+        assert!(msg.contains("LabQ") && msg.contains("LabV"), "{msg}");
+        // A measurement that does not exist: refused the same way.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/calibrations", calibration_body([runs[0], runs[2], 999], [50.0; 3])))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let list = body_json(app.oneshot(get("/api/calibrations")).await.unwrap()).await;
+        assert!(list.as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

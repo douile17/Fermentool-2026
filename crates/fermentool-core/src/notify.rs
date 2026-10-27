@@ -770,6 +770,8 @@ mod tests {
                 density_g_per_ml: None,
                 auto_refill: false,
                 refill_draw_g: None,
+                pump_model: "labq".into(),
+                pump_head: None,
             })
             .unwrap();
         s.finish_run(id, status, jiff::Timestamp::now()).ok();
@@ -1022,6 +1024,8 @@ mod tests {
                 density_g_per_ml: None,
                 auto_refill: false,
                 refill_draw_g: None,
+                pump_model: "labq".into(),
+                pump_head: None,
             })
             .unwrap();
         let mut cfg = Config::default();

@@ -278,10 +278,12 @@ impl<T: Transport> Engine<T> {
         });
     }
 
-    /// Start the refill pump: speed, direction, Start.
+    /// Start the refill pump: transferring mode (a LabV, a PDS II head),
+    /// speed, direction, Start.
     fn refill_start_pump(&mut self, t: f64, weight_g: f64, now: Timestamp, why: &str) -> bool {
         let cfg = self.refill.cfg.clone();
-        let res = self.pump.with_address(cfg.pump_address, |p| {
+        let res = self.pump.with_target_of(cfg.target(), |p| {
+            p.ensure_transferring()?;
             p.set_speed_rpm(cfg.speed_rpm as f32)?;
             p.set_direction(cfg.direction.clockwise())?;
             p.start()
@@ -314,7 +316,8 @@ impl<T: Transport> Engine<T> {
         if !matches!(self.refill.phase, Phase::Filling { .. }) {
             return;
         }
-        let res = self.pump.with_address(self.refill.cfg.pump_address, |p| p.set_speed_rpm(rpm as f32));
+        let target = self.refill.cfg.target();
+        let res = self.pump.with_target_of(target, |p| p.set_speed_rpm(rpm as f32));
         let (level, detail) = match res {
             Ok(()) => (EventLevel::Info, format!("refill pump set to {rpm} rpm during the fill")),
             Err(e) => (EventLevel::Warn, format!("the refill pump did not take {rpm} rpm ({e}); the next fill starts at it")),
@@ -614,11 +617,11 @@ mod tests {
     impl Bench {
         fn new(store: Store) -> Self {
             let mut e = Engine::new(Pump::new(SimBus::new(), 1), store, "test");
-            e.pump_addr = 1;
+            e.feed.address = 1;
             e.set_refill(
                 RefillConfig { pump_address: 2, ..RefillConfig::default() },
                 Instant::now(),
-            );
+            ).unwrap();
             Bench { e, w: 1100.0, dry: false, refill_ml_min: 285.0, run_id: 0 }
         }
 
@@ -677,7 +680,7 @@ mod tests {
             assert!(i < 3000, "no fill started");
         }
         assert!((b.e.pump.transport().get(2).unwrap().speed_rpm() - 350.0).abs() < 1e-3);
-        b.e.set_refill(RefillConfig { pump_address: 2, speed_rpm: 120.0, ..RefillConfig::default() }, Instant::now());
+        b.e.set_refill(RefillConfig { pump_address: 2, speed_rpm: 120.0, ..RefillConfig::default() }, Instant::now()).unwrap();
         let p = b.e.pump.transport().get(2).unwrap();
         assert!(p.running(), "the fill goes on");
         assert!((p.speed_rpm() - 120.0).abs() < 1e-3, "still at {} rpm", p.speed_rpm());
@@ -736,7 +739,7 @@ mod tests {
         b.start();
         b.second(1);
         assert!(!b.refill_running());
-        b.e.set_refill(RefillConfig { pump_address: 2, speed_rpm: 120.0, ..RefillConfig::default() }, Instant::now());
+        b.e.set_refill(RefillConfig { pump_address: 2, speed_rpm: 120.0, ..RefillConfig::default() }, Instant::now()).unwrap();
         assert!(!b.e.pump.transport().get(2).is_some_and(|p| p.running()), "a speed change never starts the pump");
         assert!(!b.kinds().iter().any(|k| k == "refill_speed"));
     }
@@ -1012,11 +1015,43 @@ mod tests {
             }
         }
         let mut e = Engine::new(Pump::new(SimBus::new(), 1), db.store(), "test");
-        e.set_refill(RefillConfig { pump_address: 2, ..RefillConfig::default() }, Instant::now());
+        e.set_refill(RefillConfig { pump_address: 2, ..RefillConfig::default() }, Instant::now()).unwrap();
         e.resume(t0() + jiff::SignedDuration::from_secs(60), Duration::from_secs(300)).unwrap();
         let st = e.refill_cycle_status().unwrap();
         assert_eq!(st.high_g, 1100.0);
         assert_eq!(st.low_g, 550.0);
+    }
+
+    #[test]
+    fn a_fill_switches_a_labv_refill_pump_to_transferring() {
+        // A LabV takes a speed only in transferring mode, and starts at 1008
+        // (1006 on a LabQ is its full speed key).
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        let labv = b.e.pump.transport_mut().pump(2);
+        labv.strict = Some(fermentool_modbus::PumpModel::LabV);
+        labv.set_reg(1020, 1);
+        b.e.set_refill(
+            RefillConfig {
+                pump_address: 2,
+                pump_model: crate::config::PumpModelCfg::Labv,
+                speed_rpm: 100.0,
+                ..RefillConfig::default()
+            },
+            Instant::now(),
+        )
+        .unwrap();
+        b.start();
+        let started = |b: &Bench| b.e.pump.transport().get(2).unwrap().reg(1008) == 1;
+        let mut i = 1;
+        while !started(&b) {
+            b.second(i);
+            i += 1;
+            assert!(i < 3000, "no fill started: {:?}", b.kinds());
+        }
+        let p = b.e.pump.transport().get(2).unwrap();
+        assert_eq!(p.reg(1020), fermentool_modbus::TRANSFERRING);
+        assert_eq!(p.reg(1006), 0, "never the LabQ start register");
+        assert!(b.kinds().contains(&"refill_start".to_string()), "{:?}", b.kinds());
     }
 
 }

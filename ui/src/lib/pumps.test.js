@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedCameBack, feedResponding, lineState, lineUp, needsReconnect, pingDelayMs, pingWanted, pumpTone } from './pumps.js';
+import { feedCameBack, feedLocked, feedResponding, headOf, refillKindLocked, lineState, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump, setpointStep } from './pumps.js';
 
 const up = { serial_ok: true, simulator: false, transport: 'COM8', pump_confirmed: true, write_fails: 0 };
 
@@ -65,5 +65,87 @@ describe('refill pump ping', () => {
     expect(feedCameBack(null, true)).toBe(true);
     expect(feedCameBack(true, true)).toBe(false);
     expect(feedCameBack(true, false)).toBe(false);
+  });
+});
+
+describe('models', () => {
+  it('lists the three pumps with their limits', () => {
+    expect(MODELS.map((m) => m.id)).toEqual(['labq', 'labv', 'pds2']);
+    expect(modelOf('labq')).toMatchObject({ label: 'LabQ', maxRpm: 350, maxAddress: 247, rpmStep: 0.1, flowStep: 0.001 });
+    expect(modelOf('labv')).toMatchObject({ label: 'LabV', maxRpm: 150, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 });
+    expect(modelOf('pds2')).toMatchObject({ label: 'PDS II', maxRpm: 600, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 });
+    expect(modelOf('nope').id).toBe('labq');
+  });
+});
+
+describe('setpointStep', () => {
+  it('is the model step in the run unit', () => {
+    expect(setpointStep('labv', 'rpm')).toBe(0.01);
+    expect(setpointStep('pds2', 'ml_min')).toBe(0.01);
+    expect(setpointStep('labq', 'rpm')).toBe(0.1);
+    expect(setpointStep('labq', 'ml_min')).toBe(0.01);
+    expect(setpointStep(undefined, 'rpm')).toBe(0.1);
+  });
+});
+
+describe('samePump', () => {
+  it('two heads of one PDS II share an address but are two pumps', () => {
+    expect(samePump({ address: 3, model: 'pds2', head: 1 }, { address: 3, model: 'pds2', head: 2 })).toBe(false);
+    expect(samePump({ address: 3, model: 'pds2', head: 1 }, { address: 3, model: 'pds2', head: 1 })).toBe(true);
+    expect(samePump({ address: 2, model: 'labv' }, { address: 2, model: 'labq' })).toBe(true);
+    expect(samePump({ address: 2, model: 'labv' }, { address: 3, model: 'labv' })).toBe(false);
+  });
+});
+
+describe('pumpProblem', () => {
+  it('follows the model', () => {
+    expect(pumpProblem({ model: 'labq', address: 200 })).toBeNull();
+    expect(pumpProblem({ model: 'labv', address: 33 })).toMatch(/1 to 32/);
+    expect(pumpProblem({ model: 'pds2', address: 3, head: 9 })).toMatch(/1 to 8/);
+  });
+});
+
+describe('notAnsweringHint', () => {
+  it('asks the right questions per model', () => {
+    expect(notAnsweringHint({ model: 'labq', address: 1 })).toBe('Is the LabQ switched on, at address 1 and 9600 baud in its own menu?');
+    expect(notAnsweringHint({ model: 'labv', address: 4 })).toMatch(/^Is the LabV switched on, at address 4/);
+    expect(notAnsweringHint({ model: 'pds2', address: 3, head: 2 })).toMatch(/head 2 set to independent operation/);
+  });
+});
+
+describe('needsReconnect, pump model', () => {
+  const saved = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1 };
+  const now = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1 };
+  it('also when the feed model or head changed', () => {
+    expect(needsReconnect(saved, now)).toBe(false);
+    expect(needsReconnect(saved, { ...now, feedModel: 'labv' })).toBe(true);
+    expect(needsReconnect(saved, { ...now, feedHead: 2 })).toBe(true);
+  });
+});
+
+describe('headOf', () => {
+  it('drives a LabQ or a LabV on head 1, a PDS II on its chosen head', () => {
+    expect(headOf('labq', 4)).toBe(1);
+    expect(headOf('labv', 4)).toBe(1);
+    expect(headOf('pds2', '4')).toBe(4);
+  });
+});
+
+describe('locks (Settings > Pumps)', () => {
+  it('the feed pump is locked during a run and while an interrupted run waits', () => {
+    expect(feedLocked({ active: null, has_pending_recovery: false })).toBe(false);
+    expect(feedLocked({ active: { id: 1 } })).toBe(true);
+    expect(feedLocked({ active: null, has_pending_recovery: true })).toBe(true);
+    expect(feedLocked(null)).toBe(false);
+  });
+  it("the refill pump's model and head are locked in a refill run and while an interrupted one waits", () => {
+    expect(refillKindLocked({ refill: null })).toBe(false);
+    expect(refillKindLocked({ refill: { in_run: true, awaiting_resume: false } })).toBe(true);
+    expect(refillKindLocked({ refill: { in_run: false, awaiting_resume: true } })).toBe(true);
+    expect(refillKindLocked({ refill: { in_run: false, awaiting_resume: false, testing: true } })).toBe(false);
+  });
+  it('a Stop still owed after the run ended does not lock the refill model', () => {
+    // A wrong model is what makes that Stop fail: changing it is the way out.
+    expect(refillKindLocked({ refill: { in_run: false, recovering: true, awaiting_resume: false } })).toBe(false);
   });
 });

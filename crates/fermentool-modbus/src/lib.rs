@@ -1,4 +1,5 @@
-//! MODBUS-RTU support for the Baoding Shenchen **LabQ** peristaltic pump.
+//! MODBUS-RTU support for the Baoding Shenchen **LabQ**, **LabV** and the
+//! Innofluid **PDS II** peristaltic pumps (see [`PumpKind`] and [`RegisterMap`]).
 //!
 //! Layers, bottom to top:
 //!
@@ -16,7 +17,8 @@
 //! seconds, run on a dedicated thread, is simpler and steadier for a 100 h job
 //! than an async stack (`docs/IMPLEMENTATION_PLAN.md` §4.3).
 
-/// LabQ holding-register addresses (decimal).
+/// LabQ holding-register addresses (decimal). The tests and the simulator use
+/// these; the daemon drives a pump through its [`RegisterMap`] instead.
 pub mod reg {
     /// Pump head type, `u16`, function code `06H`. See Chart 1 (KT15 = 0).
     pub const PUMP_HEAD_TYPE: u16 = 1000;
@@ -36,13 +38,13 @@ pub mod reg {
     pub const BACK_SUCTION_ANGLE: u16 = 1009;
 }
 
-/// LabQ setpoint limits, for the engine to intersect with a run's own clamps.
+/// Setpoint limits, for the engine to intersect with a run's own clamps.
 pub mod limits {
     /// Minimum settable motor speed (rpm).
     pub const RPM_MIN: f64 = 0.1;
-    /// Maximum settable motor speed (rpm).
-    pub const RPM_MAX: f64 = 350.0;
-    /// Minimum settable flow rate (ml/min).
+    // No maximum here: it is the model's own [`PumpModel::max_rpm`](super::PumpModel::max_rpm).
+    /// Lowest flow rate any model takes (ml/min), the LabQ's: a curve may go
+    /// down to it. Each model's own floor is [`PumpModel::flow_min`](super::PumpModel::flow_min).
     pub const FLOW_MIN: f64 = 0.0;
     /// Maximum settable flow rate (ml/min).
     pub const FLOW_MAX: f64 = 99_999.0;
@@ -184,7 +186,7 @@ pub enum PumpError {
     Pdu(PduError),
     Transport(TransportError),
     /// A caller-supplied setpoint was outside the pump's accepted range.
-    OutOfRange(&'static str),
+    OutOfRange(String),
 }
 
 impl core::fmt::Display for PumpError {
@@ -208,6 +210,197 @@ impl From<PduError> for PumpError {
 impl From<TransportError> for PumpError {
     fn from(e: TransportError) -> Self {
         PumpError::Transport(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pump models and register maps
+// ---------------------------------------------------------------------------
+
+/// The "transferring" value of a pump's operating-mode register: the only mode
+/// in which speed and direction can be written.
+pub const TRANSFERRING: u16 = 0;
+
+/// A pump family, as the operator chooses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpModel {
+    LabQ,
+    LabV,
+    PdsII,
+}
+
+impl PumpModel {
+    /// Stable key used in `config.toml` and the API.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PumpModel::LabQ => "labq",
+            PumpModel::LabV => "labv",
+            PumpModel::PdsII => "pds2",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PumpModel> {
+        match s {
+            "labq" => Some(PumpModel::LabQ),
+            "labv" => Some(PumpModel::LabV),
+            "pds2" => Some(PumpModel::PdsII),
+            _ => None,
+        }
+    }
+
+    /// The pump's top speed (rpm), fixed per model: the bench's LabV is a
+    /// LabV1-II, sold as 0.1..150 rpm (its protocol, common to the range,
+    /// says 600). Another variant (LabV3 350, LabV6 600) is a code change.
+    pub fn max_rpm(self) -> f64 {
+        match self {
+            PumpModel::LabQ => 350.0,
+            PumpModel::LabV => 150.0,
+            PumpModel::PdsII => 600.0,
+        }
+    }
+
+    /// The finest speed step the pump keeps (rpm). LabV and PDS II checked on
+    /// the bench (2026-10-26): 68.39 and 30.07 rpm typed are kept as is.
+    pub fn rpm_step(self) -> f64 {
+        match self {
+            PumpModel::LabQ => 0.1,
+            PumpModel::LabV | PumpModel::PdsII => 0.01,
+        }
+    }
+
+    /// The finest flow step the pump keeps (ml/min): the LabQ shows 3
+    /// decimals; the LabV's manual says 0.01 ml/min, the PDS II checked on
+    /// the bench.
+    pub fn flow_step(self) -> f64 {
+        match self {
+            PumpModel::LabQ => 0.001,
+            PumpModel::LabV | PumpModel::PdsII => 0.01,
+        }
+    }
+
+    /// The lowest flow rate the pump takes in ml/min: the LabQ 0, the LabV
+    /// and the PDS II 0.1 (they refuse a lower one with exception 03).
+    pub fn flow_min(self) -> f64 {
+        match self {
+            PumpModel::LabQ => 0.0,
+            PumpModel::LabV | PumpModel::PdsII => 0.1,
+        }
+    }
+
+    /// The highest MODBUS slave address.
+    pub fn max_address(self) -> u8 {
+        match self {
+            PumpModel::LabQ => 247,
+            PumpModel::LabV | PumpModel::PdsII => 32,
+        }
+    }
+
+    /// Name shown to the operator.
+    pub fn label(self) -> &'static str {
+        match self {
+            PumpModel::LabQ => "LabQ",
+            PumpModel::LabV => "LabV",
+            PumpModel::PdsII => "PDS II",
+        }
+    }
+}
+
+/// A model plus, for a PDS II, which of its heads (1..=8) is meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpKind {
+    LabQ,
+    LabV,
+    PdsII { head: u8 },
+}
+
+impl PumpKind {
+    /// `head` (1..=8) is checked for a PDS II and ignored for the others.
+    pub fn new(model: PumpModel, head: u8) -> Result<PumpKind, PumpError> {
+        match model {
+            PumpModel::LabQ => Ok(PumpKind::LabQ),
+            PumpModel::LabV => Ok(PumpKind::LabV),
+            PumpModel::PdsII if (1..=8).contains(&head) => Ok(PumpKind::PdsII { head }),
+            PumpModel::PdsII => Err(PumpError::OutOfRange(format!(
+                "PDS II head must be 1..=8, not {head}"
+            ))),
+        }
+    }
+
+    pub fn model(self) -> PumpModel {
+        match self {
+            PumpKind::LabQ => PumpModel::LabQ,
+            PumpKind::LabV => PumpModel::LabV,
+            PumpKind::PdsII { .. } => PumpModel::PdsII,
+        }
+    }
+
+    pub fn head(self) -> Option<u8> {
+        match self {
+            PumpKind::PdsII { head } => Some(head),
+            _ => None,
+        }
+    }
+
+    /// The registers this kind of pump is driven through. Never includes the
+    /// head, tubing or "all start" registers.
+    pub fn map(self) -> RegisterMap {
+        match self {
+            PumpKind::LabQ => RegisterMap {
+                speed: 1002,
+                flow: 1004,
+                start_stop: 1006,
+                direction: 1007,
+                mode: None,
+            },
+            PumpKind::LabV => RegisterMap {
+                speed: 1002,
+                flow: 1004,
+                start_stop: 1008,
+                direction: 1009,
+                mode: Some(1020),
+            },
+            PumpKind::PdsII { head } => {
+                let base = u16::from(head) * 1000;
+                RegisterMap {
+                    speed: base + 32,
+                    flow: base + 30,
+                    start_stop: base + 3,
+                    direction: base + 4,
+                    mode: Some(base + 5),
+                }
+            }
+        }
+    }
+}
+
+/// Holding registers a pump is driven through (speed and flow are `f32`
+/// pairs, the rest `u16`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterMap {
+    pub speed: u16,
+    pub flow: u16,
+    pub start_stop: u16,
+    pub direction: u16,
+    /// Operating mode, where the pump has one ([`TRANSFERRING`] is the mode we need).
+    pub mode: Option<u16>,
+}
+
+/// Which pump a [`Pump`] talks to: its address and kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PumpTarget {
+    pub address: u8,
+    pub kind: PumpKind,
+}
+
+impl PumpTarget {
+    /// A LabQ at `address`.
+    pub fn labq(address: u8) -> PumpTarget {
+        PumpTarget { address, kind: PumpKind::LabQ }
+    }
+
+    /// The pump's top speed (rpm), its model's.
+    pub fn max_rpm(&self) -> f64 {
+        self.kind.model().max_rpm()
     }
 }
 
@@ -376,17 +569,44 @@ pub trait PumpTransport {
     fn stop(&mut self) -> Result<(), PumpError>;
     fn read_speed_rpm(&mut self) -> Result<f32, PumpError>;
     fn read_flow_ml_min(&mut self) -> Result<f32, PumpError>;
+    /// Put the pump in transferring mode if it has a mode register and is not
+    /// there: `Ok(false)` when nothing was needed (no mode register, or it reads
+    /// [`TRANSFERRING`]), `Ok(true)` after stopping it and writing the mode.
+    fn ensure_transferring(&mut self) -> Result<bool, PumpError>;
 }
 
-/// A LabQ pump at `address`, reachable through `transport`.
+/// A pump (LabQ, LabV or PDS II head) reachable through `transport`.
 pub struct Pump<T: Transport> {
     transport: T,
-    address: u8,
+    target: PumpTarget,
 }
 
 impl<T: Transport> Pump<T> {
+    /// A LabQ at `address`.
     pub fn new(transport: T, address: u8) -> Self {
-        Self { transport, address }
+        Self::with_target(transport, PumpTarget::labq(address))
+    }
+
+    pub fn with_target(transport: T, target: PumpTarget) -> Self {
+        Self { transport, target }
+    }
+
+    pub fn target(&self) -> PumpTarget {
+        self.target
+    }
+
+    pub fn set_target(&mut self, target: PumpTarget) {
+        self.target = target;
+    }
+
+    /// Run `f` against another pump on the same bus (the refill pump), then
+    /// target this one again, whatever `f` returned.
+    pub fn with_target_of<R>(&mut self, target: PumpTarget, f: impl FnOnce(&mut Self) -> R) -> R {
+        let own = self.target;
+        self.target = target;
+        let out = f(self);
+        self.target = own;
+        out
     }
 
     /// Borrow the underlying transport (e.g. a [`SimPump`] in tests).
@@ -400,23 +620,19 @@ impl<T: Transport> Pump<T> {
 
     /// The MODBUS slave address this pump is addressed at.
     pub fn address(&self) -> u8 {
-        self.address
+        self.target.address
     }
 
     /// Re-target this pump at a different MODBUS slave address (same bus).
     /// Used when the operator corrects the address without a daemon restart.
     pub fn set_address(&mut self, address: u8) {
-        self.address = address;
+        self.target.address = address;
     }
 
-    /// Run `f` against another pump on the same bus (the refill pump), then
-    /// address this one again, whatever `f` returned.
+    /// Like [`Pump::with_target_of`], same kind and top speed at another address.
     pub fn with_address<R>(&mut self, address: u8, f: impl FnOnce(&mut Self) -> R) -> R {
-        let own = self.address;
-        self.address = address;
-        let out = f(self);
-        self.address = own;
-        out
+        let target = PumpTarget { address, ..self.target };
+        self.with_target_of(target, f)
     }
 
     /// One transaction, retried once on any failure.
@@ -434,30 +650,37 @@ impl<T: Transport> Pump<T> {
     }
 
     fn write_reg(&mut self, reg: u16, value: u16) -> Result<(), PumpError> {
-        let req = frame::build_write_single(self.address, reg, value);
+        let req = frame::build_write_single(self.target.address, reg, value);
         let resp = self.transact_retrying(&req)?;
-        frame::parse_write_single_response(&resp, self.address, reg, value)?;
+        frame::parse_write_single_response(&resp, self.target.address, reg, value)?;
         Ok(())
     }
 
     fn write_f32(&mut self, reg: u16, value: f32) -> Result<(), PumpError> {
-        let req = frame::build_write_f32(self.address, reg, value);
+        let req = frame::build_write_f32(self.target.address, reg, value);
         let resp = self.transact_retrying(&req)?;
-        frame::parse_write_multiple_response(&resp, self.address, reg, 2)?;
+        frame::parse_write_multiple_response(&resp, self.target.address, reg, 2)?;
         Ok(())
     }
 
-    fn read_f32(&mut self, reg: u16) -> Result<f32, PumpError> {
-        let req = frame::build_read_holding(self.address, reg, 2);
+    fn read_u16(&mut self, reg: u16) -> Result<u16, PumpError> {
+        let req = frame::build_read_holding(self.target.address, reg, 1);
         let resp = self.transact_retrying(&req)?;
-        let words = frame::parse_read_holding_response(&resp, self.address, 2)?;
+        let words = frame::parse_read_holding_response(&resp, self.target.address, 1)?;
+        Ok(words[0])
+    }
+
+    fn read_f32(&mut self, reg: u16) -> Result<f32, PumpError> {
+        let req = frame::build_read_holding(self.target.address, reg, 2);
+        let resp = self.transact_retrying(&req)?;
+        let words = frame::parse_read_holding_response(&resp, self.target.address, 2)?;
         Ok(f32_from_words(words[0], words[1]))
     }
 }
 
 impl<T: Transport> PumpTransport for Pump<T> {
     fn set_direction(&mut self, clockwise: bool) -> Result<(), PumpError> {
-        self.write_reg(reg::DIRECTION, u16::from(clockwise))
+        self.write_reg(self.target.kind.map().direction, u16::from(clockwise))
     }
 
     fn set_head_type(&mut self, code: u16) -> Result<(), PumpError> {
@@ -469,33 +692,49 @@ impl<T: Transport> PumpTransport for Pump<T> {
     }
 
     fn set_speed_rpm(&mut self, rpm: f32) -> Result<(), PumpError> {
-        if !(limits::RPM_MIN..=limits::RPM_MAX).contains(&(rpm as f64)) {
-            return Err(PumpError::OutOfRange("motor speed must be 0.1..=350 rpm"));
+        let max = self.target.max_rpm();
+        if !(limits::RPM_MIN..=max).contains(&(rpm as f64)) {
+            return Err(PumpError::OutOfRange(format!(
+                "motor speed must be 0.1..={max} rpm"
+            )));
         }
-        self.write_f32(reg::MOTOR_SPEED, rpm)
+        self.write_f32(self.target.kind.map().speed, rpm)
     }
 
     fn set_flow_ml_min(&mut self, ml_min: f32) -> Result<(), PumpError> {
-        if !(limits::FLOW_MIN..=limits::FLOW_MAX).contains(&(ml_min as f64)) {
-            return Err(PumpError::OutOfRange("flow rate must be 0..=99999 ml/min"));
+        let min = self.target.kind.model().flow_min();
+        if !(min..=limits::FLOW_MAX).contains(&(ml_min as f64)) {
+            return Err(PumpError::OutOfRange(format!("flow rate must be {min}..=99999 ml/min")));
         }
-        self.write_f32(reg::FLOW_RATE, ml_min)
+        self.write_f32(self.target.kind.map().flow, ml_min)
     }
 
     fn start(&mut self) -> Result<(), PumpError> {
-        self.write_reg(reg::START_STOP, 1)
+        self.write_reg(self.target.kind.map().start_stop, 1)
     }
 
     fn stop(&mut self) -> Result<(), PumpError> {
-        self.write_reg(reg::START_STOP, 0)
+        self.write_reg(self.target.kind.map().start_stop, 0)
     }
 
     fn read_speed_rpm(&mut self) -> Result<f32, PumpError> {
-        self.read_f32(reg::MOTOR_SPEED)
+        self.read_f32(self.target.kind.map().speed)
     }
 
     fn read_flow_ml_min(&mut self) -> Result<f32, PumpError> {
-        self.read_f32(reg::FLOW_RATE)
+        self.read_f32(self.target.kind.map().flow)
+    }
+
+    fn ensure_transferring(&mut self) -> Result<bool, PumpError> {
+        let Some(mode) = self.target.kind.map().mode else {
+            return Ok(false);
+        };
+        if self.read_u16(mode)? == TRANSFERRING {
+            return Ok(false);
+        }
+        self.stop()?;
+        self.write_reg(mode, TRANSFERRING)?;
+        Ok(true)
     }
 }
 
@@ -508,8 +747,8 @@ impl<T: Transport> PumpTransport for Pump<T> {
 #[derive(Debug, Clone)]
 pub struct SimPump {
     address: u8,
-    /// Holding registers 1000..=1009, indexed as `addr - 1000`.
-    regs: [u16; 10],
+    /// Every holding register written so far (any address is accepted).
+    regs: std::collections::BTreeMap<u16, u16>,
     /// Swallow this many upcoming transactions (return [`TransportError::Timeout`]).
     pub drop_next: usize,
     /// Answer the next transaction with this exception code instead of acting.
@@ -523,13 +762,21 @@ pub struct SimPump {
     pub frozen_readback: Option<f32>,
     /// Number of transactions seen (successful or dropped).
     pub transactions: usize,
+    /// When set, the pump answers like that model: exception 02 for a register
+    /// the model does not document, exception 03 for a speed / flow write while
+    /// its mode register is not [`TRANSFERRING`].
+    pub strict: Option<PumpModel>,
+    /// PDS II heads (1..=8) in logical operation: they do not answer at all.
+    pub logical_heads: std::collections::BTreeSet<u8>,
 }
 
 impl SimPump {
     pub fn new(address: u8) -> Self {
         Self {
+            strict: None,
+            logical_heads: std::collections::BTreeSet::new(),
             address,
-            regs: [0; 10],
+            regs: std::collections::BTreeMap::new(),
             drop_next: 0,
             next_exception: None,
             reject_setpoint_writes: false,
@@ -538,52 +785,79 @@ impl SimPump {
         }
     }
 
-    fn idx(reg: u16) -> Option<usize> {
-        if (1000..=1009).contains(&reg) {
-            Some((reg - 1000) as usize)
-        } else {
-            None
-        }
-    }
-
     fn set(&mut self, reg: u16, value: u16) {
-        if let Some(i) = Self::idx(reg) {
-            self.regs[i] = value;
-        }
+        self.regs.insert(reg, value);
     }
 
     fn get(&self, reg: u16) -> u16 {
-        Self::idx(reg).map(|i| self.regs[i]).unwrap_or(0)
+        self.regs.get(&reg).copied().unwrap_or(0)
+    }
+
+    /// A speed or flow register of any map (LabQ / LabV 1002, 1004; PDS II n030, n032).
+    fn is_setpoint_reg(reg: u16) -> bool {
+        matches!(reg % 1000, 2 | 4 | 30 | 32)
+    }
+
+    /// Whether `model` documents holding register `r` (a strict pump answers
+    /// exception 02 for the others).
+    fn documented(model: PumpModel, r: u16) -> bool {
+        match model {
+            PumpModel::LabQ => (1000..=1009).contains(&r),
+            PumpModel::LabV => matches!(r, 1000..=1005 | 1007..=1010 | 1015..=1016 | 1018..=1023),
+            PumpModel::PdsII => {
+                r == 10 || ((1000..=8999).contains(&r) && matches!(r % 1000, 0..=35 | 100..=107))
+            }
+        }
+    }
+
+    /// Any holding register (0 if never written).
+    pub fn reg(&self, reg: u16) -> u16 {
+        self.get(reg)
+    }
+
+    /// Set any holding register directly (a test setting up the pump's state).
+    pub fn set_reg(&mut self, reg: u16, value: u16) {
+        self.set(reg, value);
+    }
+
+    /// The speed held in `map`'s speed registers (rpm).
+    pub fn speed_rpm_of(&self, map: RegisterMap) -> f32 {
+        f32_from_words(self.get(map.speed), self.get(map.speed + 1))
+    }
+
+    /// Whether `map`'s start/stop register is set to run.
+    pub fn running_of(&self, map: RegisterMap) -> bool {
+        self.get(map.start_stop) == 1
     }
 
     /// Pump-head code currently set (register 1000).
     pub fn head_code(&self) -> u16 {
-        self.regs[0]
+        self.get(reg::PUMP_HEAD_TYPE)
     }
 
     /// Tubing-size code currently set (register 1001).
     pub fn tubing_code(&self) -> u16 {
-        self.regs[1]
+        self.get(reg::TUBING_SIZE)
     }
 
     /// Current commanded motor speed (rpm), as the pump would report it.
     pub fn speed_rpm(&self) -> f32 {
-        f32_from_words(self.regs[2], self.regs[3])
+        self.speed_rpm_of(PumpKind::LabQ.map())
     }
 
     /// Current commanded flow rate (ml/min).
     pub fn flow_ml_min(&self) -> f32 {
-        f32_from_words(self.regs[4], self.regs[5])
+        f32_from_words(self.get(reg::FLOW_RATE), self.get(reg::FLOW_RATE + 1))
     }
 
     /// Whether start/stop is set to run.
     pub fn running(&self) -> bool {
-        self.regs[6] == 1
+        self.running_of(PumpKind::LabQ.map())
     }
 
     /// Whether direction is clockwise.
     pub fn direction_cw(&self) -> bool {
-        self.regs[7] == 1
+        self.get(reg::DIRECTION) == 1
     }
 }
 
@@ -615,6 +889,44 @@ impl Transport for SimPump {
             return Err(TransportError::Timeout);
         }
 
+        if let Some(model) = self.strict {
+            let first = u16::from_be_bytes([body[2], body[3]]);
+            let qty = match func {
+                0x06 => 1,
+                _ => u16::from_be_bytes([body[4], body[5]]).max(1),
+            };
+            let last = first.saturating_add(qty - 1);
+            if model == PumpModel::PdsII && matches!(func, 0x03 | 0x06 | 0x10) {
+                let head = (first / 1000) as u8;
+                if self.logical_heads.contains(&head) {
+                    return Err(TransportError::Timeout);
+                }
+            }
+            if matches!(func, 0x03 | 0x06 | 0x10)
+                && !(first..=last).all(|r| Self::documented(model, r))
+            {
+                return Ok(with_crc(vec![body[0], func | 0x80, 0x02]));
+            }
+            if matches!(func, 0x06 | 0x10) && Self::is_setpoint_reg(first) {
+                let mode_reg = match model {
+                    PumpModel::LabQ => None,
+                    PumpModel::LabV => Some(1020),
+                    PumpModel::PdsII => Some(first / 1000 * 1000 + 5),
+                };
+                if mode_reg.is_some_and(|m| self.get(m) != TRANSFERRING) {
+                    return Ok(with_crc(vec![body[0], func | 0x80, 0x03]));
+                }
+            }
+            // A flow under the model's floor (0.1 ml/min on a LabV / PDS II).
+            let flow_reg = matches!((model, first % 1000), (PumpModel::LabV, 4) | (PumpModel::PdsII, 30));
+            if func == 0x10 && flow_reg && body.len() >= 11 {
+                let v = f32_from_be([body[7], body[8], body[9], body[10]]);
+                if (v as f64) < model.flow_min() - 1e-6 {
+                    return Ok(with_crc(vec![body[0], func | 0x80, 0x03]));
+                }
+            }
+        }
+
         match func {
             0x06 => {
                 let reg = u16::from_be_bytes([body[2], body[3]]);
@@ -628,9 +940,7 @@ impl Transport for SimPump {
                 if body.len() < 7 + 2 * qty as usize {
                     return Err(TransportError::Timeout);
                 }
-                if self.reject_setpoint_writes
-                    && (reg == reg::MOTOR_SPEED || reg == reg::FLOW_RATE)
-                {
+                if self.reject_setpoint_writes && Self::is_setpoint_reg(reg) {
                     return Ok(with_crc(vec![body[0], 0x10 | 0x80, 0x03]));
                 }
                 for i in 0..qty as usize {
@@ -646,10 +956,8 @@ impl Transport for SimPump {
                 let reg = u16::from_be_bytes([body[2], body[3]]);
                 let qty = u16::from_be_bytes([body[4], body[5]]);
                 // Optional fault: report a stuck setpoint on the value registers.
-                let frozen_words = match (self.frozen_readback, reg) {
-                    (Some(v), reg::MOTOR_SPEED) | (Some(v), reg::FLOW_RATE) if qty == 2 => {
-                        Some(f32_to_words(v))
-                    }
+                let frozen_words = match self.frozen_readback {
+                    Some(v) if qty == 2 && Self::is_setpoint_reg(reg) => Some(f32_to_words(v)),
                     _ => None,
                 };
                 let mut out = vec![body[0], 0x03, (2 * qty) as u8];
@@ -1094,6 +1402,305 @@ mod tests {
         pump.transport_mut().set_plugged(3, false);
         assert!(pump.with_address(3, |p| p.stop()).is_err());
         assert_eq!(pump.address(), 1);
+    }
+
+    #[test]
+    fn register_maps_follow_the_protocols() {
+        assert_eq!(
+            PumpKind::LabQ.map(),
+            RegisterMap { speed: 1002, flow: 1004, start_stop: 1006, direction: 1007, mode: None }
+        );
+        assert_eq!(
+            PumpKind::LabV.map(),
+            RegisterMap { speed: 1002, flow: 1004, start_stop: 1008, direction: 1009, mode: Some(1020) }
+        );
+        assert_eq!(
+            PumpKind::PdsII { head: 3 }.map(),
+            RegisterMap { speed: 3032, flow: 3030, start_stop: 3003, direction: 3004, mode: Some(3005) }
+        );
+        assert!(PumpKind::new(PumpModel::PdsII, 0).is_err());
+        assert!(PumpKind::new(PumpModel::PdsII, 9).is_err());
+        assert_eq!(PumpKind::new(PumpModel::PdsII, 8).unwrap().head(), Some(8));
+        assert_eq!(PumpKind::new(PumpModel::LabV, 0).unwrap(), PumpKind::LabV);
+    }
+
+    #[test]
+    fn models_parse_and_carry_their_limits() {
+        for m in [PumpModel::LabQ, PumpModel::LabV, PumpModel::PdsII] {
+            assert_eq!(PumpModel::parse(m.as_str()), Some(m));
+        }
+        assert_eq!(PumpModel::parse("nope"), None);
+        assert_eq!(PumpModel::LabQ.max_rpm(), 350.0);
+        assert_eq!(PumpModel::LabV.max_rpm(), 150.0);
+        assert_eq!(PumpModel::PdsII.max_rpm(), 600.0);
+        assert_eq!(PumpModel::LabQ.rpm_step(), 0.1);
+        assert_eq!(PumpModel::LabV.rpm_step(), 0.01);
+        assert_eq!(PumpModel::PdsII.rpm_step(), 0.01);
+        assert_eq!(PumpModel::LabQ.flow_step(), 0.001);
+        assert_eq!(PumpModel::LabV.flow_step(), 0.01);
+        assert_eq!(PumpModel::PdsII.flow_step(), 0.01);
+        assert_eq!(PumpModel::LabQ.max_address(), 247);
+        assert_eq!(PumpModel::PdsII.max_address(), 32);
+        assert_eq!(PumpModel::PdsII.label(), "PDS II");
+    }
+
+    #[test]
+    fn labq_frames_unchanged() {
+        let mut p = Pump::new(SimPump::new(1), 1);
+        p.start().unwrap();
+        p.set_speed_rpm(58.8).unwrap();
+        assert!(p.transport().running());
+        assert!((p.transport().speed_rpm() - 58.8).abs() < 1e-4);
+        assert_eq!(
+            frame::build_write_single(1, PumpKind::LabQ.map().start_stop, 1),
+            frame::build_write_single(1, reg::START_STOP, 1)
+        );
+        assert_eq!(p.target(), PumpTarget::labq(1));
+    }
+
+    #[test]
+    fn a_labv_target_writes_the_labv_registers() {
+        let target = PumpTarget { address: 4, kind: PumpKind::LabV };
+        let mut p = Pump::with_target(SimPump::new(4), target);
+        p.start().unwrap();
+        assert_eq!(p.transport().reg(1008), 1);
+        assert_eq!(p.transport().reg(1006), 0);
+        p.set_direction(true).unwrap();
+        assert_eq!(p.transport().reg(1009), 1);
+        assert_eq!(p.transport().reg(1007), 0);
+    }
+
+    #[test]
+    fn a_pds2_head_is_driven_at_its_own_registers() {
+        let kind = PumpKind::new(PumpModel::PdsII, 2).unwrap();
+        let target = PumpTarget { address: 5, kind };
+        let mut p = Pump::with_target(SimPump::new(5), target);
+        p.start().unwrap();
+        p.set_speed_rpm(321.5).unwrap();
+        assert!(p.transport().running_of(kind.map()));
+        assert!((p.transport().speed_rpm_of(kind.map()) - 321.5).abs() < 1e-3);
+        assert!((p.read_speed_rpm().unwrap() - 321.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn speed_over_the_target_max_is_refused() {
+        let target = PumpTarget { address: 4, kind: PumpKind::LabV };
+        let mut p = Pump::with_target(SimPump::new(4), target);
+        assert!(matches!(p.set_speed_rpm(150.1), Err(PumpError::OutOfRange(_))));
+        p.set_speed_rpm(150.0).unwrap();
+        // the message names the figure
+        let msg = p.set_speed_rpm(200.0).unwrap_err().to_string();
+        assert!(msg.contains("150"), "{msg}");
+    }
+
+    #[test]
+    fn a_flow_under_the_models_floor_is_refused() {
+        assert_eq!(PumpModel::LabQ.flow_min(), 0.0);
+        assert_eq!(PumpModel::LabV.flow_min(), 0.1);
+        assert_eq!(PumpModel::PdsII.flow_min(), 0.1);
+        let mut q = Pump::new(SimPump::new(1), 1);
+        q.set_flow_ml_min(0.0).unwrap();
+        for kind in [PumpKind::LabV, PumpKind::PdsII { head: 2 }] {
+            let target = PumpTarget { address: 4, kind };
+            let mut sim = SimPump::new(4);
+            sim.strict = Some(kind.model());
+            let mut p = Pump::with_target(sim, target);
+            let msg = p.set_flow_ml_min(0.0).unwrap_err().to_string();
+            assert!(msg.contains("0.1"), "{msg}");
+            p.set_flow_ml_min(0.1).unwrap();
+            // The strict simulator answers a raw 0 the way the pump does.
+            let raw = frame::build_write_f32(4, kind.map().flow, 0.0);
+            let resp = p.transport_mut().transaction(&raw).unwrap();
+            assert_eq!(
+                frame::parse_write_multiple_response(&resp, 4, kind.map().flow, 2),
+                Err(PduError::Exception(0x03))
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_transferring_reads_first() {
+        let mut labq = Pump::new(SimPump::new(1), 1);
+        assert_eq!(labq.ensure_transferring(), Ok(false));
+        assert_eq!(labq.transport().transactions, 0);
+
+        let kind = PumpKind::new(PumpModel::PdsII, 2).unwrap();
+        let target = PumpTarget { address: 3, kind };
+        let mut p = Pump::with_target(SimPump::new(3), target);
+        p.transport_mut().set_reg(2005, 1);
+        p.transport_mut().set_reg(2003, 1);
+        assert_eq!(p.ensure_transferring(), Ok(true));
+        assert_eq!(p.transport().reg(2003), 0);
+        assert_eq!(p.transport().reg(2005), 0);
+        let seen = p.transport().transactions;
+        assert_eq!(p.ensure_transferring(), Ok(false));
+        assert_eq!(p.transport().transactions, seen + 1, "one read, no write");
+    }
+
+    #[test]
+    fn no_frame_for_head_tubing_or_all_start() {
+        let mut kinds = vec![PumpKind::LabQ, PumpKind::LabV];
+        kinds.extend((1..=8).map(|head| PumpKind::PdsII { head }));
+        for k in kinds {
+            let m = k.map();
+            let mut regs = vec![m.speed, m.flow, m.start_stop, m.direction];
+            regs.extend(m.mode);
+            for r in regs {
+                for banned in [1000u16, 1001, 10] {
+                    assert_ne!(r, banned, "{k:?}");
+                }
+                assert!(!matches!(r % 1000, 0 | 1), "{k:?} reg {r}");
+            }
+        }
+    }
+
+    #[test]
+    fn sim_faults_apply_to_a_pds2_setpoint() {
+        let kind = PumpKind::PdsII { head: 1 };
+        let target = PumpTarget { address: 1, kind };
+        let mut p = Pump::with_target(SimPump::new(1), target);
+        p.transport_mut().reject_setpoint_writes = true;
+        assert!(matches!(
+            p.set_speed_rpm(50.0),
+            Err(PumpError::Pdu(PduError::Exception(0x03)))
+        ));
+        p.transport_mut().reject_setpoint_writes = false;
+        p.set_speed_rpm(50.0).unwrap();
+        p.transport_mut().frozen_readback = Some(10.0);
+        assert!((p.read_speed_rpm().unwrap() - 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn with_target_of_restores_the_own_target() {
+        let own = PumpTarget::labq(1);
+        let other = PumpTarget { address: 2, kind: PumpKind::LabV };
+        let mut p = Pump::with_target(SimBus::new(), own);
+        p.with_target_of(other, |p| p.start()).unwrap();
+        assert_eq!(p.target(), own);
+        assert_eq!(p.transport().get(2).unwrap().reg(1008), 1);
+    }
+
+    #[test]
+    fn a_strict_labv_refuses_the_labq_start_register() {
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::LabV);
+        let mut p = Pump::new(sim, 1); // the LabQ map on a LabV: the anti-goal
+        assert!(matches!(
+            p.start(),
+            Err(PumpError::Pdu(PduError::Exception(0x02)))
+        ));
+        assert_eq!(p.transport().reg(1008), 0);
+    }
+
+    #[test]
+    fn a_strict_pds_refuses_speed_outside_transferring() {
+        let kind = PumpKind::PdsII { head: 1 };
+        let target = PumpTarget { address: 1, kind };
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::PdsII);
+        sim.set_reg(1005, 1);
+        let mut p = Pump::with_target(sim, target);
+        assert!(matches!(
+            p.set_speed_rpm(50.0),
+            Err(PumpError::Pdu(PduError::Exception(0x03)))
+        ));
+        p.ensure_transferring().unwrap();
+        p.set_speed_rpm(50.0).unwrap();
+        assert!((p.read_speed_rpm().unwrap() - 50.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_strict_labv_refuses_speed_outside_transferring_and_undocumented_registers() {
+        let target = PumpTarget { address: 1, kind: PumpKind::LabV };
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::LabV);
+        sim.set_reg(1020, 2);
+        let mut p = Pump::with_target(sim, target);
+        assert!(matches!(
+            p.set_speed_rpm(50.0),
+            Err(PumpError::Pdu(PduError::Exception(0x03)))
+        ));
+        p.ensure_transferring().unwrap();
+        p.set_speed_rpm(50.0).unwrap();
+        p.start().unwrap();
+        // a PDS II register on a LabV, and a LabV gap register
+        let bad = frame::build_write_single(1, 1006, 1);
+        assert_eq!(
+            frame::parse_write_single_response(
+                &p.transport_mut().transaction(&bad).unwrap(),
+                1,
+                1006,
+                1
+            ),
+            Err(PduError::Exception(0x02))
+        );
+    }
+
+    #[test]
+    fn a_strict_labq_documents_only_1000_to_1009() {
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::LabQ);
+        let mut p = Pump::new(sim, 1);
+        p.start().unwrap();
+        p.set_speed_rpm(10.0).unwrap();
+        let bad = frame::build_write_single(1, 1010, 1);
+        assert_eq!(
+            frame::parse_write_single_response(
+                &p.transport_mut().transaction(&bad).unwrap(),
+                1,
+                1010,
+                1
+            ),
+            Err(PduError::Exception(0x02))
+        );
+    }
+
+    #[test]
+    fn a_pds_head_in_logical_operation_is_silent() {
+        let mut sim = SimPump::new(1);
+        sim.strict = Some(PumpModel::PdsII);
+        sim.logical_heads.insert(2);
+        let mut p = Pump::with_target(
+            sim,
+            PumpTarget { address: 1, kind: PumpKind::PdsII { head: 2 } },
+        );
+        assert!(matches!(
+            p.read_speed_rpm(),
+            Err(PumpError::Transport(TransportError::Timeout))
+        ));
+        let target1 = PumpTarget { address: 1, kind: PumpKind::PdsII { head: 1 } };
+        p.with_target_of(target1, |p| p.read_speed_rpm()).unwrap();
+    }
+
+    /// Records every request and answers with a valid echo / ack.
+    struct Recorder {
+        sent: Vec<Vec<u8>>,
+    }
+
+    impl Transport for Recorder {
+        fn transaction(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+            self.sent.push(request.to_vec());
+            Ok(match request[1] {
+                0x10 => with_crc(request[..6].to_vec()),
+                _ => request.to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn labq_frames_byte_exact() {
+        let mut p = Pump::new(Recorder { sent: Vec::new() }, 1);
+        p.start().unwrap();
+        p.set_speed_rpm(58.8).unwrap();
+        p.set_direction(true).unwrap();
+        assert_eq!(
+            p.transport().sent,
+            vec![
+                vec![0x01, 0x06, 0x03, 0xEE, 0x00, 0x01, 0x28, 0x7B],
+                vec![0x01, 0x10, 0x03, 0xEA, 0x00, 0x02, 0x04, 0x42, 0x6B, 0x33, 0x33, 0x58, 0x29],
+                vec![0x01, 0x06, 0x03, 0xEF, 0x00, 0x01, 0x79, 0xBB],
+            ]
+        );
     }
 
     #[test]

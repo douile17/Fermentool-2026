@@ -1,8 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { cycleLine, directionLabel, inSpans, refillOn, refillPlan, refillProblem, refillToChoose, refillView, splitEstimated } from './refill.js';
+import { aboutRefillSpeed, cycleLine, directionLabel, inSpans, pumpsProblem, refillOn, refillPlan, refillProblem, refillToChoose, refillView, splitEstimated } from './refill.js';
+
+describe('pumpsProblem (Settings > Pumps, before Save)', () => {
+  const feed = { address: 1, model: 'labq', head: 1 };
+  const refill = { address: 2, model: 'labq', head: 1 };
+  it('a LabV picked with the saved 350 rpm is the speed: the Change panel opens', () => {
+    const p = pumpsProblem({ feed, refill: { ...refill, model: 'labv' }, speedRpm: 350 });
+    expect(p).toEqual({ message: "The speed must be between 0.1 and 150 rpm (the refill pump's max).", speed: true });
+  });
+  it('a max rpm still sent by an older caller is ignored: the max is the model one', () => {
+    expect(pumpsProblem({ feed, refill: { ...refill, model: 'labv', maxRpm: 0 }, speedRpm: 100 })).toBeNull();
+    expect(pumpsProblem({ feed, refill: { ...refill, model: 'labv', maxRpm: 600 }, speedRpm: 300 }).speed).toBe(true);
+  });
+  it('the feed pump first, then the clash, then nothing', () => {
+    expect(pumpsProblem({ feed: { ...feed, address: 0 }, refill, speedRpm: 100 }).message).toMatch(/^Feed pump: /);
+    expect(pumpsProblem({ feed, refill: { ...refill, address: 1 }, speedRpm: 100 })).toEqual({
+      message: "Address 1 is the feed pump's: set another address in the refill pump's own menu, then here.",
+      speed: false,
+    });
+    expect(pumpsProblem({ feed, refill, speedRpm: 100 })).toBeNull();
+  });
+  it("knows the daemon's refusal of the speed", () => {
+    expect(aboutRefillSpeed("the refill pump's speed 350 rpm is over its max 150 rpm")).toBe(true);
+    expect(aboutRefillSpeed('the feed pump\'s MODBUS address must be 1..=32 on a LabV')).toBe(false);
+  });
+});
 
 describe('refillProblem', () => {
-  const ok = { address: 2, feedAddress: 1, speedRpm: 350 };
+  const ok = { address: 2, model: 'labq', head: 1, speedRpm: 350, feed: { address: 1, model: 'labq', head: 1 } };
   it('accepts a separate address and a LabQ speed', () => {
     expect(refillProblem(ok)).toBeNull();
     expect(refillProblem({ ...ok, address: '247', speedRpm: '0.1' })).toBeNull();
@@ -16,6 +41,22 @@ describe('refillProblem', () => {
     expect(refillProblem({ ...ok, address: 2.5 })).toMatch(/1 to 247/);
     expect(refillProblem({ ...ok, speedRpm: 400 })).toMatch(/rpm/);
     expect(refillProblem({ ...ok, speedRpm: '' })).toMatch(/rpm/);
+  });
+  it('refuses a speed over the refill pump max, with both figures', () => {
+    const p = refillProblem({ ...ok, model: 'labv', speedRpm: 300 });
+    expect(p).toMatch(/150/);
+    expect(p).toBe("The speed must be between 0.1 and 150 rpm (the refill pump's max).");
+    expect(refillProblem({ ...ok, model: 'labv', speedRpm: 150 })).toBeNull();
+  });
+  it('limits the address by model', () => {
+    expect(refillProblem({ ...ok, model: 'labv', address: 33 })).toMatch(/1 to 32/);
+    expect(refillProblem({ ...ok, model: 'labv', address: 32, speedRpm: 150 })).toBeNull();
+  });
+  it('names the head on a shared PDS II', () => {
+    const pds = { address: 3, model: 'pds2', head: 1 };
+    expect(refillProblem({ ...ok, ...pds, feed: pds })).toBe("Head 1 of address 3 is the feed pump's: pick another head.");
+    expect(refillProblem({ ...ok, ...pds, head: 2, feed: pds })).toBeNull();
+    expect(refillProblem({ ...ok, ...pds, head: 9, feed: { address: 1, model: 'labq' } })).toMatch(/head must be 1 to 8/);
   });
 });
 

@@ -1,22 +1,57 @@
-// The refill pump: a second LabQ on the feed pump's cable, at its own MODBUS
-// address, that tops the weighed bottle up from the reservoir. Settings
+// The refill pump: a second pump on the feed pump's cable (a LabQ, a LabV or
+// a PDS II head), at its own MODBUS address or head, that tops the weighed
+// bottle up from the reservoir. Settings
 // (Refill pump) and the sidebar both describe it through these.
+import { modelOf, pumpProblem, samePump } from './pumps.js';
 
 export const REFILL_RPM_MIN = 0.1;
-export const REFILL_RPM_MAX = 350;
 
 /** What the daemon would refuse in `[refill]`, as a sentence; null if fine.
- *  Mirrors `RefillConfig::problem` (config.rs). */
-export function refillProblem({ address, feedAddress, speedRpm }) {
+ *  `feed` is the feed pump, `{ address, model, head }`; the speed is bounded
+ *  by the refill pump model's top speed. Mirrors `RefillConfig::problem`
+ *  (config.rs) and the run-time clash check. */
+export function refillProblem({ address, model = 'labq', head = 1, speedRpm, feed }) {
+  const m = modelOf(model);
   const a = Number(address);
-  if (!Number.isInteger(a) || a < 1 || a > 247) return "The refill pump's MODBUS address must be 1 to 247.";
-  if (a === Number(feedAddress))
-    return `Address ${a} is the feed pump's: set another address in the refill pump's own menu, then here.`;
+  if (!Number.isInteger(a) || a < 1 || a > m.maxAddress) return `The refill pump's MODBUS address must be 1 to ${m.maxAddress}.`;
+  if (m.id === 'pds2') {
+    const h = Number(head);
+    if (!Number.isInteger(h) || h < 1 || h > 8) return "The refill pump's PDS II head must be 1 to 8.";
+  }
+  if (feed && samePump({ address: a, model: m.id, head }, feed))
+    return m.id === 'pds2' && feed.model === 'pds2'
+      ? `Head ${Number(head)} of address ${a} is the feed pump's: pick another head.`
+      : `Address ${a} is the feed pump's: set another address in the refill pump's own menu, then here.`;
+  return refillSpeedProblem(speedRpm, m.maxRpm);
+}
+
+/** The refill speed against the refill pump's top speed `max`; null if fine. */
+export function refillSpeedProblem(speedRpm, max) {
   const s = Number(speedRpm);
-  if (!(s >= REFILL_RPM_MIN && s <= REFILL_RPM_MAX))
-    return `The speed must be between ${REFILL_RPM_MIN} and ${REFILL_RPM_MAX} rpm.`;
+  if (!(s >= REFILL_RPM_MIN && s <= max)) return `The speed must be between ${REFILL_RPM_MIN} and ${max} rpm (the refill pump's max).`;
   return null;
 }
+
+const lower = (t) => t.charAt(0).toLowerCase() + t.slice(1);
+
+/** Settings > Pumps' check before Save, one sentence at a time: the feed
+ *  pump, then the refill pump's own address and head, then the clash and
+ *  its speed. `{ message, speed }`, `speed` when the refill speed is what is
+ *  wrong (its field is in the Change panel, which then opens), or null.
+ *  `feed` and `refill` are `{ address, model, head }`. */
+export function pumpsProblem({ feed, refill, speedRpm }) {
+  const f = pumpProblem(feed);
+  if (f) return { message: `Feed pump: ${lower(f)}`, speed: false };
+  const m = pumpProblem(refill);
+  if (m) return { message: `Refill pump: ${lower(m)}`, speed: false };
+  const r = refillProblem({ ...refill, speedRpm, feed: { address: feed.address, model: feed.model, head: feed.head } });
+  if (r) return { message: r, speed: r === refillSpeedProblem(speedRpm, modelOf(refill.model).maxRpm) };
+  return null;
+}
+
+/** A refusal from the daemon about the refill speed (its field is in the
+ *  Change panel). */
+export const aboutRefillSpeed = (message) => /refill pump's speed|^the speed/i.test(message ?? '');
 
 /** New run asks how the bottle is refilled only with the balance
  *  regulation on a balance under the feed bottle (the daemon refuses the

@@ -5,6 +5,7 @@
 import { LOCALE, num, dur, unitFor, digitsFor } from './fmt.js';
 import { inSpans } from './refill.js';
 import { niceStep } from './chartscale.js';
+import { modelOf } from './pumps.js';
 
 /** The ±share of requested a delivered total may differ by and count as on target. */
 export const TOLERANCE = 0.02;
@@ -136,6 +137,13 @@ export function atRun(t_s) {
 
 /** Minutes, rounded, "27 min"; seconds under a minute. */
 export const mins = (s) => (s < 60 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
+
+/** The feed pump a run was driven on, for its Settings: "LabQ", "LabV",
+ *  "PDS II, head 2" (a run made before the models was a LabQ). */
+export function pumpLine(run) {
+  const m = modelOf(run.pump_model);
+  return m.id === 'pds2' ? `${m.label}, head ${run.pump_head ?? 1}` : m.label;
+}
 
 /** The curve in one line: "Step, 3.500 ml/min for 15 h 44 m, then 0.000",
  *  "Linear, 13.000 → 10.000 ml/min over 1 h 0 m". */

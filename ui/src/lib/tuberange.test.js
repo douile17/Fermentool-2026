@@ -1,7 +1,7 @@
 // A calibrated tube's real flow range (tuberange.js): New run warns before
 // the daemon refuses a curve the tube cannot deliver.
 import { describe, expect, it } from 'vitest';
-import { curveFit, mlPerRpmOf, tubeRange } from './tuberange.js';
+import { curveFit, mlPerRpmOf, rpmCurveProblem, tubeRange } from './tuberange.js';
 
 // Calibration 14 of 2026-10-15: 0.8 mm tube, 5.83 ml/min at 150 rpm.
 const CAL = { control_var: 'rpm', setpoint: 150, mean_measured_ml_min: 5.831 };
@@ -47,5 +47,34 @@ describe('curveFit', () => {
   });
   it('no calibration, no verdict', () => {
     expect(curveFit({ peak: 50, mlPerRpm: null })).toBeNull();
+  });
+});
+
+describe('maxRpm', () => {
+  const mlPerRpm = mlPerRpmOf(CAL);
+  it('a LabV capped at 150 rpm delivers less', () => {
+    expect(tubeRange(mlPerRpm, 150).max).toBeCloseTo(5.83, 1);
+    expect(tubeRange(mlPerRpm).max).toBeCloseTo(13.6, 1);
+  });
+  it('the fit uses it', () => {
+    const fit = curveFit({ peak: 10, mlPerRpm, maxRpm: 150 });
+    expect(fit.over).toBe(true);
+    expect(fit.maxRpm).toBe(150);
+    expect(curveFit({ peak: 10, mlPerRpm, maxRpm: 600 }).over).toBe(false);
+  });
+});
+
+describe('rpmCurveProblem', () => {
+  it('an rpm curve over the pump max is refused before Start, naming both figures', () => {
+    expect(rpmCurveProblem({ peak: 200, maxRpm: 150, label: 'LabV' })).toBe(
+      'The curve asks up to 200 rpm; this LabV goes to 150 rpm.',
+    );
+    // To the hundredth, as the pump's step: 150.04 is over 150, said as such.
+    expect(rpmCurveProblem({ peak: 150.04, maxRpm: 150, label: 'LabV' })).toMatch(/150\.04 rpm; this LabV/);
+  });
+  it('up to the max exactly is fine', () => {
+    expect(rpmCurveProblem({ peak: 150, maxRpm: 150, label: 'LabV' })).toBeNull();
+    expect(rpmCurveProblem({ peak: 350 })).toBeNull();
+    expect(rpmCurveProblem({ peak: null, maxRpm: 150 })).toBeNull();
   });
 });

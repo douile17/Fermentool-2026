@@ -96,7 +96,7 @@ pub enum Command {
     /// Rebuild the pump transport from a serial config, without restarting.
     Reconnect {
         serial: SerialConfig,
-        pump_addr: u8,
+        feed: fermentool_modbus::PumpTarget,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Stop a pump still holding a completed run's final setpoint.
@@ -117,7 +117,9 @@ pub enum Command {
     /// asking, once the pump answers. Sent at boot and on each config save.
     SetAutoResume(bool, oneshot::Sender<()>),
     /// Apply a `[refill]` section saved from Settings to the live engine.
-    SetRefill(RefillConfig, oneshot::Sender<()>),
+    SetRefill(RefillConfig, oneshot::Sender<Result<(), String>>),
+    /// Would [`Command::SetRefill`] refuse this `[refill]`? Nothing applied.
+    CheckRefill(RefillConfig, oneshot::Sender<Result<(), String>>),
     /// Settings' Test: run the refill pump 3 s, then stop it.
     RefillTest(oneshot::Sender<Result<(), String>>),
     /// Settings > Pumps: does the refill pump answer (a read, never a Start).
@@ -138,6 +140,15 @@ pub struct DaemonStatus {
     pub has_pending_recovery: bool,
     /// `"sim"` or the open serial port name.
     pub transport: String,
+    /// The feed pump's model: `"labq"`, `"labv"` or `"pds2"`.
+    pub pump_model: &'static str,
+    /// The feed pump's head, a PDS II only.
+    pub pump_head: Option<u8>,
+    /// The feed pump's top speed (rpm), its model's.
+    pub pump_max_rpm: f64,
+    /// The feed pump's setpoint steps, its model's: rpm and ml/min.
+    pub pump_rpm_step: f64,
+    pub pump_flow_step: f64,
     /// Set when a run completed and the pump is still holding its final speed.
     pub holding: Option<HoldingStatus>,
     /// `false` while the serial link to the pump is lost (the daemon is
@@ -239,6 +250,11 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
             .map(|r| r.is_some())
             .unwrap_or(false),
         transport: st.transport,
+        pump_model: st.pump_model,
+        pump_head: st.pump_head,
+        pump_max_rpm: st.pump_max_rpm,
+        pump_rpm_step: st.pump_rpm_step,
+        pump_flow_step: st.pump_flow_step,
         holding: st.holding,
         serial_ok: st.serial_ok,
         write_fails: st.write_fails,
@@ -953,12 +969,12 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         }
         Command::Reconnect {
             serial,
-            pump_addr,
+            feed,
             reply,
         } => {
             let wanted_serial = !serial.use_simulator();
             let path = serial.path.clone();
-            let msg = match engine.swap_transport(&serial, pump_addr) {
+            let msg = match engine.swap_transport(&serial, feed) {
                 Ok(kind) => {
                     // `swap_transport` has just run a live probe read for a real
                     // port, so `serial_ok` now reflects whether a pump actually
@@ -1007,9 +1023,12 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
             true
         }
         Command::SetRefill(cfg, reply) => {
-            engine.set_refill(cfg, Instant::now());
-            let _ = reply.send(());
+            let _ = reply.send(engine.set_refill(cfg, Instant::now()));
             true
+        }
+        Command::CheckRefill(cfg, reply) => {
+            let _ = reply.send(engine.refill_change_refused(&cfg).map_or(Ok(()), Err));
+            false
         }
         Command::RefillPing(reply) => {
             let _ = reply.send(engine.refill_ping());
@@ -1263,7 +1282,7 @@ mod tests {
         let msg = handle
             .call(|reply| Command::Reconnect {
                 serial,
-                pump_addr: 1,
+                feed: fermentool_modbus::PumpTarget::labq(1),
                 reply,
             })
             .await
@@ -1359,7 +1378,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         assert!(!engine.serial_lost(), "precondition: link starts healthy");
 
@@ -1401,7 +1420,7 @@ mod tests {
         let err = handle
             .call(|reply| Command::Reconnect {
                 serial,
-                pump_addr: 1,
+                feed: fermentool_modbus::PumpTarget::labq(1),
                 reply,
             })
             .await
@@ -1426,7 +1445,7 @@ mod tests {
                 baud: 9600,
                 allow_simulator: false,
             },
-            1,
+            fermentool_modbus::PumpTarget::labq(1),
         );
         let (events, _keep_rx) = broadcast::channel(16);
         let handle = spawn(engine, Duration::from_secs(300), events);

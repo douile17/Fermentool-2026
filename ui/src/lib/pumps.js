@@ -2,6 +2,55 @@
 // MODBUS address. What the page says about the cable and each pump, from
 // the status frame; colour only for a problem (docs/DESIGN.md).
 
+/** The pump models on the cable (mirrors the daemon's `PumpModel`), all
+ *  fixed per model, no setting: `maxRpm` the top speed, `maxAddress` the
+ *  highest MODBUS address, `rpmStep` / `flowStep` the finest setpoint the
+ *  pump keeps (rpm, ml/min). */
+export const MODELS = [
+  { id: 'labq', label: 'LabQ', maxRpm: 350, maxAddress: 247, rpmStep: 0.1, flowStep: 0.001 },
+  { id: 'labv', label: 'LabV', maxRpm: 150, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 },
+  { id: 'pds2', label: 'PDS II', maxRpm: 600, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 },
+];
+
+/** A model by id; an unknown or missing id is a LabQ (old configs). */
+export const modelOf = (id) => MODELS.find((m) => m.id === id) ?? MODELS[0];
+
+/** The step of a setpoint field: the model's finest rpm or ml/min, as the
+ *  daemon snaps it (`setpoint_grid`), but never under 0.01: a LabQ keeps
+ *  0.001 ml/min, too fine to step through with the arrows (the field takes
+ *  any value typed, there is no form validation). */
+export const setpointStep = (model, controlVar) =>
+  Math.max(0.01, controlVar === 'ml_min' ? modelOf(model).flowStep : modelOf(model).rpmStep);
+
+/** Same physical pump: same address, and on a PDS II (one address, several
+ *  heads) the same head. Mirrors `same_pump` (config.rs). */
+export function samePump(a, b) {
+  if (Number(a.address) !== Number(b.address)) return false;
+  if (a.model === 'pds2' && b.model === 'pds2') return Number(a.head) === Number(b.head);
+  return true;
+}
+
+/** What the daemon would refuse in a pump's `address` and `head`; null if
+ *  fine. Mirrors `pump_problem`. */
+export function pumpProblem({ model, address, head = 1 }) {
+  const m = modelOf(model);
+  const a = Number(address);
+  if (!Number.isInteger(a) || a < 1 || a > m.maxAddress) return `The MODBUS address must be 1 to ${m.maxAddress} on a ${m.label}.`;
+  if (m.id === 'pds2') {
+    const h = Number(head);
+    if (!Number.isInteger(h) || h < 1 || h > 8) return 'The PDS II head must be 1 to 8.';
+  }
+  return null;
+}
+
+/** The question under a pump that does not answer. */
+export function notAnsweringHint({ model, address, head = 1 }) {
+  const m = modelOf(model);
+  if (m.id === 'pds2')
+    return `Is the PDS II switched on, at address ${address}, 9600 baud, and head ${head} set to independent operation?`;
+  return `Is the ${m.label} switched on, at address ${address} and 9600 baud in its own menu?`;
+}
+
 /** The cable is up and is a real port (the simulator talks to no pump). */
 export const lineUp = (s) => !!s && s.serial_ok !== false && !s.simulator;
 
@@ -30,10 +79,30 @@ export function pumpTone({ up, responding }) {
 /** The feed pump answers when the cable is up and its writes get through. */
 export const feedResponding = (s) => (lineUp(s) ? s.pump_confirmed !== false && (s.write_fails ?? 0) < 3 : null);
 
+/** The feed pump's model, head and address cannot change: a run
+ *  drives it, or an interrupted one waits to be resumed on it (the daemon
+ *  refuses to resume a run on another pump). */
+export const feedLocked = (s) => !!s?.active || !!s?.has_pending_recovery;
+
+/** The refill pump's model and head cannot change: a run drives it, or one
+ *  that drove it was interrupted and waits to be resumed or ended. A Stop
+ *  still owed after a run ended (`recovering`) does not lock them: a wrong
+ *  model is what makes that Stop fail, the new one takes it. */
+export const refillKindLocked = (s) => !!s?.refill?.in_run || !!s?.refill?.awaiting_resume;
+
+/** The head a pump is driven on: chosen on a PDS II, 1 for the others. */
+export const headOf = (model, head) => (modelOf(model).id === 'pds2' ? Number(head) : 1);
+
 /** Whether Save must reconnect the cable: its port, baud or the feed
- *  pump's address changed (the daemon applies those on a reconnect). */
+ *  pump's address, model or head changed (the daemon applies those on a
+ *  reconnect). */
 export const needsReconnect = (saved, now) =>
-  !!saved && (saved.path !== now.path || Number(saved.baud) !== Number(now.baud) || Number(saved.feedAddress) !== Number(now.feedAddress));
+  !!saved &&
+  (saved.path !== now.path ||
+    Number(saved.baud) !== Number(now.baud) ||
+    Number(saved.feedAddress) !== Number(now.feedAddress) ||
+    (saved.feedModel ?? 'labq') !== (now.feedModel ?? 'labq') ||
+    Number(saved.feedHead ?? 1) !== Number(now.feedHead ?? 1));
 
 /** Settings > Pumps asks the refill pump itself (`POST /api/refill/ping`):
  *  outside a run nothing else does, while the daemon probes the feed pump

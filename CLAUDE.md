@@ -121,12 +121,17 @@ else to install:
   read, daemon errors included, says measurement. The smoke test fails on
   "burst" in the calibration page. Not "run" either: a run is a feed run.
 - **Pump is driven by rpm or ml/min only.** Never write the pump's head /
-  tubing registers. An ml/min run given an **rpm** tubing calibration is
+  tubing registers, on any of the three models (LabQ and LabV 1000/1001,
+  PDS II n000/n001). Never write the PDS II register 0010 either: it is "all
+  start/stop" for every head of the controller. An ml/min run given an **rpm** tubing calibration is
   *driven in rpm* (`Engine::drive_ml_per_rpm`): curve, journal, volume and
   trim stay in ml/min, only the value written and read back is rpm
   (`write_setpoint` / `read_actual` / `drive_grid`), so the pump's own
   head/tubing table never matters. Refused if the curve needs more than
-  350 rpm.
+  the pump model's max rpm (LabQ 350, LabV 150, PDS II 600, fixed in the
+  code, no setting; there is no global `limits::RPM_MAX` any more). A tube
+  calibration belongs to the pump model it was measured on: a new run lists,
+  and `POST /api/runs` accepts, only the calibrations of the feed pump's model.
 - Simulator runs are refused unless `serial.allow_simulator = true`
   (`config.toml`). A real port configured but not open also refuses to
   start/resume, see `EngineError::SerialDown` / `SimulatorNotAllowed`.
@@ -144,6 +149,40 @@ else to install:
   be "ml/min value above what the configured head + tubing can deliver" (a
   different failure). State the confirmed cause; mention the other as
   secondary if it's a real alternate cause, not the default explanation.
+
+## Pump models (2026-10-23)
+
+LabQ, LabV and PDS II (Innofluid) share one cable and one daemon. Design:
+`docs/superpowers/specs/2026-10-23-pump-models-design.md`; protocols:
+`LabQ Series MODBUS protocol.md`, `LabV Series MODBUS protocol.md`,
+`PDS Series MODBUS protocol.md` (repo root).
+- `fermentool-modbus`: `PumpKind` (a PDS II carries its head 1..8),
+  `RegisterMap` (per model: speed, flow, start/stop, direction, optional mode
+  register) and `PumpTarget` (address + map). The daemon builds pumps with
+  `Pump::with_target` and reaches the refill pump with `with_target_of` (its
+  own model and head) on the feed pump's transport; `Pump::new` and
+  `with_address` (same kind, another address) remain, used by tests.
+- Each model has its floors, ceilings and steps, constants of `PumpModel`,
+  never a setting (decided 2026-10-26: the bench's pumps will not change):
+  `max_rpm()` (an rpm curve over it is refused at start, capped on resume,
+  the trim capped at it); `rpm_step()` / `flow_step()`, the setpoint grid
+  (`setpoint_grid`): LabQ 0.1 rpm and 0.001 ml/min as before, LabV and
+  PDS II 0.01 rpm and 0.01 ml/min (checked on the bench's LabV1-II and
+  PDS II: 68.39 and 30.07 rpm typed are kept); and
+  `PumpModel::flow_min` (LabV and PDS II refuse under 0.1 ml/min: the engine
+  stops the pump below it and starts it again, as `drive_paused` does in rpm).
+- A run resumes only on the feed pump it drove (`EngineError::ResumeOtherPump`);
+  a calibration's model comes from its three measurement runs.
+- `config.toml`: `[pump] model | head` and `[refill] pump_model |
+  pump_head`, absent = LabQ (a `max_rpm` left from before is ignored).
+  The LabV max is the LabV1-II's 150 rpm (its protocol, common to the range,
+  says 600): a LabV3 or LabV6 is a code change. Feed and refill may be two
+  heads of one PDS II (same address, different heads), nothing else shares.
+- `ensure_transferring()` reads the mode register and writes "transferring"
+  only if it differs (nothing for a LabQ). It runs at run start, resume, a
+  refill fill's start and the refill Test, never on the 150 ms setpoint path.
+- The cable is shown as "9600 baud 8E1" for all models; `serial.baud` stays in
+  `config.toml` only. Hardware checklist for a new model: `CHANGELOG.md`.
 
 ## Serial I/O and the control thread
 
