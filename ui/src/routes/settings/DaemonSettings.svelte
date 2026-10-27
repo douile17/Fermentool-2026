@@ -7,7 +7,6 @@
   // `group` (passed to every section) is not shown here: the side menu says it.
 
   let loaded = $state(false);
-  let port = $state(8730);
   let logLevel = $state('info');
   let err = $state(null);
   let msg = $state(null);
@@ -16,7 +15,6 @@
   $effect(() => {
     loadConfig()
       .then((c) => {
-        port = c.port;
         logLevel = c.log.level;
         loaded = true;
       })
@@ -29,7 +27,6 @@
     msg = null;
     try {
       const { res } = await patchConfig((c) => {
-        c.port = Number(port);
         c.log.level = logLevel;
       });
       msg = res.note ? `Saved: ${res.note}` : 'Saved.';
@@ -57,15 +54,13 @@
 
 <SettingsCard title="Daemon" {err} {msg} loading={!loaded}>
   <div class="grid">
-    <label class="field"><span>API port</span>
-      <input type="number" bind:value={port} />
-      <small class="hint">applies after a restart</small>
-    </label>
-
+    <!-- no API port here: the window, its CSP and the installer are built for
+         8730, another port only cuts them off. It stays in config.toml (dev). -->
     <label class="field"><span>Log level</span>
       <select bind:value={logLevel}>
         {#each ['error', 'warn', 'info', 'debug', 'trace'] as l}<option value={l}>{l}</option>{/each}
       </select>
+      <small class="hint">applies after a restart</small>
     </label>
   </div>
 

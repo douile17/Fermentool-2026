@@ -210,6 +210,8 @@ try {
   check('Balance keeps Save off until a change', (await click('.side button', 'Balance')) && (await sleep(1200), await js(`[...document.querySelectorAll('.settings-pane button.save')].every((b) => b.disabled)`)));
   check('Balance says its state in a word, with its Connect or Disconnect', await js(`/^(Connected|Disconnected|Not answering|No balance)$/.test(document.querySelector('.settings-pane .head .word')?.textContent.trim() ?? '') && document.querySelectorAll('.settings-pane .head button').length === 1`));
   check('Crash resume is one switch, no Save, no grace', (await click('.side button', 'Crash resume')) && (await sleep(1200), await js(`document.querySelectorAll('.settings-pane input[type=checkbox]').length === 1 && !document.querySelector('.settings-pane input[type=number]') && ![...document.querySelectorAll('.settings-pane button')].some((b) => b.textContent.trim() === 'Save')`)));
+  // the desktop window and installer are built for port 8730: no API port to change here (2026-10-22)
+  check('Daemon has the log level and no API port', (await click('.side button', 'Daemon')) && (await sleep(1200), await js(`!!document.querySelector('.settings-pane select') && !document.querySelector('.settings-pane input[type=number]') && !/API port/.test(document.querySelector('.settings-pane').textContent)`)));
   await click('.side button', 'Notifications');
   await sleep(1200);
   if (await js(`!!document.querySelector('.person .dots')`)) {

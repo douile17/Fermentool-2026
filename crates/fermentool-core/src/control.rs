@@ -178,6 +178,10 @@ pub struct DaemonStatus {
     pub warnings: Vec<String>,
     /// The refill pump, `None` while it is turned off.
     pub refill: Option<crate::engine::RefillStatus>,
+    /// The feed pump's MODBUS address, so a silent pump can be named.
+    pub pump_address: u8,
+    /// The configured port (`transport` says `"sim"` while it will not open).
+    pub serial_port: String,
 }
 
 /// Sending / receiving on the control channel failed, the thread is gone.
@@ -252,6 +256,8 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         stop_pending: st.stop_pending,
         warnings: st.warnings,
         refill: st.refill,
+        pump_address: st.pump_address,
+        serial_port: st.serial_port,
     }
 }
 

@@ -48,14 +48,28 @@ export function linkState(status, connected) {
       hint: "Pick the cable's port in Settings, Pumps, or allow simulator runs there.",
       connectable: true,
     };
-  if (s.serial_ok === false)
+  // Two pumps share the cable, and one switched off silences the other too
+  // (seen on the bench, 2026-10-23: its unpowered transceiver holds the
+  // line): a silent bus cannot say which pump went, so it blames neither.
+  // The refill pump alone is told apart only while the feed pump answers.
+  const refillSilent = s.refill?.responding === false;
+  if (s.serial_ok === false) {
+    if (s.refill)
+      return {
+        tone: 'bad',
+        label: 'Pumps not answering',
+        short: 'Pumps offline',
+        hint: `Both pumps share the cable (addresses ${addr(s.pump_address)} and ${addr(s.refill.address)} on ${portOf(s)}): one switched off silences the other. Check that both are on, then Connect in Settings, Pumps.`,
+        connectable: true,
+      };
     return {
       tone: 'bad',
-      label: 'Pump not connected',
+      label: 'Pump not answering',
       short: 'Pump offline',
-      hint: 'Check power, wiring, the MODBUS address and the baud rate, then Connect in Settings, Pumps.',
+      hint: `Address ${addr(s.pump_address)} on ${portOf(s)}. Check its power and its cable, then Connect in Settings, Pumps.`,
       connectable: true,
     };
+  }
   if (s.pump_confirmed === false)
     return {
       tone: 'warn',
@@ -63,6 +77,16 @@ export function linkState(status, connected) {
       short: 'Pump: mismatch',
       hint: 'Writes get through but the pump reports a different value. Check the pump.',
       connectable: false,
+    };
+  // The run feeds on: orange, not red. A refill due that cannot start is
+  // the Overview band's to say.
+  if (refillSilent && s.refill.in_run)
+    return {
+      tone: 'warn',
+      label: 'Refill pump not answering',
+      short: 'Refill pump offline',
+      hint: `Address ${addr(s.refill.address)} on ${portOf(s)}. Feeding goes on; the bottle cannot be refilled until it answers.`,
+      connectable: true,
     };
   if (s.warnings?.length)
     return {
@@ -94,6 +118,9 @@ export function linkState(status, connected) {
     connectable: true,
   };
 }
+
+const addr = (a) => a ?? '?';
+const portOf = (s) => s.serial_port || s.transport || 'the cable';
 
 // Can a run be started / resumed right now? A run drives the pump, so it needs
 // a live link, a real port that's responding, or the simulator with simulator

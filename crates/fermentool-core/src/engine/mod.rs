@@ -384,6 +384,10 @@ pub struct EngineStatus {
     pub warnings: Vec<String>,
     /// The refill pump, `None` while it is turned off.
     pub refill: Option<RefillStatus>,
+    /// The feed pump's MODBUS address, so a silent pump can be named.
+    pub pump_address: u8,
+    /// The configured port (`transport` says `"sim"` while it will not open).
+    pub serial_port: String,
 }
 
 /// A completed run whose final setpoint the pump is still holding.
@@ -1340,6 +1344,8 @@ impl<T: Transport> Engine<T> {
             stop_pending: self.stop_pending.is_some(),
             warnings: self.warnings.clone(),
             refill: self.refill_status(),
+            pump_address: self.pump.address(),
+            serial_port: self.serial.path.clone(),
         }
     }
 
@@ -5704,6 +5710,14 @@ mod tests {
         }
         let b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
         assert!(b.status().stop_pending, "a pump left running is not forgotten");
+    }
+
+    #[test]
+    fn the_status_names_the_feed_pump() {
+        // Two pumps share the cable: the UI says which one is silent.
+        let db = TempDb::new();
+        let e = Engine::new(Pump::new(SimPump::new(3), 3), db.store(), "test");
+        assert_eq!(e.status().pump_address, 3);
     }
 
     #[test]

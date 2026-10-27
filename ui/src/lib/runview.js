@@ -152,11 +152,18 @@ export function runState(status, connected, inHold) {
       detail: 'The Stop did not reach the pump: it may still be running.',
       check: 'Fermentool sends it again as soon as the pump answers. Check the pump, stop it by hand if needed.',
     });
+  // One pump switched off silences both on the shared cable: blame neither.
+  if (s.serial_ok === false && s.refill)
+    return bad({
+      title: 'Pumps not answering',
+      detail: 'The feed pump keeps its last setpoint; the curve is not followed until the pumps answer.',
+      check: `Both share the cable, one switched off silences the other: check that both are on (addresses ${s.pump_address ?? '?'} and ${s.refill.address ?? '?'}), then Connect.`,
+    });
   if (s.serial_ok === false)
     return bad({
-      title: 'Pump not connected',
+      title: 'Pump not answering',
       detail: 'The pump keeps its last setpoint; the curve is not followed until it answers.',
-      check: 'Check power, cable, MODBUS address and baud rate, then Connect.',
+      check: `Check its power and its cable (address ${s.pump_address ?? '?'}), then Connect.`,
     });
   if (cycle?.phase === 'stopping')
     return bad({

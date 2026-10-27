@@ -91,6 +91,18 @@ describe('runState', () => {
     const s = { ...run, ...cycle({ phase: 'filling' }), tracking: { alarm: 'feed_stopped' } };
     expect(runState(s, true, false)).toMatchObject({ tone: 'bad', word: 'Alarm', title: 'Feed stopped' });
   });
+  it('a silent cable shared by two pumps blames neither: one switched off silences both (2026-10-23)', () => {
+    const r = cycle();
+    r.refill.address = 2;
+    const s = runState({ ...run, ...r, serial_ok: false, pump_address: 1 }, true, false);
+    expect(s).toMatchObject({ tone: 'bad', title: 'Pumps not answering' });
+    expect(s.check).toMatch(/one switched off silences the other.*addresses 1 and 2/);
+  });
+  it('a silent pump alone on its cable is named by its address', () => {
+    const s = runState({ ...run, serial_ok: false, pump_address: 1 }, true, false);
+    expect(s).toMatchObject({ tone: 'bad', title: 'Pump not answering' });
+    expect(s.check).toMatch(/address 1/);
+  });
   it('a silent daemon reads as no news, whatever it said last', () => {
     expect(runState({ ...run, ...cycle({ phase: 'filling' }) }, false, false).tone).toBe('idle');
   });
