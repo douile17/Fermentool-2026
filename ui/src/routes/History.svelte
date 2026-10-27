@@ -10,7 +10,7 @@
   import { weighedFlow, flowWindowS } from '../lib/runview.js';
   import {
     TOLERANCE, alarmCount, atRun, gapExtremes, grouped, journalLines, mins,
-    refillRows, regulationFigures, verdict, whenLine, curveChips, blindLegend, pumpLine,
+    refillRows, regulationFigures, verdict, verdictSentence, whenLine, writtenOff, curveChips, blindLegend, pumpLine,
   } from '../lib/rundetail.js';
   import { holdChip, rateLabel, rateMarks, rateSteps, runAgainPicks, runAgainSeed } from '../lib/ratechange.js';
 
@@ -268,7 +268,7 @@
   const verdictOf = $derived(verdict(sel?.report));
   // the feed each rate change wrote off, `[[elapsed_s, ml]]`
   const resets = $derived(sel?.report?.resets ?? []);
-  const resetMl = $derived(resets.reduce((a, [, ml]) => a + ml, 0));
+  const resetLine = $derived(writtenOff(resets));
   const hold = $derived(sel ? holdChip(sel.run) : null);
   const alarms = $derived(alarmCount(sel?.events));
   const bottle = $derived(bottleWeights(sel?.report));
@@ -517,13 +517,7 @@
       {:else if verdictOf}
         <p class="say">
           {#if verdictOf.onTarget}<b class="ok">On target.</b>{:else}<b class="off">Off target.</b>{/if}
-          {#if verdictOf.onTarget && verdictOf.worstPct != null}
-            Delivered stayed within {num(Math.max(verdictOf.worstPct, 0.1), 1)} % of the request after the first 15 min.
-          {:else if verdictOf.onTarget}
-            Delivered within ±{TOLERANCE * 100} % of the request.
-          {:else}
-            Delivered {num(Math.abs(verdictOf.gap), 1)} mL {verdictOf.gap < 0 ? 'short of' : 'over'} the request.
-          {/if}
+          {verdictSentence(verdictOf)}
           Tolerance ±{TOLERANCE * 100} %.
         </p>
         <div class="figs">
@@ -654,7 +648,7 @@
                 <dd>at {atRun(trimStartS)}{reg.correction ? `, at ×${reg.correction}` : ''}</dd>
               {/if}
               {#if reg.ratio}<dt>Pump ratio</dt><dd class="mono">{reg.ratio}</dd>{/if}
-              {#if resetMl > 0}<dt>Written off at rate changes</dt><dd class="mono">{num(resetMl, 1)} mL</dd>{/if}
+              {#if resetLine}<dt>Written off at rate changes</dt><dd class="mono">{resetLine}</dd>{/if}
               <dt>Largest gap</dt>
               <dd><span class="mono">+{num(extremes.ahead, 1)} mL</span> ahead, <span class="mono">−{num(Math.abs(extremes.behind), 1)} mL</span> behind</dd>
               <dt>Fit, R²</dt><dd class="mono">{sel.report.r_squared != null ? sel.report.r_squared.toFixed(4) : '·'}</dd>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundsLine, canChangeRate, checkRate, curveFact, holdChip, rateDialogText, rateLabel, rateMarks, rateSince, rateSteps, runAgainPicks, runAgainSeed } from './ratechange.js';
+import { boundsLine, canChangeRate, changeRateNow, checkRate, curveFact, holdChip, rateDialogText, rateLabel, rateMarks, rateSince, rateSteps, runAgainPicks, runAgainSeed } from './ratechange.js';
 
 // Local times, whatever the machine's zone: the UI shows the PC's clock.
 const at = (d, h, m, s = 0) => new Date(2026, 9, d, h, m, s).toISOString();
@@ -191,5 +191,37 @@ describe('runAgainSeed', () => {
   it('puts the chosen rate in a constant curve', () => {
     const seed = { name: 'x', kind: 'constant', start: 5, end: 5, value: 5, duration_h: 24 };
     expect(runAgainSeed(seed, 3)).toEqual({ name: 'x', kind: 'constant', start: 3, end: 3, value: 3, duration_h: 24 });
+  });
+});
+
+// A Physio exponential: its `end` is New run's hidden field (50), never what
+// the daemon drives; the status frame's `curve_value` is (12.3, clamped).
+const physio = {
+  ...run214,
+  curve: { mode: 'physio', start: 1, end: 50, params: { kind: 'exponential', mu_per_hour: 0.1 } },
+  setpoint_changes: [],
+};
+
+describe('the rate now, from the status frame', () => {
+  it('starts a non-constant run on the value the daemon drives, not curve.end', () => {
+    expect(rateSteps(physio, 12.3)[0]).toMatchObject({ value: 12.3, elapsedS: physio.duration_s, atStart: false });
+    expect(rateSteps(physio)[0].value).toBe(50);
+  });
+  it('gives the Change rate dialog the rate driven', () => {
+    const n = changeRateNow(physio, 12.3);
+    expect(n.current).toBe(12.3);
+    expect(n.steps).toHaveLength(1);
+    expect(checkRate(12.3, [0, 100], n.current)).toBe('The rate is already 12.300 ml/min.');
+    expect(checkRate(50, [0, 100], n.current)).toBeNull();
+  });
+  it('keeps the last change as the current step once one was made', () => {
+    const changed = { ...physio, setpoint_changes: [{ elapsed_s: 90000, value: 3, wall_time: at(27, 16, 20) }] };
+    const n = changeRateNow(changed, 3);
+    expect(n.current).toBe(3);
+    expect(n.steps.map((s) => s.value)).toEqual([50, 3]);
+  });
+  it('falls back to the steps without a curve value (an older daemon)', () => {
+    expect(changeRateNow(run214, undefined).current).toBe(4);
+    expect(changeRateNow(run214, null).current).toBe(4);
   });
 });

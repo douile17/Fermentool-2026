@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   alarmCount, atRun, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines, pumpLine,
-  refillRows, regulationFigures, resetAt, verdict, whenLine,
+  refillRows, regulationFigures, resetAt, verdict, verdictSentence, whenLine, writtenOff,
 } from './rundetail.js';
 
 // Local times, whatever the machine's zone: the UI shows the PC's clock.
@@ -323,5 +323,37 @@ describe('pumpLine', () => {
   it('a run made before the models was a LabQ', () => {
     expect(pumpLine({})).toBe('LabQ');
     expect(pumpLine({ pump_model: null })).toBe('LabQ');
+  });
+});
+
+describe('writtenOff', () => {
+  it('says the feed written off at rate changes with its sign', () => {
+    expect(writtenOff([[1800, 1.04]])).toBe('+1.0 mL');
+    expect(writtenOff([[1800, -0.3]])).toBe('−0.3 mL');
+    expect(writtenOff([[1800, 0.5], [3600, -0.5]])).toBe('0.0 mL');
+  });
+  it('is null without a change that wrote anything off', () => {
+    expect(writtenOff([])).toBeNull();
+    expect(writtenOff(undefined)).toBeNull();
+  });
+});
+
+describe('verdictSentence', () => {
+  const pts = [[1000, 100, 99.5], [2000, 200, 199.4]];
+  it('judges each rate step when the run has write-offs', () => {
+    const v = verdict({ points: pts, estimated: [], resets: [[1500, 0.2]] });
+    expect(verdictSentence(v)).toBe('Delivered stayed within 0.5 % of the request within each rate step, after the first 15 min.');
+  });
+  it('says it as before without', () => {
+    const v = verdict({ points: pts, estimated: [] });
+    expect(verdictSentence(v)).toBe('Delivered stayed within 0.5 % of the request after the first 15 min.');
+  });
+  it('says the gap when off target', () => {
+    const v = verdict({ points: [[2000, 200, 190]], estimated: [] });
+    expect(verdictSentence(v)).toBe('Delivered 10.0 mL short of the request.');
+  });
+  it('says the tolerance when on target before 15 min', () => {
+    const v = verdict({ points: [[600, 100, 100.5]], estimated: [] });
+    expect(verdictSentence(v)).toBe('Delivered within ±2 % of the request.');
   });
 });

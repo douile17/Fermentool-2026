@@ -4,7 +4,7 @@
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
   import { bottleWeights, weighedOutShown, REFILL_GRACE_MS } from '../lib/balance.js';
-  import { valueAt, hm, clock, when, refillDueInS, runState, nextRefill, holdBand, inAbout, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
+  import { valueAt, rateNow, hm, clock, when, refillDueInS, runState, nextRefill, holdBand, inAbout, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
@@ -200,9 +200,10 @@
 
   // --- the live run, as the Overview states it
   const trimmed = $derived(!!active?.gravimetric_trim);
-  // What the curve asks for now (the big figure), off the smooth clock; the
-  // value actually written, curve x c, is `active.last_target`.
-  const curveNow = $derived(active && planned.length ? valueAt(planned, elapsedAnim) : null);
+  // What the curve asks for now (the big figure), off the smooth clock, the
+  // daemon's hold rate past the curve; the value actually written, curve x c,
+  // is `active.last_target`.
+  const curveNow = $derived(rateNow(active, planned, elapsedAnim));
   const endMs = $derived(run ? startedAtMs + run.duration_s * 1000 : NaN);
   // the rate a change set in the hold, "2.500 ml/min" (null: the curve's end value)
   const held = $derived.by(() => {
@@ -416,7 +417,7 @@
 {/if}
 
 {#if changingRate && rateChangeable}
-  <ChangeRate {run} bounds={active.rate_bounds} {trimmed} onclose={() => (changingRate = false)} onchanged={() => reloadRate(loadedId)} />
+  <ChangeRate {run} bounds={active.rate_bounds} curveValue={active.curve_value} {trimmed} onclose={() => (changingRate = false)} onchanged={() => reloadRate(loadedId)} />
 {/if}
 
 {#if complete}
@@ -570,7 +571,7 @@
             <div>
               <div class="k">Feed rate now</div>
               <div class="big-line">
-                <span class="big mono-num">{num(curveNow ?? active.last_target, digits)}</span>
+                <span class="big mono-num">{num(curveNow, digits)}</span>
                 <span class="big-u">{unit}</span>
               </div>
               {#if active.rate_bounds && (run.curve.params.kind === 'constant' || inHold)}

@@ -12,6 +12,17 @@ export const toleranceMl = (askedMl) => Math.max(DELIVERY_TOL * askedMl, NOISE_M
 // status frame: the run's state in words, when the bottle runs dry, and the
 // times shown as clock times rather than durations to add up.
 
+/** The Overview's "Feed rate now": the planned curve at `t`, smooth between
+ *  ticks; past the curve, the rate the daemon drives (`curve_value`, a hold
+ *  change included: the planned series ends at the curve's end). Without a
+ *  curve value (an older daemon), the series, else `last_target`. */
+export function rateNow(active, planned, t) {
+  if (!active) return null;
+  const cv = active.curve_value;
+  if (t >= active.duration_s && cv != null && Number.isFinite(cv)) return cv;
+  return planned?.length ? valueAt(planned, t) : (active.last_target ?? null);
+}
+
 /** Linear interpolation in a `[t, v][]` series, held flat past both ends. */
 export function valueAt(series, t) {
   if (!series?.length) return null;

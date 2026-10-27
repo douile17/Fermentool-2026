@@ -11,13 +11,15 @@ const isConstant = (run) => run.curve?.params?.kind === 'constant';
 /** The rates a run went through: the start rate (at `started_at`), then
  *  each change, `[{ value, wallMs, elapsedS, atStart, last }]`. One step
  *  when the rate never changed. Any other curve than Constant starts at its
- *  end value, from the end of the curve (`duration_s`, not `atStart`). */
-export function rateSteps(run) {
+ *  end value, from the end of the curve (`duration_s`, not `atStart`):
+ *  `end`, the value the daemon drives there when given (the status frame's
+ *  `curve_value`), else `run.curve.end` (a Physio curve's is not resolved). */
+export function rateSteps(run, end) {
   // a curve that is not Constant is a rate only once it is done: the rate it
   // holds from its end, until a change
   const first = isConstant(run)
     ? { value: run.curve.start, wallMs: Date.parse(run.started_at), elapsedS: 0, atStart: true }
-    : { value: run.curve.end, wallMs: Date.parse(run.started_at) + run.duration_s * 1000, elapsedS: run.duration_s, atStart: false };
+    : { value: end ?? run.curve.end, wallMs: Date.parse(run.started_at) + run.duration_s * 1000, elapsedS: run.duration_s, atStart: false };
   const steps = [first];
   for (const c of run.setpoint_changes ?? []) {
     steps.push({ value: c.value, wallMs: Date.parse(c.wall_time), elapsedS: c.elapsed_s, atStart: false });
@@ -42,6 +44,17 @@ export function rateSince(run, curveDone = false) {
   if (!isConstant(run) && changes.length) return `holding since ${atRun(changes.at(-1).elapsed_s)}`;
   const steps = rateSteps(run);
   return steps.length === 1 ? (curveDone && !isConstant(run) ? 'holding its end value' : 'constant since the start') : `since ${rateLabel(steps.at(-1))}`;
+}
+
+/** The Change rate dialog's steps and rate now, `{ steps, current }`, from
+ *  the status frame's `curveValue` (what the daemon drives, before the
+ *  balance correction); the steps' last value without it (an older daemon). */
+export function changeRateNow(run, curveValue) {
+  const known = curveValue != null && Number.isFinite(curveValue);
+  // the curve's end is the rate now only until a change
+  const unchanged = !(run.setpoint_changes ?? []).length;
+  const steps = rateSteps(run, known && unchanged ? curveValue : undefined);
+  return { steps, current: known ? curveValue : steps.at(-1).value };
 }
 
 /** The ChangeRate dialog's title and the scope line under it. */
