@@ -13,6 +13,21 @@
   une pompe de remplissage muette alors que l'alimentation répond est dite
   « Refill pump not answering » (orange : l'alimentation continue).
 
+### Changer le débit d'un run constant en cours (22 octobre)
+
+- Sur un run « Constant » en cours (y compris après la fin de sa courbe),
+  « Change rate » sous le débit de l'Overview : la nouvelle consigne
+  s'applique tout de suite, jusqu'à la fin ou au changement suivant. La
+  pompe est interrogée d'abord : une valeur qu'elle refuse n'est pas
+  enregistrée. La régulation par la balance continue, et après un crash le
+  run reprend à la dernière consigne.
+- Chaque changement est journalisé, notifié au responsable, compté dans le
+  volume demandé et la précision ; dans History la courbe est en paliers,
+  avec un repère numéroté par changement, et les pastilles disent
+  « 5.000 ml/min, then 3.000, 4.000 ».
+- « Run again » sur un run qui a changé de consigne demande « Start from
+  which rate? », chaque consigne avec son jour et son heure.
+
 ### History, calibration, remplissage (20 et 21 octobre)
 
 - Fiche d'un run dans History refaite : le nom et les dates d'abord, puis le

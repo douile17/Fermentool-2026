@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use fermentool_curves::CurveSpec;
+use fermentool_curves::{CurveParams, CurveSpec};
 use fermentool_modbus::{limits, PduError, Pump, PumpError, PumpTransport, Transport, TransportError};
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,8 @@ pub enum EngineError {
     GravimetricTrimNeedsCalibration,
     /// The run drives the refill pump, and it did not answer a Stop.
     RefillPumpSilent { address: u8 },
+    /// A rate change asked of a run that is not a Constant feed run.
+    NotConstant,
 }
 
 /// Structured error for the HTTP API: a one-line `message` (the [`Display`] of
@@ -115,6 +117,7 @@ impl std::fmt::Display for EngineError {
                 f,
                 "the refill pump (address {address}) does not answer"
             ),
+            EngineError::NotConstant => write!(f, "only a Constant feed run can change its rate"),
             EngineError::SerialDown => write!(
                 f,
                 "the pump link is down. Connect the pump (or set serial.path to \"sim\") before starting a run"
@@ -157,6 +160,7 @@ impl EngineError {
             EngineError::ScaleUnavailable => "scale_unavailable",
             EngineError::GravimetricTrimNeedsCalibration => "trim_needs_calibration",
             EngineError::RefillPumpSilent { .. } => "refill_pump_silent",
+            EngineError::NotConstant => "not_constant",
         }
     }
 
@@ -201,6 +205,12 @@ impl EngineError {
             }
             EngineError::RefillPumpSilent { .. } => {
                 "This run drives the refill pump, a second LabQ on the feed pump's cable. It must                  answer before the run starts, or the bottle would run dry with no refill. Check                  its power, its RS-485 wiring and the MODBUS address in its own menu against                  Settings, Refill pump (Test there), or start the run without automatic refill."
+            }
+            EngineError::NotConstant => {
+                "A rate change replaces a constant rate from now on. A linear, exponential, \
+                 sigmoid, step or custom curve has its own shape over time, and a tubing \
+                 calibration measurement is weighed against its own setpoint, so neither \
+                 changes mid-run. Stop this run and start a new one at the rate you want."
             }
             _ => return None,
         };
@@ -437,6 +447,12 @@ pub struct ActiveStatus {
     pub auto_refill: bool,
     /// Which way the pump head turns, so the UI's pump turns the same way.
     pub direction: Direction,
+    /// How many times the operator changed the rate of this Constant run.
+    pub rate_changes: usize,
+    /// `[min, max]` a new rate may take, in the run's unit: the pump's
+    /// limits, the max lowered to what the tube gives at full speed when
+    /// the run is driven in rpm. `None`: not a Constant feed run.
+    pub rate_bounds: Option<[f64; 2]>,
 }
 
 struct ActiveRun {
@@ -446,8 +462,13 @@ struct ActiveRun {
     /// Past `duration_s`, see [`ActiveStatus::curve_done`].
     curve_done: bool,
     started_at: Timestamp,
-    /// Resolved and clamp-intersected with the pump limits.
+    /// The curve driven: `base_spec` with the rate changes applied.
     spec: CurveSpec,
+    /// The curve as recorded on the run (resolved and clamp-intersected
+    /// with the pump limits), never rewritten by a rate change.
+    base_spec: CurveSpec,
+    /// `(elapsed_s, value)` of each rate change, in time order, as journalled.
+    rate_changes: Vec<(f64, f64)>,
     control_var: ControlVar,
     duration_s: i64,
     next_seq: i64,
@@ -1368,7 +1389,114 @@ impl<T: Transport> Engine<T> {
             responsible: a.responsible.clone(),
             auto_refill: a.auto_refill,
             direction: a.direction,
+            rate_changes: a.rate_changes.len(),
+            rate_bounds: self.rate_bounds(a).map(|(lo, hi)| [lo, hi]),
         })
+    }
+
+    /// What a new rate of `a` may be, `None` unless it is a Constant feed
+    /// run: the control variable's limits (within the run's own clamps), the
+    /// max lowered to `RPM_MAX` worth of flow when driven in rpm.
+    fn rate_bounds(&self, a: &ActiveRun) -> Option<(f64, f64)> {
+        if a.kind != RunKind::Dosing || !matches!(a.base_spec.params, CurveParams::Constant) {
+            return None;
+        }
+        let (lo, mut hi) = match a.control_var {
+            ControlVar::Rpm => (limits::RPM_MIN, limits::RPM_MAX),
+            ControlVar::MlMin => (limits::FLOW_MIN, limits::FLOW_MAX),
+        };
+        if let (ControlVar::MlMin, Some(r)) = (a.control_var, self.drive_ml_per_rpm) {
+            hi = hi.min(limits::RPM_MAX * r);
+        }
+        Some((lo.max(a.base_spec.clamp_min), hi.min(a.base_spec.clamp_max)))
+    }
+
+    /// The operator changes the rate of the active Constant run from
+    /// `elapsed_s` (the control thread's `run_now()`) on. Written to the pump
+    /// first, then recorded, so a resume rebuilds the same curve; a value the
+    /// pump refuses, or a lost link, records nothing and leaves the old rate
+    /// on. The trim is left as it is: c is a property of the tube, not of
+    /// the rate. Returns the rates `(from, to)`.
+    pub fn set_constant_rate(&mut self, value: f64, elapsed_s: f64, now: Timestamp) -> Result<(f64, f64)> {
+        let Some(a) = self.active.as_ref() else {
+            return Err(EngineError::Idle);
+        };
+        let Some((lo, hi)) = self.rate_bounds(a) else {
+            return Err(EngineError::NotConstant);
+        };
+        let unit = match a.control_var {
+            ControlVar::Rpm => "rpm",
+            ControlVar::MlMin => "ml/min",
+        };
+        let driven = (a.control_var == ControlVar::MlMin).then_some(self.drive_ml_per_rpm).flatten();
+        if !(value.is_finite() && value > 0.0 && value >= lo && value <= hi) {
+            return Err(EngineError::Config(match driven {
+                Some(r) if value.is_finite() && value > hi => format!(
+                    "{value:.2} ml/min asked; this tube delivers at most {:.2} ml/min at {} rpm",
+                    limits::RPM_MAX * r,
+                    limits::RPM_MAX
+                ),
+                _ if lo <= 0.0 => format!("the rate must be over 0 and at most {hi} {unit}, not {value}"),
+                _ => format!("the rate must be from {lo} to {hi} {unit}, not {value}"),
+            }));
+        }
+        if !elapsed_s.is_finite() {
+            return Err(EngineError::Config(format!("elapsed time {elapsed_s} is not a time")));
+        }
+        // Changes stay in time order, as `with_rate_changes` reads them.
+        let elapsed_s = a.rate_changes.last().map_or(elapsed_s.max(0.0), |&(t, _)| elapsed_s.max(t));
+        let id = a.id;
+        let from = a.spec.value_at(Duration::from_secs_f64(elapsed_s));
+        let control_var = a.control_var;
+        let c = if a.gravimetric_trim { self.trim_c } else { 1.0 };
+        let grid = drive_grid(control_var, self.drive_ml_per_rpm);
+        // Nothing reaches the pump over a lost link: a change recorded there
+        // would be counted as fed while the pump runs on (see `start_run`).
+        if self.serial_lost {
+            return Err(EngineError::SerialDown);
+        }
+        // The pump takes the new rate first, recorded only once it did: a
+        // value it refuses (0x03) keeps it on the old one, and a change
+        // recorded anyway would be counted in the journal and the trim, and
+        // asked again at every write and on every resume.
+        let target = quantize(value * c, grid);
+        let drive = self.drive_ml_per_rpm;
+        drive_write(&mut self.pump, &mut self.drive_paused, control_var, target, drive)
+            .map_err(|e| setpoint_error(e, control_var, target, drive))?;
+        self.write_fails = 0;
+        if let Err(e) = self.store.add_setpoint_change(id, elapsed_s, value, now) {
+            // Not recorded: the next sub-second write puts the old rate back.
+            if let Some(a) = self.active.as_mut() {
+                a.last_write_q = None;
+            }
+            return Err(e.into());
+        }
+
+        let a = self.active.as_mut().expect("checked above");
+        a.rate_changes.push((elapsed_s, value));
+        a.spec = a.base_spec.with_rate_changes(&a.rate_changes);
+        // Close the commanded volume at the old rate up to the change, so
+        // the next tick's trapezoid starts on the new one instead of
+        // averaging the two over that second.
+        if let Some(vol) = a.volume_added_ml {
+            if elapsed_s > a.vol_elapsed_s {
+                let old = quantize(from * c, grid);
+                a.volume_added_ml = Some(vol + volume_slice((a.vol_elapsed_s, a.vol_target), (elapsed_s, old)));
+                a.vol_elapsed_s = elapsed_s;
+            }
+            a.vol_target = target;
+        }
+        a.last_write_q = Some(target);
+        a.last_target = Some(target);
+        // The change is recorded: a journal line that fails must not undo it.
+        let _ = self.store.log_event(&NewEvent {
+            run_id: Some(id),
+            wall_time: now,
+            level: EventLevel::Info,
+            kind: "setpoint_change".into(),
+            detail: Some(format!("{from:.3} -> {value:.3} {unit}")),
+        });
+        Ok((from, value))
     }
 
     /// [`TICK_INTERVAL`] while a run is active, so the control loop knows how
@@ -1591,7 +1719,9 @@ impl<T: Transport> Engine<T> {
             responsible: cfg.responsible.clone(),
             curve_done: false,
             started_at,
+            base_spec: spec.clone(),
             spec,
+            rate_changes: Vec::new(),
             control_var: cfg.control_var,
             duration_s,
             next_seq: 0,
@@ -2003,10 +2133,12 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
         _ => 1.0,
     };
     let sampled = ticks;
+    // What was asked, rate changes included.
+    let curve = run.effective_curve();
     let mut required_ml = Vec::with_capacity(sampled.len());
     let (mut acc, mut prev) = (0.0, 0.0);
     for &(t, _) in &sampled {
-        acc += integrate_curve_mass(&run.curve, prev, t, rho, ml_per_unit) / rho;
+        acc += integrate_curve_mass(&curve, prev, t, rho, ml_per_unit) / rho;
         required_ml.push(acc);
         prev = t;
     }
@@ -2857,7 +2989,7 @@ impl<T: Transport> Engine<T> {
             return Ok(None);
         };
         let elapsed_s = now.duration_since(run.started_at).as_secs_f64().max(0.0);
-        let resume_target = run.curve.value_at(Duration::from_secs_f64(elapsed_s));
+        let resume_target = run.effective_curve().value_at(Duration::from_secs_f64(elapsed_s));
         let last_seq = self.store.last_tick(run.id)?.map(|t| t.seq);
         Ok(Some(RecoveryInfo {
             run_id: run.id,
@@ -2946,8 +3078,11 @@ impl<T: Transport> Engine<T> {
         // `trim_c` only applies if this run opted in, same gate as
         // `tick`/`apply_setpoint`.
         let c = if run.gravimetric_trim { self.trim_c } else { 1.0 };
+        // The rate changes of a Constant run are part of its curve: the pump
+        // goes back to the last rate asked, not to the first.
+        let curve = run.effective_curve();
         let target = quantize(
-            run.curve.value_at(Duration::from_secs_f64(elapsed_s)) * c,
+            curve.value_at(Duration::from_secs_f64(elapsed_s)) * c,
             drive_grid(run.control_var, self.drive_ml_per_rpm),
         );
 
@@ -2994,7 +3129,9 @@ impl<T: Transport> Engine<T> {
             responsible: run.responsible.clone(),
             curve_done: run.kind == RunKind::Dosing && elapsed_s >= run.duration_s as f64,
             started_at: run.started_at,
-            spec: run.curve,
+            base_spec: run.curve.clone(),
+            spec: curve,
+            rate_changes: run.setpoint_changes.iter().map(|c| (c.elapsed_s, c.value)).collect(),
             control_var: run.control_var,
             duration_s: run.duration_s,
             next_seq,
@@ -6231,5 +6368,263 @@ mod tests {
         let mut e = engine();
         e.start_run(linear_cfg(), t0()).unwrap();
         assert!(matches!(e.resume(t0(), grace()), Err(EngineError::Busy)));
+    }
+
+    // ---- rate changes of a Constant run ----
+
+    fn constant_cfg(value: f64, duration_s: u64) -> RunConfig {
+        RunConfig {
+            control_var: ControlVar::MlMin,
+            curve: CurveSpec::constant(value, Duration::from_secs(duration_s)),
+            ..linear_cfg()
+        }
+    }
+
+    fn rate_events(e: &Engine<SimPump>, id: i64) -> Vec<String> {
+        e.store()
+            .events(Some(id), 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == "setpoint_change")
+            .filter_map(|ev| ev.detail)
+            .collect()
+    }
+
+    #[test]
+    fn a_constant_rate_changes_at_once() {
+        let mut e = engine();
+        let id = e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        for i in 1..=600 {
+            e.tick(at(i)).unwrap();
+        }
+        assert_eq!(e.set_constant_rate(3.0, 600.0, at(600)).unwrap(), (5.0, 3.0));
+        // On the pump at once, not at the next tick: no write left to make.
+        assert!((e.pump.transport().flow_ml_min() as f64 - 3.0).abs() < 1e-3);
+        assert!(!e.apply_setpoint(at(600) + SignedDuration::from_millis(150)).unwrap());
+        for i in 601..=610 {
+            let o = e.tick(at(i)).unwrap();
+            assert!(matches!(o, TickOutcome::Applied { target, .. } if (target - 3.0).abs() < 1e-9), "{o:?}");
+        }
+        assert!((e.pump.transport().flow_ml_min() as f64 - 3.0).abs() < 1e-3);
+        assert_eq!(rate_events(&e, id), vec!["5.000 -> 3.000 ml/min".to_string()]);
+        let st = e.status().active.unwrap();
+        assert_eq!(st.rate_changes, 1);
+        assert_eq!(st.rate_bounds, Some([limits::FLOW_MIN, limits::FLOW_MAX]));
+        assert_eq!(st.duration_s, 3600, "the run's own length is not touched");
+        // The base curve stays as recorded: Run again starts from it.
+        assert_eq!(e.store().run(id).unwrap().unwrap().curve.start, 5.0);
+        // The commanded volume counts each rate for its own time: 50 + 0.5 mL.
+        let vol = st.volume_added_ml.unwrap();
+        assert!((vol - (5.0 * 10.0 + 3.0 * 10.0 / 60.0)).abs() < 1e-6, "{vol}");
+    }
+
+    #[test]
+    fn refusals_record_nothing() {
+        let mut e = engine();
+        assert!(matches!(e.set_constant_rate(3.0, 10.0, at(10)), Err(EngineError::Idle)));
+        let id = e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        for v in [0.0, -1.0, f64::NAN, f64::INFINITY, limits::FLOW_MAX + 1.0] {
+            let err = e.set_constant_rate(v, 10.0, at(10)).unwrap_err();
+            assert!(matches!(&err, EngineError::Config(m) if m.contains("ml/min")), "{v}: {err:?}");
+        }
+        assert!(e.store().setpoint_changes(id).unwrap().is_empty());
+        assert!(rate_events(&e, id).is_empty());
+        assert_eq!(e.status().active.unwrap().rate_changes, 0);
+        e.stop_run(at(20)).unwrap();
+
+        // A curve with its own shape, and a calibration measurement.
+        for cfg in [
+            RunConfig { control_var: ControlVar::MlMin, ..linear_cfg() },
+            RunConfig { kind: RunKind::Calibration, ..constant_cfg(5.0, 600) },
+        ] {
+            let mut e = engine();
+            let id = e.start_run(cfg, t0()).unwrap();
+            let err = e.set_constant_rate(3.0, 10.0, at(10)).unwrap_err();
+            assert!(matches!(err, EngineError::NotConstant), "{err:?}");
+            assert_eq!(err.code(), "not_constant");
+            assert!(err.hint().is_some());
+            assert!(e.store().setpoint_changes(id).unwrap().is_empty());
+            assert!(rate_events(&e, id).is_empty());
+            assert_eq!(e.status().active.unwrap().rate_bounds, None);
+        }
+
+        // Driven in rpm: no more than the tube gives at 350 rpm (840 ml/min).
+        let mut e = engine();
+        let cal = seed_calibration(&e.store, ControlVar::Rpm, 50.0, 600.0);
+        let id = e
+            .start_run(driven_cfg(cal, CurveSpec::constant(24.0, Duration::from_secs(3600))), t0())
+            .unwrap();
+        let max = e.status().active.unwrap().rate_bounds.unwrap()[1];
+        assert!((max - 840.0).abs() < 1e-6, "{max}");
+        let err = e.set_constant_rate(900.0, 10.0, at(10)).unwrap_err();
+        assert!(matches!(&err, EngineError::Config(m) if m.contains("840") && m.contains("350 rpm")), "{err:?}");
+        assert!(e.store().setpoint_changes(id).unwrap().is_empty());
+        // Within it, it is driven in rpm: 48 ml/min = 20 rpm.
+        e.set_constant_rate(48.0, 10.0, at(10)).unwrap();
+        e.apply_setpoint(at(11)).unwrap();
+        assert!((e.pump.transport().speed_rpm() as f64 - 20.0).abs() < 1e-3);
+    }
+
+    /// What a refused change must leave as it was: no row, no event, the
+    /// curve, the commanded volume and the last write.
+    fn assert_rate_unchanged(e: &Engine<SimPump>, id: i64, vol: Option<f64>) {
+        assert!(e.store().setpoint_changes(id).unwrap().is_empty());
+        assert!(rate_events(e, id).is_empty());
+        let st = e.status().active.unwrap();
+        assert_eq!(st.rate_changes, 0);
+        assert_eq!(st.volume_added_ml, vol);
+        let a = e.active.as_ref().unwrap();
+        assert_eq!(a.last_write_q, Some(5.0));
+        assert_eq!(a.spec.value_at(Duration::from_secs(3000)), 5.0);
+    }
+
+    #[test]
+    fn a_rate_the_pump_refuses_is_not_recorded() {
+        let mut e = engine();
+        let id = e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        for i in 1..=60 {
+            e.apply_setpoint(at(i)).unwrap();
+            e.tick(at(i)).unwrap();
+        }
+        let vol = e.status().active.unwrap().volume_added_ml;
+        // Its own head/tubing table cannot deliver it: 0x03 on the write.
+        e.pump.transport_mut().reject_setpoint_writes = true;
+        let err = e.set_constant_rate(3.0, 60.0, at(60)).unwrap_err();
+        assert!(
+            matches!(err, EngineError::PumpRejectedSetpoint { code: 0x03, control_var: ControlVar::MlMin, value } if (value - 3.0).abs() < 1e-9),
+            "{err:?}"
+        );
+        assert_rate_unchanged(&e, id, vol);
+        e.pump.transport_mut().reject_setpoint_writes = false;
+        assert!((e.pump.transport().flow_ml_min() as f64 - 5.0).abs() < 1e-3, "the old rate still driven");
+        let o = e.tick(at(61)).unwrap();
+        assert!(matches!(o, TickOutcome::Applied { target, .. } if (target - 5.0).abs() < 1e-9), "{o:?}");
+    }
+
+    #[test]
+    fn a_rate_change_over_a_lost_link_is_refused() {
+        let mut e = engine();
+        let id = e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        e.tick(at(1)).unwrap();
+        let vol = e.status().active.unwrap().volume_added_ml;
+        e.serial_lost = true;
+        let before = e.pump.transport().transactions;
+        let err = e.set_constant_rate(3.0, 10.0, at(10)).unwrap_err();
+        assert!(matches!(err, EngineError::SerialDown), "{err:?}");
+        assert_eq!(e.pump.transport().transactions, before, "no frame sent over a lost link");
+        assert_rate_unchanged(&e, id, vol);
+    }
+
+    #[test]
+    fn an_accepted_rate_is_on_the_pump_at_once() {
+        let mut e = engine();
+        e.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+        e.set_constant_rate(3.0, 10.0, at(10)).unwrap();
+        assert!((e.pump.transport().flow_ml_min() as f64 - 3.0).abs() < 1e-3);
+        assert_eq!(e.active.as_ref().unwrap().last_write_q, Some(3.0));
+    }
+
+    #[test]
+    fn a_crash_after_a_change_resumes_on_it() {
+        let db = TempDb::new();
+        {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.start_run(constant_cfg(5.0, 3600), t0()).unwrap();
+            for i in 1..=600 {
+                a.tick(at(i)).unwrap();
+            }
+            a.set_constant_rate(3.0, 600.0, at(600)).unwrap();
+            for i in 601..=700 {
+                a.tick(at(i)).unwrap();
+            }
+        }
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        let info = b.pending_recovery(at(900), grace()).unwrap().unwrap();
+        assert!((info.resume_target - 3.0).abs() < 1e-9, "{info:?}");
+        b.resume(at(900), grace()).unwrap();
+        assert!((b.pump.transport().flow_ml_min() as f64 - 3.0).abs() < 1e-3);
+        let st = b.status().active.unwrap();
+        assert_eq!(st.last_target, Some(3.0));
+        assert_eq!(st.rate_changes, 1);
+        let o = b.tick(at(901)).unwrap();
+        assert!(matches!(o, TickOutcome::Applied { target, .. } if (target - 3.0).abs() < 1e-9), "{o:?}");
+        // A further change builds on the changes the resume read back.
+        assert_eq!(b.set_constant_rate(4.0, 905.0, at(905)).unwrap(), (3.0, 4.0));
+        assert_eq!(b.status().active.unwrap().rate_changes, 2);
+    }
+
+    /// A trimmed Constant run on a pump delivering `k` of its command: the
+    /// balance reads the bottle drained by what the engine commands (the rate
+    /// in force, times c). `change` is `(at_s, value)`. Returns (engine, run
+    /// id, c every second).
+    fn constant_trimmed_bench(
+        value: f64,
+        duration_s: u64,
+        change: (i64, f64),
+        k: f64,
+        end: i64,
+    ) -> (Engine<SimPump>, i64, Vec<f64>) {
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let cfg = RunConfig { gravimetric_trim: true, ..constant_cfg(value, duration_s) };
+        let id = e.start_run(cfg, t0()).unwrap();
+        let mut w = 5_000.0;
+        let mut cs = Vec::new();
+        for i in 0..end {
+            if i == change.0 {
+                e.set_constant_rate(change.1, i as f64, at(i)).unwrap();
+            }
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            e.scale_tick(at(i));
+            e.tick(at(i)).unwrap();
+            cs.push(e.trim_c());
+            let rate = if i < change.0 { value } else { change.1 };
+            w -= k * rate / 60.0 * e.trim_c();
+        }
+        (e, id, cs)
+    }
+
+    #[test]
+    fn the_report_counts_each_rate_for_its_time() {
+        let (e, id, _) = constant_trimmed_bench(6.0, 36_000, (1800, 3.0), 1.0, 3601);
+        let report = e.tracking_report(id).unwrap().expect("report");
+        let required = report.points.last().unwrap()[1];
+        let want = 6.0 * 30.0 + 3.0 * 30.0;
+        assert!((required - want).abs() < 0.01 * want, "required {required} vs {want}");
+    }
+
+    #[test]
+    fn a_change_in_the_hold_counts_from_its_time() {
+        let (e, id, _) = constant_trimmed_bench(6.0, 1800, (2400, 3.0), 1.0, 3001);
+        let st = e.status().active.unwrap();
+        assert!(st.curve_done, "still in the hold after a change");
+        assert_eq!(st.duration_s, 1800);
+        let report = e.tracking_report(id).unwrap().expect("report");
+        let required = report.points.last().unwrap()[1];
+        let want = 6.0 * 40.0 + 3.0 * 10.0;
+        assert!((required - want).abs() < 0.01 * want, "required {required} vs {want}");
+    }
+
+    #[test]
+    fn the_regulation_rides_a_change() {
+        let change_at = 1800;
+        let (e, id, cs) = constant_trimmed_bench(6.0, 36_000, (change_at, 3.0), 0.92, 3600);
+        let alarms: Vec<String> = e
+            .store()
+            .events(Some(id), 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind.starts_with("alarm_"))
+            .map(|ev| ev.kind)
+            .collect();
+        assert!(alarms.is_empty(), "{alarms:?}");
+        assert!(e.status().scale_ok);
+        let before = cs[change_at as usize - 1];
+        assert!((before - 1.0 / 0.92).abs() < 0.03, "c before = {before}");
+        let worst = cs[change_at as usize..]
+            .iter()
+            .map(|c| (c / before - 1.0).abs())
+            .fold(0.0, f64::max);
+        assert!(worst < 0.005, "c moved {:.2} % after the change", 100.0 * worst);
     }
 }

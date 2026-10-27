@@ -126,6 +126,8 @@ pub enum Command {
     RefillNow(oneshot::Sender<Result<(), String>>),
     /// "Stop refill": stop a refill, hold the automatic refill.
     RefillPause(oneshot::Sender<Result<(), String>>),
+    /// Change the rate of the active Constant run; replies `(from, to)`.
+    SetConstantRate(f64, oneshot::Sender<Result<(f64, f64), ErrDetail>>),
     Shutdown,
 }
 
@@ -580,6 +582,31 @@ fn control_loop<T: Transport + SwapTransport>(
                         auto_resume_failures = 0;
                         let _ = reply.send(());
                     }
+                    // Needs the run's elapsed time, taken from `run_now` (clock-step
+                    // guard) like a tick, which `handle` has no access to.
+                    Ok(Command::SetConstantRate(value, reply)) => {
+                        let now = run_now(run_epoch, &mut clock_stepped);
+                        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            // No run: the engine's own idle refusal, never an invented elapsed.
+                            let res = match engine.active_status().map(|a| a.started_at) {
+                                None => Err(crate::engine::EngineError::Idle.detail()),
+                                Some(s) => {
+                                    let elapsed_s = now.duration_since(s).as_secs_f64().max(0.0);
+                                    engine.set_constant_rate(value, elapsed_s, now).map_err(|e| e.detail())
+                                }
+                            };
+                            let ok = res.is_ok();
+                            let _ = reply.send(res);
+                            ok
+                        }));
+                        match done {
+                            Ok(true) => {
+                                let _ = events.send(current_status(engine, grace));
+                            }
+                            Ok(false) => {}
+                            Err(_) => tracing::error!("panic while changing the rate; loop continues"),
+                        }
+                    }
                     Ok(cmd) => {
                         let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             handle(engine, cmd, grace)
@@ -833,6 +860,8 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
     let now = Timestamp::now();
     match cmd {
         Command::Shutdown => false,
+        // Answered in the control loop, which owns the run clock.
+        Command::SetConstantRate(_, _) => false,
         Command::Status(reply) => {
             let _ = reply.send(current_status(engine, grace));
             false

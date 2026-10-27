@@ -10,6 +10,8 @@
   import RegulationPanel from '../components/RegulationPanel.svelte';
   import Icon from '../components/Icon.svelte';
   import StateIcon from '../components/StateIcon.svelte';
+  import ChangeRate from '../components/ChangeRate.svelte';
+  import { canChangeRate, curveFact, rateSince, rateSteps } from '../lib/ratechange.js';
   import { cycleLine } from '../lib/refill.js';
 
   // Overview follows feeding cycles only: a calibration burst is watched
@@ -97,13 +99,45 @@
   async function load(id) {
     try {
       run = await get(`/api/runs/${id}`);
-      const p = await post('/api/preview', { curve: run.curve, samples: 200 });
+      // the curve the run follows, its rate changes included
+      const p = await post('/api/preview', { curve: run.effective_curve ?? run.curve, samples: 200 });
       planned = p.series;
       events = await get(`/api/runs/${id}/events?limit=6`);
     } catch (e) {
       err = e.message;
     }
   }
+
+  // A rate changed (here or from another tab): the run and its curve again.
+  // Once per count of changes: a reload that fails is not asked again at
+  // every status frame, only when the count moves on.
+  let reloading = $state(false);
+  let rateTried = null;
+  async function reloadRate(id) {
+    reloading = true;
+    try {
+      const r = await get(`/api/runs/${id}`);
+      const p = await post('/api/preview', { curve: r.effective_curve ?? r.curve, samples: 200 });
+      if (id === loadedId) {
+        run = r;
+        planned = p.series;
+        err = null;
+      }
+    } catch (e) {
+      err = e.message;
+    }
+    reloading = false;
+  }
+  $effect(() => {
+    const n = active?.rate_changes;
+    if (n == null || loadedId == null || !run || reloading || n === (run.setpoint_changes?.length ?? 0)) return;
+    const key = `${loadedId}:${n}`;
+    if (key === rateTried) return;
+    rateTried = key;
+    reloadRate(loadedId);
+  });
+  let changingRate = $state(false);
+  const rateChangeable = $derived(canChangeRate(app.status, run));
 
   const unit = $derived(run ? unitFor(run.control_var) : 'rpm');
   const digits = $derived(run ? digitsFor(run.control_var) : 1);
@@ -158,7 +192,9 @@
   const pumpFrac = $derived.by(() => {
     if (!run) return 0;
     const v = (active ? liveValue : holding?.value) ?? 0;
-    const top = Math.max(run.curve.start, run.curve.end, 1e-9);
+    // a Constant run's rate may have changed: its highest rate is the top
+    const ends = run.curve.params.kind === 'constant' ? rateSteps(run).map((s) => s.value) : [run.curve.start, run.curve.end];
+    const top = Math.max(...ends, 1e-9);
     return Math.max(0, Math.min(1, v / top));
   });
 
@@ -374,6 +410,10 @@
   </div>
 {/if}
 
+{#if changingRate && rateChangeable}
+  <ChangeRate {run} bounds={active.rate_bounds} {trimmed} onclose={() => (changingRate = false)} onchanged={() => reloadRate(loadedId)} />
+{/if}
+
 {#if complete}
   <section class="card done">
     <div class="card-head">
@@ -528,13 +568,20 @@
                 <span class="big mono-num">{num(curveNow ?? active.last_target, digits)}</span>
                 <span class="big-u">{unit}</span>
               </div>
+              {#if run.curve.params.kind === 'constant' && active.rate_bounds}
+                <div class="k">{rateSince(run)}</div>
+              {/if}
+              {#if rateChangeable}
+                <button class="btn-ghost change" onclick={() => (changingRate = true)}>
+                  <span class="opt"><Icon name="sliders" size={16} />Change rate</span></button>
+              {/if}
             </div>
             <dl class="facts">
               <dt>Pump driven at</dt><dd class="mono">{num(active.last_target, digits)} {unit}</dd>
               {#if trimmed}
                 <dt>Balance trim</dt><dd class="mono">×{num(app.status?.trim_c, 3)}</dd>
               {/if}
-              <dt>Curve</dt><dd class="mono">{num(run.curve.start, digits)} → {num(run.curve.end, digits)}</dd>
+              <dt>Curve</dt><dd class="mono">{curveFact(run)}</dd>
               <dt>Direction</dt><dd>{run.direction === 'cw' ? 'clockwise' : 'counter-clockwise'}</dd>
             </dl>
           </div>
@@ -900,6 +947,7 @@
   .big-line { display: flex; align-items: center; gap: var(--s-3); }
   .big { font-size: 64px; font-weight: 500; line-height: 1; letter-spacing: -0.025em; }
   .big-u { font-size: 18px; color: var(--muted); align-self: flex-end; padding-bottom: 6px; }
+  .change { margin-top: var(--s-3); min-height: 40px; }
   .facts { margin: 0; display: grid; grid-template-columns: auto auto; gap: 3px var(--s-4); font-size: 13px; }
   .facts dt { color: var(--muted); }
   .facts dd { margin: 0; }

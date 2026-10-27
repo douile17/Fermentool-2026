@@ -289,6 +289,25 @@ vraies données), puis mise en place.
   1 à 4 s ; la légende disait « Refill » pour elles : `blindLegend`.
 - Demande en cours : la fiche s'ouvre sur Settings, Feed bottle replié.
 
+## 6 octies. Changer le débit d'un run constant (22 octobre)
+
+- Demande : pouvoir changer le ml/min pendant l'expérience (un changement
+  morphologique observé), avec une trace dans l'historique. Conception
+  validée (spec), maquette validée (canvas « Change rate during a run »),
+  plan en 6 étapes exécuté par un agent par étape avec relecture après
+  chacune, puis une relecture complète de la branche.
+- Travail dans un worktree (`Fermentool-2026-rate`, branche
+  `feat/constant-rate-change`) : deux autres sessions Claude travaillaient
+  dans le même dossier, l'une de leurs modifications (retrait de « API
+  port » de Settings › Daemon) avait été prise dans un commit, puis
+  remise intacte dans le dossier principal.
+- La relecture complète a trouvé un cas critique : une consigne ml/min
+  au-dessus de ce que la table tête/tube de la pompe accepte était
+  enregistrée avant d'être écrite, puis refusée en boucle (et le run ne
+  reprenait plus). Corrigé : la pompe est interrogée d'abord.
+- Fusion dans `main` seulement quand l'utilisateur l'aura qualifiée
+  d'opérationnelle.
+
 ## 7. Commits de la session
 
 | Commit | Contenu |

@@ -280,6 +280,33 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   `parse_refill` must stay in step), `refill_cancelled`, `trim_limit`, `scale_lost`,
   `scale_recovered`.
 
+## Rate change of a Constant run (2026-10-22)
+
+Spec `docs/superpowers/specs/2026-10-22-constant-rate-change-design.md`,
+plan `docs/superpowers/plans/2026-10-22-constant-rate-change.md`.
+- Constant dosing runs only (`CurveParams::Constant`). `POST
+  /api/runs/active/rate {value}` → `Engine::set_constant_rate(value,
+  elapsed_s, now)`, `elapsed_s` from the control loop's `run_now()` (the
+  guarded clock), never a raw wall-clock difference.
+- **The pump is asked first**: the new setpoint is written (`drive_write`,
+  times c, driven in rpm when the run is) before anything is recorded; a
+  refusal (MODBUS 0x03 above the pump's own head/tubing table, serial lost)
+  records nothing. Without that, a typo was journalled, refused at every
+  write and made the run unresumable (final review, critical).
+- The changes are rows of `setpoint_changes`; `run.curve` stays the curve
+  the run started with. **Everything that drives or counts uses
+  `RunRow::effective_curve()`** (`CurveSpec::with_rate_changes`, a Step
+  curve whose duration reaches the last change so a change in the hold
+  counts from its own time): the engine, resume, `pending_recovery`, the
+  tracking report, and the UI (`effective_curve` from `GET /api/runs/:id`).
+  `curve_done` still comes from `duration_s`.
+- In the hold phase `apply_setpoint` returns early: a change there reaches
+  the pump at the next tick (within 1 s).
+- An exe older than this feature resuming a run with changes would resume
+  at the start rate (it ignores the table): do not roll back mid-run.
+- UI logic in `ui/src/lib/ratechange.js` (tested); Run again with changes
+  asks which rate to start from.
+
 ## History run detail (`History.svelte`, `lib/rundetail.js`)
 
 Redesigned 2026-10-20 (UX audit, mockup on run 194). Order: name and

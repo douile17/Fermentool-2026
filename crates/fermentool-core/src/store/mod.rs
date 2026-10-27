@@ -71,6 +71,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         sql: include_str!("migrations/0013_run_refill_draw.sql"),
     },
+    Migration {
+        version: 14,
+        sql: include_str!("migrations/0014_setpoint_changes.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -247,6 +251,27 @@ pub struct RunRow {
     pub density_g_per_ml: Option<f64>,
     pub auto_refill: bool,
     pub refill_draw_g: Option<f64>,
+    /// Rate changes made during the run (Constant only), in time order.
+    /// Filled by `run()` and `running_run()`, empty from the list queries.
+    pub setpoint_changes: Vec<SetpointChange>,
+}
+
+/// One change of the rate of a running Constant run: from `elapsed_s` the
+/// setpoint is `value`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SetpointChange {
+    pub elapsed_s: f64,
+    pub value: f64,
+    pub wall_time: Timestamp,
+}
+
+impl RunRow {
+    /// The curve the run really follows: its own, with the rate changes applied.
+    pub fn effective_curve(&self) -> CurveSpec {
+        let changes: Vec<(f64, f64)> =
+            self.setpoint_changes.iter().map(|c| (c.elapsed_s, c.value)).collect();
+        self.curve.with_rate_changes(&changes)
+    }
 }
 
 /// A tubing calibration to record: three hand-weighed bursts of one tube at
@@ -496,26 +521,70 @@ impl Store {
     }
 
     pub fn run(&self, id: i64) -> Result<Option<RunRow>> {
-        self.conn
+        let row = self
+            .conn
             .query_row(
                 &format!("SELECT {RUN_COLS} FROM runs WHERE id = ?1"),
                 [id],
                 row_to_run,
             )
-            .optional()
-            .map_err(StoreError::from)
+            .optional()?;
+        self.with_changes(row)
+    }
+
+    fn with_changes(&self, row: Option<RunRow>) -> Result<Option<RunRow>> {
+        match row {
+            Some(mut r) => {
+                r.setpoint_changes = self.setpoint_changes(r.id)?;
+                Ok(Some(r))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Record a rate change of a running Constant run.
+    pub fn add_setpoint_change(
+        &self,
+        run_id: i64,
+        elapsed_s: f64,
+        value: f64,
+        wall_time: Timestamp,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO setpoint_changes (run_id, elapsed_s, value, wall_time)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![run_id, elapsed_s, value, wall_time.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// A run's rate changes, in time order.
+    pub fn setpoint_changes(&self, run_id: i64) -> Result<Vec<SetpointChange>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT elapsed_s, value, wall_time FROM setpoint_changes
+             WHERE run_id = ?1 ORDER BY elapsed_s, id",
+        )?;
+        let rows = stmt.query_map([run_id], |r| {
+            Ok(SetpointChange {
+                elapsed_s: r.get(0)?,
+                value: r.get(1)?,
+                wall_time: parse_ts(r.get(2)?)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The single `running` run, if any (the crash-recovery entry point).
     pub fn running_run(&self) -> Result<Option<RunRow>> {
-        self.conn
+        let row = self
+            .conn
             .query_row(
                 &format!("SELECT {RUN_COLS} FROM runs WHERE status = 'running' LIMIT 1"),
                 [],
                 row_to_run,
             )
-            .optional()
-            .map_err(StoreError::from)
+            .optional()?;
+        self.with_changes(row)
     }
 
     /// Most recent runs first.
@@ -542,6 +611,10 @@ impl Store {
              UNION SELECT run_3_id FROM tubing_calibrations";
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(&format!("DELETE FROM ticks WHERE run_id NOT IN ({KEEP})"), [])?;
+        tx.execute(
+            &format!("DELETE FROM setpoint_changes WHERE run_id NOT IN ({KEEP})"),
+            [],
+        )?;
         tx.execute(
             &format!("DELETE FROM events WHERE run_id IS NULL OR run_id NOT IN ({KEEP})"),
             [],
@@ -575,6 +648,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM ticks WHERE run_id = ?1", [id])?;
         tx.execute("DELETE FROM events WHERE run_id = ?1", [id])?;
+        tx.execute("DELETE FROM setpoint_changes WHERE run_id = ?1", [id])?;
         tx.execute("DELETE FROM runs WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(true)
@@ -1056,6 +1130,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         density_g_per_ml: row.get(17)?,
         auto_refill: row.get::<_, i64>(18)? != 0,
         refill_draw_g: row.get(19)?,
+        setpoint_changes: Vec::new(),
     })
 }
 
@@ -1162,7 +1237,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 13);
+        assert_eq!(v, 14);
     }
 
     #[test]
@@ -1174,7 +1249,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 13);
+        assert_eq!(v, 14);
     }
 
     #[test]
@@ -1406,6 +1481,27 @@ mod tests {
     }
 
     #[test]
+    fn clear_history_removes_the_rate_changes_of_the_runs_it_removes() {
+        let s = Store::open_in_memory().unwrap();
+        let runs = three_bursts(&s);
+        s.insert_calibration(&new_calibration(runs, [50.0; 3])).unwrap();
+        let dosing = s.insert_run(&sample_run()).unwrap();
+        let at = ts("2026-09-02T08:00:00Z");
+        s.add_setpoint_change(dosing, 600.0, 3.0, at).unwrap();
+        s.add_setpoint_change(runs[0], 60.0, 2.0, at).unwrap();
+        s.finish_run(dosing, RunStatus::Stopped, ts("2026-09-02T09:00:00Z")).unwrap();
+
+        s.clear_history().unwrap();
+
+        let left: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM setpoint_changes WHERE run_id = ?1", [dosing], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "no rate change left behind its run");
+        assert_eq!(s.setpoint_changes(runs[0]).unwrap().len(), 1, "a kept run keeps its own");
+    }
+
+    #[test]
     fn delete_run_removes_one_run_and_keeps_calibration_bursts() {
         let s = Store::open_in_memory().unwrap();
         let runs = three_bursts(&s);
@@ -1423,6 +1519,52 @@ mod tests {
 
         let live = s.insert_run(&sample_run()).unwrap();
         assert!(s.delete_run(live).is_err(), "a running run is refused");
+    }
+
+    fn constant_run() -> NewRun {
+        NewRun {
+            curve: CurveSpec::constant(5.0, Duration::from_secs(3600)),
+            ..sample_run()
+        }
+    }
+
+    #[test]
+    fn setpoint_changes_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_run(&constant_run()).unwrap();
+        s.add_setpoint_change(id, 1200.0, 3.0, ts("2026-09-01T09:50:00Z")).unwrap();
+        s.add_setpoint_change(id, 600.0, 8.0, ts("2026-09-01T09:40:00Z")).unwrap();
+
+        let got = s.run(id).unwrap().unwrap();
+        let v: Vec<f64> = got.setpoint_changes.iter().map(|c| c.value).collect();
+        assert_eq!(v, vec![8.0, 3.0], "ordered by elapsed time");
+        assert_eq!(got.setpoint_changes[0].wall_time, ts("2026-09-01T09:40:00Z"));
+        assert_eq!(s.running_run().unwrap().unwrap().setpoint_changes.len(), 2);
+        assert!(s.list_runs(10).unwrap()[0].setpoint_changes.is_empty());
+
+        let c = got.effective_curve();
+        let at = |t| c.value_at(Duration::from_secs(t));
+        assert_eq!(at(100), 5.0);
+        assert_eq!(at(700), 8.0);
+        assert_eq!(at(1300), 3.0);
+    }
+
+    #[test]
+    fn a_run_without_changes_has_its_own_curve() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_run(&constant_run()).unwrap();
+        let got = s.run(id).unwrap().unwrap();
+        assert_eq!(got.effective_curve(), got.curve);
+    }
+
+    #[test]
+    fn deleting_a_run_deletes_its_changes() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_run(&constant_run()).unwrap();
+        s.add_setpoint_change(id, 600.0, 8.0, ts("2026-09-01T09:40:00Z")).unwrap();
+        s.finish_run(id, RunStatus::Stopped, ts("2026-09-01T10:00:00Z")).unwrap();
+        assert!(s.delete_run(id).unwrap());
+        assert!(s.setpoint_changes(id).unwrap().is_empty());
     }
 
     #[test]

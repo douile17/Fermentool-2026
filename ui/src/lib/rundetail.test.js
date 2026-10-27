@@ -213,6 +213,29 @@ describe('curveChips', () => {
     expect(text({ control_var: 'ml_min', duration_s: 3600, direction: 'cw', curve: { start: 5, end: 5, params: { kind: 'constant' } } }).slice(1, 3)).toEqual(['5.000 ml/min', 'for 1 h 0 m']);
     expect(text(run194)[1]).toBe('3.500 ml/min, then 0.000');
   });
+  // Run 214 of the mockup: its rate changed twice.
+  const constant = { control_var: 'ml_min', duration_s: 86400, direction: 'cw', curve: { start: 5, end: 5, params: { kind: 'constant' } } };
+  const change = (elapsed_s, value) => ({ elapsed_s, value, wall_time: at(26, 14, 10) });
+  it('a constant whose rate changed says each rate', () => {
+    const run214 = { ...constant, setpoint_changes: [change(22800, 3), change(65100, 4)] };
+    expect(text(run214)).toEqual(['Constant', '5.000 ml/min, then 3.000, 4.000', 'for 24 h 0 m', 'clockwise']);
+  });
+  it('many changes are counted, the last said', () => {
+    const run = { ...constant, setpoint_changes: [change(10, 3), change(20, 4), change(30, 6), change(40, 2)] };
+    expect(text(run)[1]).toBe('5.000 ml/min, changed 4×, last 2.000');
+  });
+  it('without a change, exactly as before', () => {
+    expect(curveChips({ ...constant, setpoint_changes: [] })).toEqual(curveChips(constant));
+    expect(text(constant)).toEqual(['Constant', '5.000 ml/min', 'for 24 h 0 m', 'clockwise']);
+  });
+});
+
+describe('journalLines, a rate change', () => {
+  it('titles it Rate changed, from and to', () => {
+    const run = { control_var: 'ml_min', status: 'completed', started_at: at(26, 14, 10), curve: { start: 5, end: 5, params: { kind: 'constant' } } };
+    const lines = journalLines([ev('setpoint_change', at(26, 20, 30), '5.000 -> 3.000 ml/min')], run);
+    expect(lines.map((l) => [l.time, l.title, l.detail])).toEqual([['6 h 20', 'Rate changed', '5.000 → 3.000 ml/min']]);
+  });
 });
 
 describe('journalLines, a refill cut and resumed', () => {

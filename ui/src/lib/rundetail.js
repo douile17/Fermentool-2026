@@ -168,7 +168,14 @@ export function curveChips(run) {
   const d = digitsFor(run.control_var);
   const kind = c.params.kind;
   const out = [{ text: kind.charAt(0).toUpperCase() + kind.slice(1) }];
-  if (kind === 'constant') out.push({ value: num(c.start, d), unit: u });
+  const changes = run.setpoint_changes ?? [];
+  if (kind === 'constant' && changes.length) {
+    // changed while it ran: each rate, or past a few, how many and the last
+    const then = changes.length <= 3
+      ? `then ${changes.map((s) => num(s.value, d)).join(', ')}`
+      : `changed ${changes.length}×, last ${num(changes.at(-1).value, d)}`;
+    out.push({ value: num(c.start, d), unit: `${u}, ${then}` });
+  } else if (kind === 'constant') out.push({ value: num(c.start, d), unit: u });
   else if (kind === 'step') {
     const segs = (c.params.segments ?? []).filter((s) => s.at_seconds < run.duration_s);
     if (segs.length <= 1) {
@@ -210,6 +217,7 @@ const TITLES = {
   refill_interrupted: 'Refill interrupted',
   refill_pump_lost: 'Refill pump lost',
   refill_pump_ok: 'Refill pump back',
+  setpoint_change: 'Rate changed',
 };
 const kindTitle = (k) => TITLES[k] ?? (k.charAt(0).toUpperCase() + k.slice(1)).replaceAll('_', ' ');
 
@@ -292,6 +300,10 @@ export function journalLines(events, run) {
     if (e.kind === 'curve_done') {
       const v = det.match(/holding at ([\d.]+)/)?.[1];
       push(e.wall_time, TITLES.curve_done, v ? `holding ${v} ${u} until Stop` : det, tone);
+      continue;
+    }
+    if (e.kind === 'setpoint_change') {
+      push(e.wall_time, TITLES.setpoint_change, det.replace(' -> ', ' → '), tone);
       continue;
     }
     if (e.kind === 'stop') {
