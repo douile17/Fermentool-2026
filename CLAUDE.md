@@ -350,6 +350,8 @@ plan `docs/superpowers/plans/2026-10-22-constant-rate-change.md`.
   an exponential or a sigmoid). `value_at` stays pure, `runs.curve_params`
   is never rewritten, old JSON reads as no overrides. The event and its
   notification say `in the hold`.
+- `ActiveStatus.curve_value`: the effective curve's value at the last tick (changes and clamps in, before c), set by `tick` and at once by `set_rate`; the Overview's hold figure and the Change rate dialog use it, never `run.curve.end` (a Physio curve's is New run's unused field).
+- Overrides come from the engine only: `POST /api/runs` refuses a curve with any, `CurveSpec::validate()` rejects non-finite, negative or unsorted times and non-finite values; a hold change's time is clamped to at least `duration_s`.
 - In the hold phase `apply_setpoint` returns early: a change there reaches
   the pump at the next tick (within 1 s).
 - An exe older than this feature resuming a run with changes would resume
