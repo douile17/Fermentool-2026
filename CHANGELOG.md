@@ -5,14 +5,18 @@
 ### Autres pompes : LabV et PDS II (23 octobre)
 
 - Settings › Pumps : chaque pompe se choisit parmi **LabQ, LabV et PDS II**
-  (avec sa photo), avec son adresse, sa tête (1 à 8, PDS II seulement) et sa
-  vitesse maximale (LabQ 350, LabV 150, PDS II 600 tr/min par défaut). Le
-  câble est affiché « 9600 baud · 8E1 » (le choix du baud disparaît).
+  (avec sa photo), avec son adresse et sa tête (1 à 8, PDS II seulement).
+  Sa vitesse maximale est celle du modèle, fixe (LabQ 350, LabV 150, PDS II
+  600 tr/min) : plus de champ « Max rpm ». Le câble est affiché
+  « 9600 baud · 8E1 » (le choix du baud disparaît).
+- LabV et PDS II sont pilotés au **0,01 tr/min** et au **0,01 ml/min** près
+  (vérifié sur les pompes du banc), au lieu du 0,1 tr/min de la LabQ, qui ne
+  change pas. Les champs de New run et de la vitesse de remplissage suivent
+  ce pas.
 - Une vitesse au-dessus du maximum de la pompe est refusée (courbe, remplissage) :
   une courbe en tr/min qui le dépasse est refusée au démarrage, New run le dit
   avant Start. Seule la régulation peut demander plus que le maximum : la
-  pompe reste alors à son maximum. Une reprise après crash plafonne la courbe
-  au maximum actuel, sans la refuser.
+  pompe reste alors à son maximum.
 - LabV et PDS II n'acceptent pas moins de 0,1 ml/min : sous ce seuil (une
   marche à 0), la pompe est arrêtée, puis redémarrée quand la courbe remonte.
 - Un run interrompu ne reprend que sur la pompe qu'il pilotait (même modèle,

@@ -128,8 +128,8 @@ else to install:
   trim stay in ml/min, only the value written and read back is rpm
   (`write_setpoint` / `read_actual` / `drive_grid`), so the pump's own
   head/tubing table never matters. Refused if the curve needs more than
-  the pump's configured max rpm (LabQ 350, LabV 150, PDS II 600 by default,
-  Settings > Pumps; there is no global `limits::RPM_MAX` any more). A tube
+  the pump model's max rpm (LabQ 350, LabV 150, PDS II 600, fixed in the
+  code, no setting; there is no global `limits::RPM_MAX` any more). A tube
   calibration belongs to the pump model it was measured on: a new run lists,
   and `POST /api/runs` accepts, only the calibrations of the feed pump's model.
 - Simulator runs are refused unless `serial.allow_simulator = true`
@@ -162,14 +162,21 @@ LabQ, LabV and PDS II (Innofluid) share one cable and one daemon. Design:
   `Pump::with_target` and reaches the refill pump with `with_target_of` (its
   own model and head) on the feed pump's transport; `Pump::new` and
   `with_address` (same kind, another address) remain, used by tests.
-- Each model has its floors and ceilings: `max_rpm` (an rpm curve over it is
-  refused at start, capped on resume, the trim capped at it) and
+- Each model has its floors, ceilings and steps, constants of `PumpModel`,
+  never a setting (decided 2026-10-26: the bench's pumps will not change):
+  `max_rpm()` (an rpm curve over it is refused at start, capped on resume,
+  the trim capped at it); `rpm_step()` / `flow_step()`, the setpoint grid
+  (`setpoint_grid`): LabQ 0.1 rpm and 0.001 ml/min as before, LabV and
+  PDS II 0.01 rpm and 0.01 ml/min (checked on the bench's LabV1-II and
+  PDS II: 68.39 and 30.07 rpm typed are kept); and
   `PumpModel::flow_min` (LabV and PDS II refuse under 0.1 ml/min: the engine
   stops the pump below it and starts it again, as `drive_paused` does in rpm).
 - A run resumes only on the feed pump it drove (`EngineError::ResumeOtherPump`);
   a calibration's model comes from its three measurement runs.
-- `config.toml`: `[pump] model | head | max_rpm` and `[refill] pump_model |
-  pump_head | pump_max_rpm`, absent = LabQ, 350. Feed and refill may be two
+- `config.toml`: `[pump] model | head` and `[refill] pump_model |
+  pump_head`, absent = LabQ (a `max_rpm` left from before is ignored).
+  The LabV max is the LabV1-II's 150 rpm (its protocol, common to the range,
+  says 600): a LabV3 or LabV6 is a code change. Feed and refill may be two
   heads of one PDS II (same address, different heads), nothing else shares.
 - `ensure_transferring()` reads the mode register and writes "transferring"
   only if it differs (nothing for a LabQ). It runs at run start, resume, a
