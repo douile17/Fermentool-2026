@@ -11,7 +11,7 @@
   import Icon from '../components/Icon.svelte';
   import StateIcon from '../components/StateIcon.svelte';
   import ChangeRate from '../components/ChangeRate.svelte';
-  import { canChangeRate, curveFact, rateSince, rateSteps } from '../lib/ratechange.js';
+  import { canChangeRate, curveFact, holdChip, rateSince, rateSteps } from '../lib/ratechange.js';
   import { cycleLine } from '../lib/refill.js';
 
   // Overview follows feeding cycles only: a calibration burst is watched
@@ -193,7 +193,7 @@
     if (!run) return 0;
     const v = (active ? liveValue : holding?.value) ?? 0;
     // a Constant run's rate may have changed: its highest rate is the top
-    const ends = run.curve.params.kind === 'constant' ? rateSteps(run).map((s) => s.value) : [run.curve.start, run.curve.end];
+    const ends = run.curve.params.kind === 'constant' ? rateSteps(run).map((s) => s.value) : [run.curve.start, run.curve.end, ...(run.setpoint_changes ?? []).map((c) => c.value)];
     const top = Math.max(...ends, 1e-9);
     return Math.max(0, Math.min(1, v / top));
   });
@@ -204,7 +204,12 @@
   // value actually written, curve x c, is `active.last_target`.
   const curveNow = $derived(active && planned.length ? valueAt(planned, elapsedAnim) : null);
   const endMs = $derived(run ? startedAtMs + run.duration_s * 1000 : NaN);
-  const rs = $derived(runState(app.status, app.connected, inHold));
+  // the rate a change set in the hold, "2.500 ml/min" (null: the curve's end value)
+  const held = $derived.by(() => {
+    const c = run && inHold ? holdChip(run) : null;
+    return c ? `${c.value} ${c.unit}` : null;
+  });
+  const rs = $derived(runState(app.status, app.connected, inHold, held));
 
   // Balance settings the page needs: the correction limit, and whether the
   // balance weighs the feed bottle (then its weight says when it runs dry).
@@ -246,7 +251,7 @@
       ? { t: elapsed + refillInS, label: `refill ${when(now + refillInS * 1000, now)}${inHold ? `, ${inAbout(refillInS)}` : ''}` }
       : null
   );
-  const hold = $derived(inHold ? holdBand({ cycle, inS: refillInS, nowMs: now, holdS }) : null);
+  const hold = $derived(inHold ? holdBand({ cycle, inS: refillInS, nowMs: now, holdS }, held) : null);
   // The one thing the operator has to do next, as a clock time. With
   // automatic refill there is nothing to do: the band says when it refills.
   const next = $derived.by(() => {
@@ -568,8 +573,8 @@
                 <span class="big mono-num">{num(curveNow ?? active.last_target, digits)}</span>
                 <span class="big-u">{unit}</span>
               </div>
-              {#if run.curve.params.kind === 'constant' && active.rate_bounds}
-                <div class="k">{rateSince(run)}</div>
+              {#if active.rate_bounds && (run.curve.params.kind === 'constant' || inHold)}
+                <div class="k">{rateSince(run, inHold)}</div>
               {/if}
               {#if rateChangeable}
                 <button class="btn-ghost change" onclick={() => (changingRate = true)}>

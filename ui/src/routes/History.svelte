@@ -12,7 +12,7 @@
     TOLERANCE, alarmCount, atRun, gapExtremes, grouped, journalLines, mins,
     refillRows, regulationFigures, verdict, whenLine, curveChips, blindLegend, pumpLine,
   } from '../lib/rundetail.js';
-  import { rateLabel, rateMarks, rateSteps, runAgainSeed } from '../lib/ratechange.js';
+  import { holdChip, rateLabel, rateMarks, rateSteps, runAgainPicks, runAgainSeed } from '../lib/ratechange.js';
 
   let runs = $state([]);
   let err = $state(null);
@@ -197,7 +197,7 @@
   let pickedRate = $state(0);
   function runAgain() {
     if (!sel || !replayable) return;
-    if (steps.length > 1) {
+    if (runAgainPicks(sel.run)) {
       pickedRate = steps.length - 1;
       pickRate = true;
       return;
@@ -266,13 +266,17 @@
     Math.max(sel?.run.duration_s ?? 0, sel?.report?.points?.at(-1)?.[0] ?? 0, sel?.ticks?.at(-1)?.elapsed_s ?? 0),
   );
   const verdictOf = $derived(verdict(sel?.report));
+  // the feed each rate change wrote off, `[[elapsed_s, ml]]`
+  const resets = $derived(sel?.report?.resets ?? []);
+  const resetMl = $derived(resets.reduce((a, [, ml]) => a + ml, 0));
+  const hold = $derived(sel ? holdChip(sel.run) : null);
   const alarms = $derived(alarmCount(sel?.events));
   const bottle = $derived(bottleWeights(sel?.report));
   const refills = $derived(refillRows(bottle, spans));
   const nRefills = $derived(sel?.report?.refills?.length ?? 0);
   const journal = $derived(sel ? journalLines(sel.events, sel.run) : []);
   const reg = $derived(regulationFigures(sel?.events));
-  const extremes = $derived(gapExtremes(sel?.report?.points, spans));
+  const extremes = $derived(gapExtremes(sel?.report?.points, spans, resets));
   const trimStartS = $derived(sel?.report?.markers?.find((m) => m.kind === 'trim_start')?.t_s ?? null);
 
   const warnCount = $derived(
@@ -495,6 +499,7 @@
             {#each curveChips(sel.run) as c}
               <span class="chip">{#if c.value}<b class="mono">{c.value}</b> {c.unit}{:else}{c.text}{/if}</span>
             {/each}
+            {#if hold}<span class="chip">hold <b class="mono">{hold.value}</b> {hold.unit}</span>{/if}
           </div>
         </div>
         <div class="hd-actions">
@@ -571,7 +576,7 @@
             <h3>Running total vs requested</h3>
             <div class="legend"><span>delivered − requested, mL</span></div>
           </div>
-          <GapChart points={sel.report.points} {spans} spanS={reportSpanS} />
+          <GapChart points={sel.report.points} {spans} spanS={reportSpanS} {resets} {marks} />
         </div>
       {/if}
 
@@ -649,6 +654,7 @@
                 <dd>at {atRun(trimStartS)}{reg.correction ? `, at ×${reg.correction}` : ''}</dd>
               {/if}
               {#if reg.ratio}<dt>Pump ratio</dt><dd class="mono">{reg.ratio}</dd>{/if}
+              {#if resetMl > 0}<dt>Written off at rate changes</dt><dd class="mono">{num(resetMl, 1)} mL</dd>{/if}
               <dt>Largest gap</dt>
               <dd><span class="mono">+{num(extremes.ahead, 1)} mL</span> ahead, <span class="mono">−{num(Math.abs(extremes.behind), 1)} mL</span> behind</dd>
               <dt>Fit, R²</dt><dd class="mono">{sel.report.r_squared != null ? sel.report.r_squared.toFixed(4) : '·'}</dd>

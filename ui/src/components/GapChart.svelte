@@ -8,8 +8,8 @@
   import { gapSeries, gapScale } from '../lib/rundetail.js';
   import { elapsedTicks, ticksFor } from '../lib/chartscale.js';
 
-  /** @type {{ points: [number, number, number][], spans?: [number, number][], spanS: number, ticks?: { t: number, label: string }[] }} */
-  let { points, spans = [], spanS, ticks = null } = $props();
+  /** @type {{ points: [number, number, number][], spans?: [number, number][], spanS: number, ticks?: { t: number, label: string }[], resets?: [number, number][], marks?: { t: number, text: string }[] }} */
+  let { points, spans = [], spanS, ticks = null, resets = [], marks = [] } = $props();
 
   let boxW = $state(700);
   const W = $derived(Math.max(240, Math.round(boxW)));
@@ -20,13 +20,17 @@
   const padT = 8;
   const padB = 22;
 
-  const series = $derived(gapSeries(points, spans));
+  const series = $derived(gapSeries(points, spans, 300, resets));
   const scale = $derived(gapScale(series));
   const span = $derived(spanS > 0 ? spanS : 1);
   const x = (t) => padL + (Math.min(Math.max(t, 0), span) / span) * (W - padL);
   const y = (v) => padT + ((scale.hi - v) / (2 * scale.hi)) * (H - padT - padB);
   const digits = $derived(scale.ticks.length > 1 && scale.ticks[1] - scale.ticks[0] < 1 ? 1 : 0);
   const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + num(Math.abs(v), digits);
+
+  // a rate change restarts the gap at 0: its dashed line and number, as on the feed rate chart
+  const BADGE_R = 7;
+  const badges = $derived(marks.map((m, i) => ({ m, lx: x(m.t), n: i + 1 })));
 
   const parts = $derived(
     splitEstimated(series, spans).map((p) => ({
@@ -50,6 +54,11 @@
     {#each parts as p}
       <path d={p.d} class={p.est ? 'blind' : 'gap'} />
     {/each}
+    {#each badges as b}
+      <line x1={b.lx} x2={b.lx} y1={padT} y2={H - padB} class="marker" />
+      <circle cx={Math.min(W - BADGE_R - 1, Math.max(BADGE_R + 1, b.lx))} cy={padT + BADGE_R} r={BADGE_R} class="badge" />
+      <text x={Math.min(W - BADGE_R - 1, Math.max(BADGE_R + 1, b.lx))} y={padT + BADGE_R + 3.5} text-anchor="middle" class="badge-n">{b.n}</text>
+    {/each}
     {#each tickMarks as k, i}
       <text x={k.x} y={H - 6} class="axl"
             text-anchor={i === tickMarks.length - 1 && k.x > W - 30 ? 'end' : k.x < 20 ? 'start' : 'middle'}>{k.label}</text>
@@ -64,6 +73,9 @@
   .tick { font-size: 9.5px; opacity: 0.8; }
   .grid { stroke: var(--line-soft); stroke-width: 1; }
   .zero { stroke: var(--teal-400); stroke-width: 1.5; }
+  .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
+  .badge { fill: var(--surface); stroke: var(--ink); stroke-opacity: 0.45; }
+  .badge-n { font-family: var(--mono); font-size: 9.5px; fill: var(--ink); }
   .band { fill: var(--fill); fill-opacity: 0.16; }
   .gap { fill: none; stroke: var(--green-500); stroke-width: 1.5; stroke-linejoin: round; }
   .blind { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; stroke-linecap: round; }

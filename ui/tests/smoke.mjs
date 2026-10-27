@@ -104,8 +104,12 @@ try {
     check('no Change rate without a run', !(await hasChangeRate()));
   } else if (status.active.kind !== 'calibration') {
     const live = await (await fetch(`${URL}/api/runs/${status.active.run_id}`)).json();
-    if (live.curve?.params?.kind !== 'constant') check('no Change rate on a run that is not Constant', !(await hasChangeRate()));
-    else console.log(`skip  no Change rate check: run ${status.active.run_id} is Constant`);
+    // The button exists only where the daemon gives bounds: a Constant run, or
+    // another curve once it is in its hold (2026-10-27). Status `rate_bounds`
+    // present iff the button is.
+    const bounded = Array.isArray(status.active.rate_bounds);
+    const constant = live.curve?.params?.kind === 'constant';
+    check('Change rate only on a Constant run or a run in its hold', (await hasChangeRate()) === bounded && (!bounded || constant || !!status.active.curve_done));
   }
 
   if (!idle) {
@@ -196,7 +200,17 @@ try {
       // a run whose rate never changed asks nothing on Run again (2026-10-22)
       const openId = await js(`document.querySelector('.modal.detail .rid')?.textContent.replace('#', '')`);
       const opened = await (await fetch(`${URL}/api/runs/${openId}`)).json();
-      const changed = (opened.setpoint_changes ?? []).length > 0;
+      // only a Constant run that changed asks (a hold change on another curve is not its shape)
+      const changed = opened.curve?.params?.kind === 'constant' && (opened.setpoint_changes ?? []).length > 0;
+      // the feed written off at rate changes is said in the Regulation fold, only when there was some
+      const tracking = await fetch(`${URL}/api/runs/${openId}/tracking`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (tracking) {
+        const written = (tracking.resets ?? []).reduce((a, r) => a + r[1], 0);
+        await js(`(() => { const d = [...document.querySelectorAll('.modal.detail details.fold')].find((x) => x.querySelector('.lbl')?.textContent.trim() === 'Regulation'); if (d) d.open = true; return true; })()`);
+        await sleep(200);
+        const line = await js(`[...document.querySelectorAll('.modal.detail details.fold dt')].some((t) => t.textContent.trim() === 'Written off at rate changes')`);
+        check(`the Regulation fold ${written > 0 ? 'says' : 'does not say'} what rate changes wrote off`, line === written > 0, `written ${written}`);
+      }
       if (canReplay && !changed) {
         await click('button', 'Run again');
         await sleep(400);
