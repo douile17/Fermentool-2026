@@ -42,7 +42,7 @@ pub mod reg {
 pub mod limits {
     /// Minimum settable motor speed (rpm).
     pub const RPM_MIN: f64 = 0.1;
-    // No maximum here: it is the pump's own `PumpTarget::max_rpm`.
+    // No maximum here: it is the model's own [`PumpModel::max_rpm`](super::PumpModel::max_rpm).
     /// Lowest flow rate any model takes (ml/min), the LabQ's: a curve may go
     /// down to it. Each model's own floor is [`PumpModel::flow_min`](super::PumpModel::flow_min).
     pub const FLOW_MIN: f64 = 0.0;
@@ -248,12 +248,33 @@ impl PumpModel {
         }
     }
 
-    /// The maximum speed assumed when the operator does not set one (rpm).
-    pub fn default_max_rpm(self) -> f64 {
+    /// The pump's top speed (rpm), fixed per model: the bench's LabV is a
+    /// LabV1-II, sold as 0.1..150 rpm (its protocol, common to the range,
+    /// says 600). Another variant (LabV3 350, LabV6 600) is a code change.
+    pub fn max_rpm(self) -> f64 {
         match self {
             PumpModel::LabQ => 350.0,
             PumpModel::LabV => 150.0,
             PumpModel::PdsII => 600.0,
+        }
+    }
+
+    /// The finest speed step the pump keeps (rpm). LabV and PDS II checked on
+    /// the bench (2026-10-26): 68.39 and 30.07 rpm typed are kept as is.
+    pub fn rpm_step(self) -> f64 {
+        match self {
+            PumpModel::LabQ => 0.1,
+            PumpModel::LabV | PumpModel::PdsII => 0.01,
+        }
+    }
+
+    /// The finest flow step the pump keeps (ml/min): the LabQ shows 3
+    /// decimals; the LabV's manual says 0.01 ml/min, the PDS II checked on
+    /// the bench.
+    pub fn flow_step(self) -> f64 {
+        match self {
+            PumpModel::LabQ => 0.001,
+            PumpModel::LabV | PumpModel::PdsII => 0.01,
         }
     }
 
@@ -263,14 +284,6 @@ impl PumpModel {
         match self {
             PumpModel::LabQ => 0.0,
             PumpModel::LabV | PumpModel::PdsII => 0.1,
-        }
-    }
-
-    /// The highest `max_rpm` an operator may configure (rpm).
-    pub fn max_rpm_ceiling(self) -> f64 {
-        match self {
-            PumpModel::LabQ => 350.0,
-            PumpModel::LabV | PumpModel::PdsII => 600.0,
         }
     }
 
@@ -372,22 +385,22 @@ pub struct RegisterMap {
     pub mode: Option<u16>,
 }
 
-/// Which pump a [`Pump`] talks to: its address, kind and top speed.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Which pump a [`Pump`] talks to: its address and kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PumpTarget {
     pub address: u8,
     pub kind: PumpKind,
-    pub max_rpm: f64,
 }
 
 impl PumpTarget {
-    /// A LabQ at `address`, limited to 350 rpm.
+    /// A LabQ at `address`.
     pub fn labq(address: u8) -> PumpTarget {
-        PumpTarget {
-            address,
-            kind: PumpKind::LabQ,
-            max_rpm: PumpModel::LabQ.default_max_rpm(),
-        }
+        PumpTarget { address, kind: PumpKind::LabQ }
+    }
+
+    /// The pump's top speed (rpm), its model's.
+    pub fn max_rpm(&self) -> f64 {
+        self.kind.model().max_rpm()
     }
 }
 
@@ -679,7 +692,7 @@ impl<T: Transport> PumpTransport for Pump<T> {
     }
 
     fn set_speed_rpm(&mut self, rpm: f32) -> Result<(), PumpError> {
-        let max = self.target.max_rpm;
+        let max = self.target.max_rpm();
         if !(limits::RPM_MIN..=max).contains(&(rpm as f64)) {
             return Err(PumpError::OutOfRange(format!(
                 "motor speed must be 0.1..={max} rpm"
@@ -1417,8 +1430,15 @@ mod tests {
             assert_eq!(PumpModel::parse(m.as_str()), Some(m));
         }
         assert_eq!(PumpModel::parse("nope"), None);
-        assert_eq!(PumpModel::LabV.default_max_rpm(), 150.0);
-        assert_eq!(PumpModel::PdsII.max_rpm_ceiling(), 600.0);
+        assert_eq!(PumpModel::LabQ.max_rpm(), 350.0);
+        assert_eq!(PumpModel::LabV.max_rpm(), 150.0);
+        assert_eq!(PumpModel::PdsII.max_rpm(), 600.0);
+        assert_eq!(PumpModel::LabQ.rpm_step(), 0.1);
+        assert_eq!(PumpModel::LabV.rpm_step(), 0.01);
+        assert_eq!(PumpModel::PdsII.rpm_step(), 0.01);
+        assert_eq!(PumpModel::LabQ.flow_step(), 0.001);
+        assert_eq!(PumpModel::LabV.flow_step(), 0.01);
+        assert_eq!(PumpModel::PdsII.flow_step(), 0.01);
         assert_eq!(PumpModel::LabQ.max_address(), 247);
         assert_eq!(PumpModel::PdsII.max_address(), 32);
         assert_eq!(PumpModel::PdsII.label(), "PDS II");
@@ -1440,7 +1460,7 @@ mod tests {
 
     #[test]
     fn a_labv_target_writes_the_labv_registers() {
-        let target = PumpTarget { address: 4, kind: PumpKind::LabV, max_rpm: 150.0 };
+        let target = PumpTarget { address: 4, kind: PumpKind::LabV };
         let mut p = Pump::with_target(SimPump::new(4), target);
         p.start().unwrap();
         assert_eq!(p.transport().reg(1008), 1);
@@ -1453,7 +1473,7 @@ mod tests {
     #[test]
     fn a_pds2_head_is_driven_at_its_own_registers() {
         let kind = PumpKind::new(PumpModel::PdsII, 2).unwrap();
-        let target = PumpTarget { address: 5, kind, max_rpm: 600.0 };
+        let target = PumpTarget { address: 5, kind };
         let mut p = Pump::with_target(SimPump::new(5), target);
         p.start().unwrap();
         p.set_speed_rpm(321.5).unwrap();
@@ -1464,7 +1484,7 @@ mod tests {
 
     #[test]
     fn speed_over_the_target_max_is_refused() {
-        let target = PumpTarget { address: 4, kind: PumpKind::LabV, max_rpm: 150.0 };
+        let target = PumpTarget { address: 4, kind: PumpKind::LabV };
         let mut p = Pump::with_target(SimPump::new(4), target);
         assert!(matches!(p.set_speed_rpm(150.1), Err(PumpError::OutOfRange(_))));
         p.set_speed_rpm(150.0).unwrap();
@@ -1481,7 +1501,7 @@ mod tests {
         let mut q = Pump::new(SimPump::new(1), 1);
         q.set_flow_ml_min(0.0).unwrap();
         for kind in [PumpKind::LabV, PumpKind::PdsII { head: 2 }] {
-            let target = PumpTarget { address: 4, kind, max_rpm: 150.0 };
+            let target = PumpTarget { address: 4, kind };
             let mut sim = SimPump::new(4);
             sim.strict = Some(kind.model());
             let mut p = Pump::with_target(sim, target);
@@ -1505,7 +1525,7 @@ mod tests {
         assert_eq!(labq.transport().transactions, 0);
 
         let kind = PumpKind::new(PumpModel::PdsII, 2).unwrap();
-        let target = PumpTarget { address: 3, kind, max_rpm: 600.0 };
+        let target = PumpTarget { address: 3, kind };
         let mut p = Pump::with_target(SimPump::new(3), target);
         p.transport_mut().set_reg(2005, 1);
         p.transport_mut().set_reg(2003, 1);
@@ -1537,7 +1557,7 @@ mod tests {
     #[test]
     fn sim_faults_apply_to_a_pds2_setpoint() {
         let kind = PumpKind::PdsII { head: 1 };
-        let target = PumpTarget { address: 1, kind, max_rpm: 600.0 };
+        let target = PumpTarget { address: 1, kind };
         let mut p = Pump::with_target(SimPump::new(1), target);
         p.transport_mut().reject_setpoint_writes = true;
         assert!(matches!(
@@ -1553,7 +1573,7 @@ mod tests {
     #[test]
     fn with_target_of_restores_the_own_target() {
         let own = PumpTarget::labq(1);
-        let other = PumpTarget { address: 2, kind: PumpKind::LabV, max_rpm: 150.0 };
+        let other = PumpTarget { address: 2, kind: PumpKind::LabV };
         let mut p = Pump::with_target(SimBus::new(), own);
         p.with_target_of(other, |p| p.start()).unwrap();
         assert_eq!(p.target(), own);
@@ -1575,7 +1595,7 @@ mod tests {
     #[test]
     fn a_strict_pds_refuses_speed_outside_transferring() {
         let kind = PumpKind::PdsII { head: 1 };
-        let target = PumpTarget { address: 1, kind, max_rpm: 600.0 };
+        let target = PumpTarget { address: 1, kind };
         let mut sim = SimPump::new(1);
         sim.strict = Some(PumpModel::PdsII);
         sim.set_reg(1005, 1);
@@ -1591,7 +1611,7 @@ mod tests {
 
     #[test]
     fn a_strict_labv_refuses_speed_outside_transferring_and_undocumented_registers() {
-        let target = PumpTarget { address: 1, kind: PumpKind::LabV, max_rpm: 150.0 };
+        let target = PumpTarget { address: 1, kind: PumpKind::LabV };
         let mut sim = SimPump::new(1);
         sim.strict = Some(PumpModel::LabV);
         sim.set_reg(1020, 2);
@@ -1642,13 +1662,13 @@ mod tests {
         sim.logical_heads.insert(2);
         let mut p = Pump::with_target(
             sim,
-            PumpTarget { address: 1, kind: PumpKind::PdsII { head: 2 }, max_rpm: 600.0 },
+            PumpTarget { address: 1, kind: PumpKind::PdsII { head: 2 } },
         );
         assert!(matches!(
             p.read_speed_rpm(),
             Err(PumpError::Transport(TransportError::Timeout))
         ));
-        let target1 = PumpTarget { address: 1, kind: PumpKind::PdsII { head: 1 }, max_rpm: 600.0 };
+        let target1 = PumpTarget { address: 1, kind: PumpKind::PdsII { head: 1 } };
         p.with_target_of(target1, |p| p.read_speed_rpm()).unwrap();
     }
 

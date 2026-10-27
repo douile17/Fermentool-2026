@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedCameBack, feedLocked, feedResponding, headOf, refillKindLocked, lineState, maxRpmSetting, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump } from './pumps.js';
+import { feedCameBack, feedLocked, feedResponding, headOf, refillKindLocked, lineState, lineUp, needsReconnect, notAnsweringHint, pingDelayMs, pingWanted, pumpProblem, pumpTone, MODELS, modelOf, samePump, setpointStep } from './pumps.js';
 
 const up = { serial_ok: true, simulator: false, transport: 'COM8', pump_confirmed: true, write_fails: 0 };
 
@@ -71,8 +71,20 @@ describe('refill pump ping', () => {
 describe('models', () => {
   it('lists the three pumps with their limits', () => {
     expect(MODELS.map((m) => m.id)).toEqual(['labq', 'labv', 'pds2']);
-    expect(modelOf('labv')).toMatchObject({ label: 'LabV', maxRpm: 150, ceiling: 600, maxAddress: 32 });
+    expect(modelOf('labq')).toMatchObject({ label: 'LabQ', maxRpm: 350, maxAddress: 247, rpmStep: 0.1, flowStep: 0.001 });
+    expect(modelOf('labv')).toMatchObject({ label: 'LabV', maxRpm: 150, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 });
+    expect(modelOf('pds2')).toMatchObject({ label: 'PDS II', maxRpm: 600, maxAddress: 32, rpmStep: 0.01, flowStep: 0.01 });
     expect(modelOf('nope').id).toBe('labq');
+  });
+});
+
+describe('setpointStep', () => {
+  it('is the model step in the run unit', () => {
+    expect(setpointStep('labv', 'rpm')).toBe(0.01);
+    expect(setpointStep('pds2', 'ml_min')).toBe(0.01);
+    expect(setpointStep('labq', 'rpm')).toBe(0.1);
+    expect(setpointStep('labq', 'ml_min')).toBe(0.01);
+    expect(setpointStep(undefined, 'rpm')).toBe(0.1);
   });
 });
 
@@ -87,12 +99,9 @@ describe('samePump', () => {
 
 describe('pumpProblem', () => {
   it('follows the model', () => {
-    expect(pumpProblem({ model: 'labq', address: 200, maxRpm: null })).toBeNull();
+    expect(pumpProblem({ model: 'labq', address: 200 })).toBeNull();
     expect(pumpProblem({ model: 'labv', address: 33 })).toMatch(/1 to 32/);
     expect(pumpProblem({ model: 'pds2', address: 3, head: 9 })).toMatch(/1 to 8/);
-    expect(pumpProblem({ model: 'labq', address: 1, maxRpm: 400 })).toMatch(/0\.1 and 350/);
-    expect(pumpProblem({ model: 'labv', address: 1, maxRpm: 400 })).toBeNull();
-    expect(pumpProblem({ model: 'labv', address: 1, maxRpm: 700 })).toMatch(/600/);
   });
 });
 
@@ -105,27 +114,12 @@ describe('notAnsweringHint', () => {
 });
 
 describe('needsReconnect, pump model', () => {
-  const saved = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1, feedMaxRpm: null };
-  const now = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1, feedMaxRpm: null };
-  it('also when the feed model, head or max rpm changed', () => {
+  const saved = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1 };
+  const now = { path: 'COM8', baud: 9600, feedAddress: 1, feedModel: 'labq', feedHead: 1 };
+  it('also when the feed model or head changed', () => {
     expect(needsReconnect(saved, now)).toBe(false);
     expect(needsReconnect(saved, { ...now, feedModel: 'labv' })).toBe(true);
     expect(needsReconnect(saved, { ...now, feedHead: 2 })).toBe(true);
-    expect(needsReconnect(saved, { ...now, feedMaxRpm: 200 })).toBe(true);
-    expect(needsReconnect(saved, { ...now, feedMaxRpm: '' })).toBe(false);
-  });
-});
-
-describe('maxRpmSetting', () => {
-  it('keeps the model default as null, so it follows the model', () => {
-    expect(maxRpmSetting('labq', 350)).toBe(null);
-    expect(maxRpmSetting('labv', '150')).toBe(null);
-    expect(maxRpmSetting('pds2', '')).toBe(null);
-    expect(maxRpmSetting('labq', null)).toBe(null);
-  });
-  it('keeps a speed typed by hand', () => {
-    expect(maxRpmSetting('labv', '120')).toBe(120);
-    expect(maxRpmSetting('pds2', 350)).toBe(350);
   });
 });
 

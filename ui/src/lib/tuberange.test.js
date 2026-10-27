@@ -67,9 +67,10 @@ describe('maxRpm', () => {
 describe('rpmCurveProblem', () => {
   it('an rpm curve over the pump max is refused before Start, naming both figures', () => {
     expect(rpmCurveProblem({ peak: 200, maxRpm: 150, label: 'LabV' })).toBe(
-      'The curve asks up to 200 rpm; this LabV goes to 150 rpm (Settings > Pumps).',
+      'The curve asks up to 200 rpm; this LabV goes to 150 rpm.',
     );
-    expect(rpmCurveProblem({ peak: 150.04, maxRpm: 150, label: 'LabV' })).toMatch(/150 rpm; this LabV/);
+    // To the hundredth, as the pump's step: 150.04 is over 150, said as such.
+    expect(rpmCurveProblem({ peak: 150.04, maxRpm: 150, label: 'LabV' })).toMatch(/150\.04 rpm; this LabV/);
   });
   it('up to the max exactly is fine', () => {
     expect(rpmCurveProblem({ peak: 150, maxRpm: 150, label: 'LabV' })).toBeNull();

@@ -5,7 +5,7 @@
   import { mlPerRpmOf, tubeRange, curveFit, rpmCurveProblem } from '../lib/tuberange.js';
   import { canStartRun } from '../lib/link.js';
   import { forFeedPump } from '../lib/calibrations.js';
-  import { modelOf } from '../lib/pumps.js';
+  import { modelOf, setpointStep } from '../lib/pumps.js';
   import { radioKeys, rovingTab } from '../lib/radio.js';
   import { kg, refillAsked, refillOn, refillPlan, refillToChoose } from '../lib/refill.js';
   import Icon from '../components/Icon.svelte';
@@ -180,6 +180,8 @@
 
   const unit = $derived(unitFor(f.control_var));
   const pumpMaxRpm = $derived(app.status?.pump_max_rpm ?? 350);
+  // 0.01 on a LabV or a PDS II, which keep hundredths
+  const valueStep = $derived(setpointStep(app.status?.pump_model, f.control_var));
   // An rpm curve is not flattened at the pump's max: the preview shows what
   // was asked, the daemon refuses a peak over it and `rpmOver` says so first.
   const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : { ...RPM_LIMITS, max: FLOW_LIMITS.max });
@@ -629,15 +631,15 @@
           <div class="row">
             {#if f.kind === 'constant'}
               <label class="field num-f"><span>Speed, {unit}</span>
-                <input type="number" step="0.1" bind:value={f.value} />
+                <input type="number" step={valueStep} bind:value={f.value} />
               </label>
             {:else}
               <label class="field num-f"><span>Start, {unit}</span>
-                <input type="number" step="0.1" bind:value={f.start} />
+                <input type="number" step={valueStep} bind:value={f.start} />
               </label>
               {#if !(f.kind === 'exponential' && f.mode === 'physio')}
                 <label class="field num-f"><span>End, {unit}</span>
-                  <input type="number" step="0.1" bind:value={f.end} />
+                  <input type="number" step={valueStep} bind:value={f.end} />
                 </label>
               {/if}
             {/if}

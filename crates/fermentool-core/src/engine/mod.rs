@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use fermentool_curves::CurveSpec;
 use fermentool_modbus::{
-    limits, PduError, Pump, PumpError, PumpKind, PumpTarget, PumpTransport, Transport, TransportError,
+    limits, PduError, Pump, PumpError, PumpKind, PumpModel, PumpTarget, PumpTransport, Transport,
+    TransportError,
 };
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -443,8 +444,12 @@ pub struct EngineStatus {
     pub pump_model: &'static str,
     /// The feed pump's head, a PDS II only.
     pub pump_head: Option<u8>,
-    /// The feed pump's top speed (rpm): curves and setpoints stay under it.
+    /// The feed pump's top speed (rpm), its model's: curves and setpoints
+    /// stay under it.
     pub pump_max_rpm: f64,
+    /// The feed pump's setpoint steps, its model's ([`setpoint_grid`]).
+    pub pump_rpm_step: f64,
+    pub pump_flow_step: f64,
     /// Set when a run completed and the pump is still holding its final
     /// setpoint (it is not stopped on natural completion). Cleared by
     /// [`Engine::stop_pump`] or by starting another run.
@@ -1429,7 +1434,9 @@ impl<T: Transport> Engine<T> {
             transport: self.transport.label(),
             pump_model: self.feed.kind.model().as_str(),
             pump_head: self.feed.kind.head(),
-            pump_max_rpm: self.feed.max_rpm,
+            pump_max_rpm: self.feed.max_rpm(),
+            pump_rpm_step: self.feed.kind.model().rpm_step(),
+            pump_flow_step: self.feed.kind.model().flow_step(),
             holding: self.holding.clone(),
             serial_ok: !self.serial_lost,
             write_fails: self.write_fails,
@@ -1581,7 +1588,7 @@ impl<T: Transport> Engine<T> {
         // changes: a refused start leaves the trim state, a hold left by an
         // older daemon and the pump as they were.
         let (lo, hi) = match cfg.control_var {
-            ControlVar::Rpm => (limits::RPM_MIN, self.feed.max_rpm),
+            ControlVar::Rpm => (limits::RPM_MIN, self.feed.max_rpm()),
             ControlVar::MlMin => (limits::FLOW_MIN, limits::FLOW_MAX),
         };
         let mut spec = cfg.curve.clone();
@@ -1592,8 +1599,8 @@ impl<T: Transport> Engine<T> {
             let peak = spec.peak_value();
             if peak > hi + 1e-9 {
                 return Err(EngineError::Config(format!(
-                    "the curve asks up to {} rpm; this {} goes to {hi} rpm (Settings > Pumps)",
-                    (peak * 10.0).round() / 10.0,
+                    "the curve asks up to {} rpm; this {} goes to {hi} rpm",
+                    (peak * 100.0).round() / 100.0,
                     pump_name(self.feed.kind)
                 )));
             }
@@ -1622,7 +1629,7 @@ impl<T: Transport> Engine<T> {
         if let Some(r) = drive {
             // The tube's ceiling at full speed, without the trim's headroom.
             let peak = spec.peak_value();
-            let max = self.feed.max_rpm;
+            let max = self.feed.max_rpm();
             if peak / r > max {
                 return Err(EngineError::Config(format!(
                     "the curve asks up to {peak:.2} ml/min; this tube delivers at most {:.2} ml/min at {max} rpm",
@@ -1633,7 +1640,7 @@ impl<T: Transport> Engine<T> {
 
         let duration_s = spec.duration.as_secs() as i64;
         let c = if cfg.gravimetric_trim { seed_c } else { 1.0 };
-        let first = quantize(spec.value_at(Duration::ZERO) * c, drive_grid(cfg.control_var, drive));
+        let first = quantize(spec.value_at(Duration::ZERO) * c, drive_grid(cfg.control_var, drive, self.feed.kind.model()));
 
         // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
         // head-type / tubing-size registers are deliberately left untouched, see
@@ -1771,7 +1778,7 @@ impl<T: Transport> Engine<T> {
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
         let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
-        let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm));
+        let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm, self.feed.kind.model()));
         let seq = active.next_seq;
         active.next_seq += 1;
         if let Some(vol) = active.volume_added_ml {
@@ -1845,11 +1852,11 @@ impl<T: Transport> Engine<T> {
                     // Driven in rpm, the motor tops out at the pump's max: compare
                     // with what was written, not with a target beyond the tube.
                     let written = match (control_var, self.drive_ml_per_rpm) {
-                        (ControlVar::MlMin, Some(r)) => drive_rpm(target, r, self.feed.max_rpm) * r,
-                        (ControlVar::Rpm, _) => target.min(self.feed.max_rpm),
+                        (ControlVar::MlMin, Some(r)) => drive_rpm(target, r, self.feed.kind.model()) * r,
+                        (ControlVar::Rpm, _) => target.min(self.feed.max_rpm()),
                         _ => target,
                     };
-                    let tol = (5.0 * drive_grid(control_var, self.drive_ml_per_rpm)).max(0.04 * written.abs());
+                    let tol = (5.0 * drive_grid(control_var, self.drive_ml_per_rpm, self.feed.kind.model())).max(0.04 * written.abs());
                     if (actual - written).abs() > tol {
                         // A read answers with no register number: a late reply
                         // to an earlier read can land here. Read once more
@@ -2025,7 +2032,7 @@ impl<T: Transport> Engine<T> {
         }
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
         let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
-        let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm));
+        let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm, self.feed.kind.model()));
         if active.last_write_q == Some(target) {
             return Ok(false);
         }
@@ -3095,13 +3102,14 @@ impl<T: Transport> Engine<T> {
         // `trim_c` only applies if this run opted in, same gate as
         // `tick`/`apply_setpoint`.
         let c = if run.gravimetric_trim { self.trim_c } else { 1.0 };
-        // The curve was clamped to the pump's max at start; a max lowered
-        // since (another pump, a corrected figure) must not refuse a crash
+        // The curve was clamped to the pump's max at start. A run resumes
+        // only on the model it drove, so the max is the same, unless the
+        // model's figure changed in the code since: never refuse a crash
         // resume: cap it again, as `start_run` does. An ml/min run driven in
         // rpm needs nothing, `drive_rpm` caps at the pump's max.
         let mut spec = run.curve.clone();
-        if run.control_var == ControlVar::Rpm && spec.clamp_max > self.feed.max_rpm {
-            spec.clamp_max = self.feed.max_rpm;
+        if run.control_var == ControlVar::Rpm && spec.clamp_max > self.feed.max_rpm() {
+            spec.clamp_max = self.feed.max_rpm();
             spec.clamp_min = spec.clamp_min.min(spec.clamp_max);
             let _ = self.store.log_event(&NewEvent {
                 run_id: Some(run.id),
@@ -3110,13 +3118,13 @@ impl<T: Transport> Engine<T> {
                 kind: "max_rpm".into(),
                 detail: Some(format!(
                     "the curve is capped at {} rpm, the feed pump's max now",
-                    self.feed.max_rpm
+                    self.feed.max_rpm()
                 )),
             });
         }
         let target = quantize(
             spec.value_at(Duration::from_secs_f64(elapsed_s)) * c,
-            drive_grid(run.control_var, self.drive_ml_per_rpm),
+            drive_grid(run.control_var, self.drive_ml_per_rpm, self.feed.kind.model()),
         );
 
         self.log_crash_detected(run.id, now, elapsed_s, run.duration_s)?;
@@ -3160,7 +3168,7 @@ impl<T: Transport> Engine<T> {
         let volume_added_ml = if run.control_var == ControlVar::MlMin {
             let start = quantize(
                 run.curve.value_at(Duration::ZERO),
-                drive_grid(run.control_var, self.drive_ml_per_rpm),
+                drive_grid(run.control_var, self.drive_ml_per_rpm, self.feed.kind.model()),
             );
             let horizon = volume_horizon_s(run.kind, run.duration_s);
             Some(self.reconstruct_volume_ml(run.id, start, horizon, elapsed_s, target)?)
@@ -3362,7 +3370,7 @@ fn drive_write<T: Transport>(
 ) -> std::result::Result<(), PumpError> {
     match (control_var, drive) {
         (ControlVar::MlMin, Some(r)) => {
-            let rpm = drive_rpm(value, r, pump.target().max_rpm);
+            let rpm = drive_rpm(value, r, pump.target().kind.model());
             if rpm < limits::RPM_MIN - 1e-9 {
                 if !*paused {
                     pump.stop()?;
@@ -3395,14 +3403,14 @@ fn drive_write<T: Transport>(
             Ok(())
         }
         // The trim may ask past full speed: the pump stays at its max.
-        (ControlVar::Rpm, _) => pump.set_speed_rpm(value.min(pump.target().max_rpm) as f32),
+        (ControlVar::Rpm, _) => pump.set_speed_rpm(value.min(pump.target().max_rpm()) as f32),
     }
 }
 
-/// The rpm that delivers `ml_min` at `ml_per_rpm`, on the motor's 0.1 rpm
-/// step and within its range (`max_rpm`: the feed pump's top speed).
-fn drive_rpm(ml_min: f64, ml_per_rpm: f64, max_rpm: f64) -> f64 {
-    quantize(ml_min / ml_per_rpm, setpoint_grid(ControlVar::Rpm)).clamp(0.0, max_rpm)
+/// The rpm that delivers `ml_min` at `ml_per_rpm`, on the `model`'s rpm
+/// step and within its range (0..its max).
+fn drive_rpm(ml_min: f64, ml_per_rpm: f64, model: PumpModel) -> f64 {
+    quantize(ml_min / ml_per_rpm, setpoint_grid(ControlVar::Rpm, model)).clamp(0.0, model.max_rpm())
 }
 
 /// A pump as the operator knows it: "LabV", "PDS II head 2".
@@ -3430,7 +3438,7 @@ fn setpoint_error(
     feed: PumpTarget,
 ) -> EngineError {
     let (control_var, value) = match (control_var, drive) {
-        (ControlVar::MlMin, Some(r)) => (ControlVar::Rpm, drive_rpm(value, r, feed.max_rpm)),
+        (ControlVar::MlMin, Some(r)) => (ControlVar::Rpm, drive_rpm(value, r, feed.kind.model())),
         _ => (control_var, value),
     };
     match &e {
@@ -3458,25 +3466,28 @@ fn read_actual<T: Transport>(
     }
 }
 
-/// The pump's usable setpoint step for a control variable.
+/// The pump's usable setpoint step for a control variable, its model's
+/// ([`PumpModel::rpm_step`], [`PumpModel::flow_step`]): a finer value would
+/// only be rounded by the pump's firmware, and rewritten for nothing.
 ///
-/// `Rpm` snaps to the documented 0.1 rpm motor step. `MlMin` snaps to the pump's
-/// 3-decimal display resolution, its own firmware then collapses that onto a
-/// motor step, since Fermentool does not own the tube calibration and cannot do
-/// that conversion itself (see `docs/DESIGN.md`).
-fn setpoint_grid(control_var: ControlVar) -> f64 {
+/// LabQ: 0.1 rpm, and 0.001 ml/min, its display resolution (its firmware then
+/// collapses that onto a motor step, since Fermentool does not own the tube
+/// calibration and cannot do that conversion itself, see `docs/DESIGN.md`).
+/// LabV and PDS II: 0.01 rpm and 0.01 ml/min.
+fn setpoint_grid(control_var: ControlVar, model: PumpModel) -> f64 {
     match control_var {
-        ControlVar::Rpm => 0.1,
-        ControlVar::MlMin => 1e-3,
+        ControlVar::Rpm => model.rpm_step(),
+        ControlVar::MlMin => model.flow_step(),
     }
 }
 
 /// The setpoint step in the run's unit: a driven ml/min run moves by whole
-/// 0.1 rpm motor steps, so a new value is written only when the speed changes.
-fn drive_grid(control_var: ControlVar, drive: Option<f64>) -> f64 {
+/// rpm steps of the pump, so a new value is written only when the speed
+/// changes.
+fn drive_grid(control_var: ControlVar, drive: Option<f64>, model: PumpModel) -> f64 {
     match (control_var, drive) {
-        (ControlVar::MlMin, Some(r)) => setpoint_grid(ControlVar::Rpm) * r,
-        _ => setpoint_grid(control_var),
+        (ControlVar::MlMin, Some(r)) => setpoint_grid(ControlVar::Rpm, model) * r,
+        _ => setpoint_grid(control_var, model),
     }
 }
 
@@ -6100,8 +6111,13 @@ mod tests {
         assert!((quantize(8.06, 0.1) - 8.1).abs() < 1e-9);
         assert!((quantize(10.008_333, 1e-3) - 10.008).abs() < 1e-9);
         assert!((quantize(10.008_7, 1e-3) - 10.009).abs() < 1e-9);
-        assert_eq!(setpoint_grid(ControlVar::Rpm), 0.1);
-        assert_eq!(setpoint_grid(ControlVar::MlMin), 1e-3);
+        // A LabQ keeps today's grids exactly.
+        assert_eq!(setpoint_grid(ControlVar::Rpm, PumpModel::LabQ), 0.1);
+        assert_eq!(setpoint_grid(ControlVar::MlMin, PumpModel::LabQ), 1e-3);
+        for m in [PumpModel::LabV, PumpModel::PdsII] {
+            assert_eq!(setpoint_grid(ControlVar::Rpm, m), 0.01);
+            assert_eq!(setpoint_grid(ControlVar::MlMin, m), 0.01);
+        }
     }
 
     #[test]
@@ -6491,14 +6507,12 @@ mod tests {
 
     // --- Feed pump models (LabV, PDS II) ---------------------------------
 
-    use fermentool_modbus::{PumpKind, PumpModel, PumpTarget};
-
-    fn labv_target(max_rpm: f64) -> PumpTarget {
-        PumpTarget { address: 1, kind: PumpKind::LabV, max_rpm }
+    fn labv_target() -> PumpTarget {
+        PumpTarget { address: 1, kind: PumpKind::LabV }
     }
 
     fn pds_target(head: u8) -> PumpTarget {
-        PumpTarget { address: 1, kind: PumpKind::PdsII { head }, max_rpm: 600.0 }
+        PumpTarget { address: 1, kind: PumpKind::PdsII { head } }
     }
 
     fn strict(model: PumpModel) -> SimPump {
@@ -6533,7 +6547,7 @@ mod tests {
 
     #[test]
     fn a_labv_feed_run_writes_the_labv_registers() {
-        let mut e = engine_on(strict(PumpModel::LabV), labv_target(150.0), Store::open_in_memory().unwrap());
+        let mut e = engine_on(strict(PumpModel::LabV), labv_target(), Store::open_in_memory().unwrap());
         let cfg = RunConfig { curve: CurveSpec::linear(100.0, 100.0, Duration::from_secs(3600)), ..linear_cfg() };
         e.start_run(cfg, t0()).unwrap();
         let sim = e.pump.transport();
@@ -6553,7 +6567,7 @@ mod tests {
             ..linear_cfg()
         };
         // Measured on a LabQ, the feed pump is a LabV: refused, nothing started.
-        let mut e = engine_on(SimPump::new(1), labv_target(150.0), Store::open_in_memory().unwrap());
+        let mut e = engine_on(SimPump::new(1), labv_target(), Store::open_in_memory().unwrap());
         let cal = seed_calibration_on(&e.store, "labq", ControlVar::Rpm, 50.0, 600.0);
         let err = e.start_run(cfg_for(cal), t0()).unwrap_err();
         assert!(matches!(err, EngineError::CalibrationOtherPump { .. }), "{err:?}");
@@ -6586,13 +6600,13 @@ mod tests {
 
     #[test]
     fn a_curve_over_the_pump_max_is_refused() {
-        let mut e = engine_on(SimPump::new(1), labv_target(150.0), Store::open_in_memory().unwrap());
+        let mut e = engine_on(SimPump::new(1), labv_target(), Store::open_in_memory().unwrap());
         let cfg = RunConfig { curve: CurveSpec::linear(0.0, 200.0, Duration::from_secs(3600)), ..linear_cfg() };
         let err = e.start_run(cfg, t0()).unwrap_err();
         assert!(matches!(err, EngineError::Config(_)), "{err:?}");
         assert_eq!(
             err.to_string(),
-            "invalid run config: the curve asks up to 200 rpm; this LabV goes to 150 rpm (Settings > Pumps)"
+            "invalid run config: the curve asks up to 200 rpm; this LabV goes to 150 rpm"
         );
         assert!(e.status().active.is_none());
         assert!(e.store.list_runs(10).unwrap().is_empty(), "nothing recorded");
@@ -6629,7 +6643,7 @@ mod tests {
     #[test]
     fn an_ml_min_step_to_0_on_a_labv_stops_the_pump_and_starts_it_again() {
         // A LabV takes 0.1..99999 ml/min: 0 is no flow it accepts.
-        let mut e = engine_on(strict(PumpModel::LabV), labv_target(150.0), Store::open_in_memory().unwrap());
+        let mut e = engine_on(strict(PumpModel::LabV), labv_target(), Store::open_in_memory().unwrap());
         let cfg = RunConfig {
             control_var: ControlVar::MlMin,
             curve: step_curve(&[(0.0, 3.5), (600.0, 0.0), (1200.0, 2.0)]),
@@ -6671,7 +6685,7 @@ mod tests {
     #[test]
     fn a_trimmed_rpm_run_past_the_max_writes_the_max() {
         // A LabV at 150 rpm, a curve at 145, c = 1.1 asks 159.5.
-        let mut e = engine_on(strict(PumpModel::LabV), labv_target(150.0), Store::open_in_memory().unwrap());
+        let mut e = engine_on(strict(PumpModel::LabV), labv_target(), Store::open_in_memory().unwrap());
         let cal = seed_calibration_on(&e.store, "labv", ControlVar::Rpm, 50.0, 600.0);
         e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
         let cfg = RunConfig {
@@ -6744,7 +6758,7 @@ mod tests {
 
     #[test]
     fn a_labv_that_cannot_be_switched_says_so() {
-        let mut e = engine_on(strict(PumpModel::LabV), labv_target(150.0), Store::open_in_memory().unwrap());
+        let mut e = engine_on(strict(PumpModel::LabV), labv_target(), Store::open_in_memory().unwrap());
         e.pump.transport_mut().drop_next = 2; // the mode read and its retry
         let err = e.start_run(linear_cfg(), t0()).unwrap_err();
         assert!(matches!(err, EngineError::PumpMode(..)), "{err:?}");
@@ -6759,43 +6773,32 @@ mod tests {
         assert_eq!(e.pump.transport().transactions, 3);
     }
 
-    fn labq_max(max_rpm: f64) -> PumpTarget {
-        PumpTarget { max_rpm, ..PumpTarget::labq(1) }
-    }
-
     #[test]
-    fn a_max_lowered_since_the_crash_caps_the_resumed_rpm_run() {
-        let db = TempDb::new();
-        let id = {
-            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
-            let cfg = RunConfig { curve: CurveSpec::linear(300.0, 300.0, Duration::from_secs(3600)), ..linear_cfg() };
-            let id = a.start_run(cfg, t0()).unwrap();
-            a.tick(at(60)).unwrap();
-            id
-        };
-        let mut b = Engine::new(Pump::with_target(SimPump::new(1), labq_max(150.0)), db.store(), "test");
-        assert_eq!(b.resume(at(600), grace()).unwrap(), id);
-        assert!((b.pump.transport().speed_rpm() - 150.0).abs() < 1e-3);
-        let o = b.tick(at(601)).unwrap();
-        assert!(matches!(o, TickOutcome::Applied { written_ok: true, .. }), "{o:?}");
-        assert!((b.pump.transport().speed_rpm() - 150.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn a_max_lowered_since_the_crash_caps_a_resumed_driven_run() {
-        let db = TempDb::new();
-        {
-            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
-            let cal = seed_calibration(&a.store, ControlVar::Rpm, 50.0, 600.0);
-            // 2.4 ml/min per rpm: 600 ml/min is 250 rpm.
-            let spec = CurveSpec::linear(600.0, 600.0, Duration::from_secs(3600));
-            a.start_run(driven_cfg(cal, spec), t0()).unwrap();
-        }
-        let mut b = Engine::new(Pump::with_target(SimPump::new(1), labq_max(150.0)), db.store(), "test");
-        b.resume(at(600), grace()).unwrap();
-        assert!((b.pump.transport().speed_rpm() - 150.0).abs() < 1e-3);
-        let o = b.tick(at(601)).unwrap();
-        assert!(matches!(o, TickOutcome::Applied { written_ok: true, .. }), "{o:?}");
+    fn the_setpoint_grid_follows_the_model() {
+        let flat = |v: f64| CurveSpec::linear(v, v, Duration::from_secs(3600));
+        // LabV: 0.01 rpm, 0.01 ml/min.
+        let mut e = engine_on(SimPump::new(1), labv_target(), Store::open_in_memory().unwrap());
+        e.start_run(RunConfig { curve: flat(68.394), ..linear_cfg() }, t0()).unwrap();
+        let rpm = e.pump.transport().speed_rpm_of(PumpKind::LabV.map());
+        assert!((rpm - 68.39).abs() < 1e-4, "{rpm}");
+        let mut e = engine_on(SimPump::new(1), labv_target(), Store::open_in_memory().unwrap());
+        let cfg = RunConfig { control_var: ControlVar::MlMin, curve: flat(12.346), ..linear_cfg() };
+        e.start_run(cfg, t0()).unwrap();
+        let flow = e.pump.transport().flow_ml_min();
+        assert!((flow - 12.35).abs() < 1e-4, "{flow}");
+        // Driven in rpm, a LabV moves by 0.01 rpm.
+        assert!((drive_rpm(68.394 * 2.0, 2.0, PumpModel::LabV) - 68.39).abs() < 1e-9);
+        // A LabQ, as before: 0.1 rpm, 0.001 ml/min.
+        let mut e = engine();
+        e.start_run(RunConfig { curve: flat(68.394), ..linear_cfg() }, t0()).unwrap();
+        let rpm = e.pump.transport().speed_rpm();
+        assert!((rpm - 68.4).abs() < 1e-4, "{rpm}");
+        let mut e = engine();
+        let cfg = RunConfig { control_var: ControlVar::MlMin, curve: flat(12.3464), ..linear_cfg() };
+        e.start_run(cfg, t0()).unwrap();
+        let flow = e.pump.transport().flow_ml_min();
+        assert!((flow - 12.346).abs() < 1e-4, "{flow}");
+        assert!((drive_rpm(68.394 * 2.0, 2.0, PumpModel::LabQ) - 68.4).abs() < 1e-9);
     }
 
     #[test]
@@ -6808,7 +6811,7 @@ mod tests {
             id
         }; // crash, on a LabQ
         // The feed pump is a LabV now: refused, nothing sent, nothing journalled.
-        let mut b = engine_on(SimPump::new(1), labv_target(150.0), db.store());
+        let mut b = engine_on(SimPump::new(1), labv_target(), db.store());
         let err = b.resume(at(600), grace()).unwrap_err();
         assert!(matches!(err, EngineError::ResumeOtherPump { .. }), "{err:?}");
         assert_eq!(err.to_string(), "this run drove a LabQ, the feed pump is now a LabV");
@@ -6857,7 +6860,7 @@ mod tests {
         // Through a real refusal: a strict LabV that refuses the write.
         let mut sim = strict(PumpModel::LabV);
         sim.reject_setpoint_writes = true;
-        let mut e = engine_on(sim, labv_target(150.0), Store::open_in_memory().unwrap());
+        let mut e = engine_on(sim, labv_target(), Store::open_in_memory().unwrap());
         let cfg = RunConfig {
             control_var: ControlVar::MlMin,
             curve: CurveSpec::linear(10.0, 40.0, Duration::from_secs(3600)),
@@ -6874,7 +6877,9 @@ mod tests {
         assert_eq!(st.pump_model, "pds2");
         assert_eq!(st.pump_head, Some(2));
         assert_eq!(st.pump_max_rpm, 600.0);
+        assert_eq!((st.pump_rpm_step, st.pump_flow_step), (0.01, 0.01));
         let st = engine().status();
         assert_eq!((st.pump_model, st.pump_head, st.pump_max_rpm), ("labq", None, 350.0));
+        assert_eq!((st.pump_rpm_step, st.pump_flow_step), (0.1, 0.001));
     }
 }

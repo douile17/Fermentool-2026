@@ -180,8 +180,8 @@ pub struct PumpConfig {
     pub model: PumpModelCfg,
     /// PDS II only: the head (1..=8) this config drives. Ignored otherwise.
     pub head: u8,
-    /// Highest rpm the daemon will command. `None` = the model's default.
-    pub max_rpm: Option<f64>,
+    // No max rpm: it is the model's (`PumpModel::max_rpm`). A `max_rpm` left
+    // in an older config.toml is ignored.
 }
 
 /// The pump model as written in `config.toml` (the modbus crate has no serde).
@@ -207,16 +207,16 @@ impl PumpModelCfg {
 /// The pump a config describes. An invalid PDS II head (validation refuses
 /// it, but an unsanitised config can still carry one) falls back to head 1
 /// so this never panics.
-fn build_target(address: u8, model: PumpModelCfg, head: u8, max_rpm: f64) -> PumpTarget {
+fn build_target(address: u8, model: PumpModelCfg, head: u8) -> PumpTarget {
     let kind = PumpKind::new(model.model(), head)
         .or_else(|_| PumpKind::new(model.model(), 1))
         .unwrap_or(PumpKind::LabQ);
-    PumpTarget { address, kind, max_rpm }
+    PumpTarget { address, kind }
 }
 
-/// Problem with one pump's address, head and max rpm, if any. `who` is the
-/// prefix of the message, e.g. "the refill pump's".
-fn pump_problem(who: &str, address: u8, model: PumpModelCfg, head: u8, max_rpm: Option<f64>) -> Option<String> {
+/// Problem with one pump's address and head, if any. `who` is the prefix of
+/// the message, e.g. "the refill pump's".
+fn pump_problem(who: &str, address: u8, model: PumpModelCfg, head: u8) -> Option<String> {
     let m = model.model();
     if !(1..=m.max_address()).contains(&address) {
         return Some(format!("{who} MODBUS address must be 1..={} on a {}", m.max_address(), m.label()));
@@ -224,26 +224,19 @@ fn pump_problem(who: &str, address: u8, model: PumpModelCfg, head: u8, max_rpm: 
     if model == PumpModelCfg::Pds2 && !(1..=8).contains(&head) {
         return Some(format!("{who} PDS II head must be 1..=8"));
     }
-    if let Some(r) = max_rpm {
-        let ceiling = m.max_rpm_ceiling();
-        if !(r.is_finite() && (0.1..=ceiling).contains(&r)) {
-            return Some(format!("{who} max rpm must be 0.1..{ceiling} on a {}", m.label()));
-        }
-    }
     None
 }
 
 /// [`Config::sanitize`] for one pump: each field out of range for `model`
-/// back to its default (`default_address`, head 1, the model's own max),
-/// the model itself never touched. Returns `section.field` of each.
+/// back to its default (`default_address`, head 1), the model itself never
+/// touched. Returns `section.field` of each.
 fn sanitize_pump(
     section: &str,
-    fields: [&str; 3],
+    fields: [&str; 2],
     address: &mut u8,
     default_address: u8,
     model: PumpModelCfg,
     head: &mut u8,
-    max_rpm: &mut Option<f64>,
 ) -> Vec<String> {
     let m = model.model();
     let mut fixed = Vec::new();
@@ -254,10 +247,6 @@ fn sanitize_pump(
     if model == PumpModelCfg::Pds2 && !(1..=8).contains(head) {
         *head = 1;
         fixed.push(format!("{section}.{}", fields[1]));
-    }
-    if max_rpm.is_some_and(|r| !(r.is_finite() && (0.1..=m.max_rpm_ceiling()).contains(&r))) {
-        *max_rpm = None;
-        fixed.push(format!("{section}.{}", fields[2]));
     }
     fixed
 }
@@ -328,9 +317,7 @@ pub struct RefillConfig {
     pub pump_model: PumpModelCfg,
     /// PDS II only: the head (1..=8).
     pub pump_head: u8,
-    /// Highest rpm for the refill pump. `None` = the model's default.
-    pub pump_max_rpm: Option<f64>,
-    /// Speed the refill pump runs at, rpm (0.1..its max).
+    /// Speed the refill pump runs at, rpm (0.1..its model's max).
     pub speed_rpm: f64,
     /// The direction that pumps from the reservoir into the weighed bottle.
     /// No expected flow: the refill pump is not calibrated, a fill is judged
@@ -452,7 +439,6 @@ impl Default for RefillConfig {
             pump_address: 2,
             pump_model: PumpModelCfg::Labq,
             pump_head: 1,
-            pump_max_rpm: None,
             speed_rpm: 350.0,
             direction: Direction::Cw,
         }
@@ -464,12 +450,13 @@ impl Default for RefillConfig {
 pub const REFILL_RPM_MIN: f64 = 0.1;
 
 impl RefillConfig {
+    /// The refill pump's top speed, its model's.
     pub fn max_rpm(&self) -> f64 {
-        self.pump_max_rpm.unwrap_or_else(|| self.pump_model.model().default_max_rpm())
+        self.pump_model.model().max_rpm()
     }
 
     pub fn target(&self) -> PumpTarget {
-        build_target(self.pump_address, self.pump_model, self.pump_head, self.max_rpm())
+        build_target(self.pump_address, self.pump_model, self.pump_head)
     }
 
     /// What [`Config::validate`] refuses in `[refill]`.
@@ -479,7 +466,6 @@ impl RefillConfig {
             self.pump_address,
             self.pump_model,
             self.pump_head,
-            self.pump_max_rpm,
         );
         if pump.is_some() {
             return pump;
@@ -499,22 +485,23 @@ impl RefillConfig {
 }
 
 impl PumpConfig {
+    /// The feed pump's top speed, its model's.
     pub fn max_rpm(&self) -> f64 {
-        self.max_rpm.unwrap_or_else(|| self.model.model().default_max_rpm())
+        self.model.model().max_rpm()
     }
 
     pub fn target(&self) -> PumpTarget {
-        build_target(self.address, self.model, self.head, self.max_rpm())
+        build_target(self.address, self.model, self.head)
     }
 
     pub(crate) fn problem(&self) -> Option<String> {
-        pump_problem("the feed pump's", self.address, self.model, self.head, self.max_rpm)
+        pump_problem("the feed pump's", self.address, self.model, self.head)
     }
 }
 
 impl Default for PumpConfig {
     fn default() -> Self {
-        Self { address: 1, model: PumpModelCfg::Labq, head: 1, max_rpm: None }
+        Self { address: 1, model: PumpModelCfg::Labq, head: 1 }
     }
 }
 
@@ -661,12 +648,11 @@ impl Config {
         // would be driven through the wrong register map.
         for what in sanitize_pump(
             "pump",
-            ["address", "head", "max_rpm"],
+            ["address", "head"],
             &mut self.pump.address,
             d.pump.address,
             self.pump.model,
             &mut self.pump.head,
-            &mut self.pump.max_rpm,
         ) {
             note(&what);
         }
@@ -693,12 +679,11 @@ impl Config {
         }
         for what in sanitize_pump(
             "refill",
-            ["pump_address", "pump_head", "pump_max_rpm"],
+            ["pump_address", "pump_head"],
             &mut self.refill.pump_address,
             d.refill.pump_address,
             self.refill.pump_model,
             &mut self.refill.pump_head,
-            &mut self.refill.pump_max_rpm,
         ) {
             note(&what);
         }
@@ -784,16 +769,20 @@ mod tests {
     }
 
     #[test]
-    fn model_defaults_and_ceilings() {
+    fn max_rpm_is_the_model_s() {
         let mut c = Config::default();
         c.pump.model = PumpModelCfg::Labv;
         assert_eq!(c.pump.max_rpm(), 150.0);
         c.pump.model = PumpModelCfg::Pds2;
         assert_eq!(c.pump.max_rpm(), 600.0);
-        c.pump = pump_cfg(PumpModelCfg::Labq, 1);
-        c.pump.max_rpm = Some(400.0);
-        assert!(c.validate().is_err());
-        c.pump.model = PumpModelCfg::Labv;
+        c.refill.pump_model = PumpModelCfg::Labv;
+        assert_eq!(c.refill.max_rpm(), 150.0);
+        // A max_rpm left in an older config.toml is ignored, never applied.
+        let c = Config::from_toml(
+            "[pump]\naddress = 1\nmodel = \"labv\"\nmax_rpm = 100\n\n[refill]\npump_max_rpm = 50\n",
+        )
+        .unwrap();
+        assert_eq!((c.pump.max_rpm(), c.refill.max_rpm()), (150.0, 350.0));
         assert!(c.validate().is_ok());
     }
 
@@ -814,10 +803,10 @@ mod tests {
     #[test]
     fn sanitize_resets_the_bad_field_and_keeps_the_model() {
         let mut c = Config::default();
-        c.pump = PumpConfig { address: 3, model: PumpModelCfg::Pds2, head: 2, max_rpm: Some(700.0) };
-        assert_eq!(c.sanitize(), vec!["config.toml: pump.max_rpm out of range, default used".to_string()]);
+        c.pump = PumpConfig { address: 40, model: PumpModelCfg::Pds2, head: 2 };
+        assert_eq!(c.sanitize(), vec!["config.toml: pump.address out of range, default used".to_string()]);
         assert_eq!(c.pump.model, PumpModelCfg::Pds2);
-        assert_eq!((c.pump.address, c.pump.head, c.pump.max_rpm), (3, 2, None));
+        assert_eq!((c.pump.address, c.pump.head), (1, 2));
         assert!(c.validate().is_ok());
 
         // A LabV refill pump at 40 (over its 32): the address, not the model.
@@ -828,7 +817,7 @@ mod tests {
 
     #[test]
     fn same_pump_rule() {
-        let t = |m: PumpModelCfg, a: u8, h: u8| PumpConfig { address: a, model: m, head: h, max_rpm: None }.target();
+        let t = |m: PumpModelCfg, a: u8, h: u8| PumpConfig { address: a, model: m, head: h }.target();
         assert!(same_pump(&t(PumpModelCfg::Labq, 2, 1), &t(PumpModelCfg::Labq, 2, 1)));
         assert!(same_pump(&t(PumpModelCfg::Labv, 2, 1), &t(PumpModelCfg::Labq, 2, 1)));
         assert!(!same_pump(&t(PumpModelCfg::Pds2, 3, 1), &t(PumpModelCfg::Pds2, 3, 2)));

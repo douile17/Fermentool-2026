@@ -42,5 +42,5 @@ export function curveFit({ peak, mlPerRpm, trimLimitPct = null, maxRpm = DEFAULT
  */
 export function rpmCurveProblem({ peak, maxRpm = DEFAULT_MAX_RPM, label = 'pump' }) {
   if (!(peak > maxRpm + 1e-9)) return null;
-  return `The curve asks up to ${Math.round(peak * 10) / 10} rpm; this ${label} goes to ${maxRpm} rpm (Settings > Pumps).`;
+  return `The curve asks up to ${Math.round(peak * 100) / 100} rpm; this ${label} goes to ${maxRpm} rpm.`;
 }

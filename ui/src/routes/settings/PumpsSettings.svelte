@@ -11,7 +11,7 @@
   import { aboutRefillSpeed, pumpsProblem } from '../../lib/refill.js';
   import LinkHeader from './LinkHeader.svelte';
   import {
-    MODELS, modelOf, notAnsweringHint, maxRpmSetting, headOf, feedLocked, refillKindLocked,
+    MODELS, modelOf, notAnsweringHint, headOf, feedLocked, refillKindLocked,
     lineUp, lineState, pumpTone, feedResponding, needsReconnect, pingWanted, pingDelayMs, feedCameBack,
   } from '../../lib/pumps.js';
   import { radioKeys, rovingTab } from '../../lib/radio.js';
@@ -39,12 +39,10 @@
   let feedAddress = $state(1);
   let feedModel = $state('labq');
   let feedHead = $state(1);
-  let feedMax = $state(350);
   let allowSim = $state(false);
   let refillAddress = $state(2);
   let refillModel = $state('labq');
   let refillHead = $state(1);
-  let refillMax = $state(350);
   let speed = $state(350);
   let direction = $state('cw');
   let saved = $state(null);
@@ -71,33 +69,27 @@
     feedAddress = c.pump?.address ?? 1;
     feedModel = modelOf(c.pump?.model).id;
     feedHead = c.pump?.head ?? 1;
-    feedMax = c.pump?.max_rpm ?? modelOf(feedModel).maxRpm;
     refillAddress = c.refill?.pump_address ?? 2;
     refillModel = modelOf(c.refill?.pump_model).id;
     refillHead = c.refill?.pump_head ?? 1;
-    refillMax = c.refill?.pump_max_rpm ?? modelOf(refillModel).maxRpm;
     speed = c.refill?.speed_rpm ?? 350;
     direction = c.refill?.direction ?? 'cw';
     path = p === 'sim' || ports.some((x) => x.name === p) ? p : '__custom';
     custom = path === '__custom' ? p : '';
     saved = {
       path: p, baud: Number(baud), allowSim,
-      feedAddress: Number(feedAddress), feedModel, feedHead: headOf(feedModel, feedHead), feedMaxRpm: maxRpmSetting(feedModel, feedMax),
-      refillAddress: Number(refillAddress), refillModel, refillHead: headOf(refillModel, refillHead), refillMaxRpm: maxRpmSetting(refillModel, refillMax),
+      feedAddress: Number(feedAddress), feedModel, feedHead: headOf(feedModel, feedHead),
+      refillAddress: Number(refillAddress), refillModel, refillHead: headOf(refillModel, refillHead),
       speed: Number(speed), direction,
     };
   }
 
-  // A model picked: its max rpm comes with it (the field can be corrected by hand).
+  // A model picked: its max rpm and steps are the model's, nothing to set.
   function pickFeed(id) {
-    if (id === feedModel) return;
     feedModel = id;
-    feedMax = modelOf(id).maxRpm;
   }
   function pickRefill(id) {
-    if (id === refillModel) return;
     refillModel = id;
-    refillMax = modelOf(id).maxRpm;
   }
 
   function rescan() {
@@ -158,10 +150,10 @@
     lineState(s, { answering: [feedTone, refillTone].filter((t) => t === '').length, total: 2 }),
   );
 
-  const feedNow = $derived({ address: Number(feedAddress), model: feedModel, head: headOf(feedModel, feedHead), maxRpm: maxRpmSetting(feedModel, feedMax) });
-  const refillNow = $derived({ address: Number(refillAddress), model: refillModel, head: headOf(refillModel, refillHead), maxRpm: maxRpmSetting(refillModel, refillMax) });
+  const feedNow = $derived({ address: Number(feedAddress), model: feedModel, head: headOf(feedModel, feedHead) });
+  const refillNow = $derived({ address: Number(refillAddress), model: refillModel, head: headOf(refillModel, refillHead) });
   const now = $derived({
-    path: portPath, baud, feedAddress, feedModel: feedNow.model, feedHead: feedNow.head, feedMaxRpm: feedNow.maxRpm,
+    path: portPath, baud, feedAddress, feedModel: feedNow.model, feedHead: feedNow.head,
   });
   const cableChanged = $derived(needsReconnect(saved, now));
   const dirty = $derived(
@@ -171,12 +163,12 @@
         refillNow.address !== saved.refillAddress ||
         refillNow.model !== saved.refillModel ||
         refillNow.head !== saved.refillHead ||
-        refillNow.maxRpm !== saved.refillMaxRpm ||
         Number(speed) !== saved.speed ||
         direction !== saved.direction),
   );
-  // the refill speed's top follows the refill pump's model (or its max typed by hand)
-  const refillTop = $derived(refillNow.maxRpm ?? modelOf(refillModel).maxRpm);
+  // the refill speed's top and step follow the refill pump's model
+  const refillTop = $derived(modelOf(refillModel).maxRpm);
+  const refillStep = $derived(modelOf(refillModel).rpmStep);
 
   // the baud is config.toml's own (omitted: kept), the UI does not offer it
   async function reconnect() {
@@ -185,12 +177,11 @@
       pump_addr: feedNow.address || 1,
       pump_model: feedNow.model,
       pump_head: feedNow.head,
-      pump_max_rpm: feedNow.maxRpm,
     });
   }
 
   // One Save for the whole card: the cable is reconnected only if its port
-  // or the feed pump (address, model, head, max rpm) changed. A refused
+  // or the feed pump (address, model, head) changed. A refused
   // refill speed opens the Change panel, where its field is.
   async function save() {
     const p = pumpsProblem({ feed: feedNow, refill: refillNow, speedRpm: speed });
@@ -212,7 +203,6 @@
           pump_address: refillNow.address,
           pump_model: refillNow.model,
           pump_head: refillNow.head,
-          pump_max_rpm: refillNow.maxRpm,
           speed_rpm: Number(speed),
           direction,
         };
@@ -351,9 +341,6 @@
               </select>
             </label>
           {/if}
-          <label class="lbl maxrpm">Max rpm
-            <input type="number" min="0.1" max={modelOf(feedModel).ceiling} step="any" bind:value={feedMax} disabled={busy || feedFixed} />
-          </label>
         </div>
       </div>
       {#if feedTone === 'bad' && saved}
@@ -386,9 +373,6 @@
               </select>
             </label>
           {/if}
-          <label class="lbl maxrpm">Max rpm
-            <input type="number" min="0.1" max={modelOf(refillModel).ceiling} step="any" bind:value={refillMax} disabled={busy} />
-          </label>
         </div>
       </div>
       {#if refillTone === 'bad' && saved}
@@ -397,7 +381,7 @@
       {#if refillOpen}
         <div class="more">
           <label class="field"><span>Speed, rpm</span>
-            <input type="number" min="0.1" max={refillTop} step="1" bind:value={speed} />
+            <input type="number" min="0.1" max={refillTop} step={refillStep} bind:value={speed} />
           </label>
           <div class="field"><span>Direction</span>
             <div class="seg" role="radiogroup" aria-label="Refill pump direction" tabindex="-1" onkeydown={radioKeys}>
@@ -490,7 +474,6 @@
   .lbl { display: inline-flex; align-items: center; gap: var(--s-2); font-size: 12.5px; color: var(--muted); white-space: nowrap; }
   .lbl input, .lbl select { width: 64px; text-align: center; font-family: var(--mono); padding: 5px 6px; }
   .lbl select { width: auto; }
-  .maxrpm input { width: 76px; }
   /* wraps rather than running under the state at the row's end */
   .sum { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-3); font-size: 13px; color: var(--muted); min-width: 0; }
   .sum > span { white-space: nowrap; }

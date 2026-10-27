@@ -1077,15 +1077,8 @@ struct ReconnectReq {
     /// PDS II head, 1..=8; omitted = keep.
     #[serde(default)]
     pump_head: Option<u8>,
-    /// Top speed (rpm): omitted = keep, `null` = the model's default.
-    #[serde(default, deserialize_with = "present")]
-    pump_max_rpm: Option<Option<f64>>,
-}
-
-/// A field that is present, even as `null` (`Some(None)`), as opposed to
-/// omitted (`None`, through `#[serde(default)]`).
-fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<f64>>, D::Error> {
-    Option::<f64>::deserialize(d).map(Some)
+    // No max rpm: it is the model's. A `pump_max_rpm` sent by an older page
+    // is ignored.
 }
 
 /// Persist `serial.*` to `config.toml` and rebuild the live pump transport
@@ -1117,11 +1110,8 @@ async fn serial_reconnect(
     if let Some(h) = req.pump_head {
         cfg.pump.head = h;
     }
-    if let Some(r) = req.pump_max_rpm {
-        cfg.pump.max_rpm = r;
-    }
     // Only what a reconnect changes (the baud, the feed pump's address per
-    // model, head and max rpm), refused before anything changes. The rest
+    // model and head), refused before anything changes. The rest
     // of the config is PUT /api/config's business: a bad [notify] must not
     // stop the pump from connecting.
     if !SERIAL_BAUDS.contains(&cfg.serial.baud) {
@@ -1801,24 +1791,24 @@ mod tests {
         let cfgp = dir.join("config.toml");
         let mut st = test_state();
         st.config_path = Arc::new(cfgp.clone());
-        st.config.write().await.pump.max_rpm = Some(200.0);
         let app = router(st.clone());
 
         let res = app
             .clone()
             .oneshot(post_json(
                 "/api/serial/reconnect",
-                json!({ "pump_model": "labv", "pump_head": 1, "pump_max_rpm": null }),
+                json!({ "pump_model": "labv", "pump_head": 1 }),
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let written = std::fs::read_to_string(&cfgp).unwrap();
         assert!(written.contains("model = \"labv\""), "{written}");
-        assert_eq!(st.config.read().await.pump.max_rpm, None, "null: the model's default");
         let status = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
         assert_eq!(status["pump_model"], "labv", "{status}");
         assert_eq!(status["pump_max_rpm"], 150.0, "{status}");
+        assert_eq!(status["pump_rpm_step"], 0.01, "{status}");
+        assert_eq!(status["pump_flow_step"], 0.01, "{status}");
         assert!(status["pump_head"].is_null(), "{status}");
 
         // A LabV answers at 1..=32 only: refused, nothing changes.
@@ -1832,7 +1822,8 @@ mod tests {
         assert!(msg.contains("feed pump") && msg.contains("LabV"), "{msg}");
         assert_eq!(st.config.read().await.pump.address, 1);
 
-        // Omitted fields keep their value.
+        // Omitted fields keep their value; a max rpm sent by an older page
+        // is ignored: the max is the model's.
         let res = app
             .clone()
             .oneshot(post_json("/api/serial/reconnect", json!({ "pump_max_rpm": 120 })))
@@ -1840,7 +1831,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let cfg = st.config.read().await.clone();
-        assert_eq!((cfg.pump.model, cfg.pump.max_rpm), (PumpModelCfg::Labv, Some(120.0)));
+        assert_eq!((cfg.pump.model, cfg.pump.max_rpm()), (PumpModelCfg::Labv, 150.0));
 
         let res = app
             .oneshot(post_json("/api/serial/reconnect", json!({ "pump_model": "masterflex" })))

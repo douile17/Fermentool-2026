@@ -737,7 +737,7 @@ mod tests {
 
     /// The feed pump on head 1 of a strict PDS II at address 3.
     fn engine_on_pds() -> Engine<SimBus> {
-        let feed = PumpTarget { address: 3, kind: PumpKind::PdsII { head: 1 }, max_rpm: 600.0 };
+        let feed = PumpTarget { address: 3, kind: PumpKind::PdsII { head: 1 } };
         let mut bus = SimBus::new();
         bus.pump(3).strict = Some(PumpModel::PdsII);
         let mut e = Engine::new(Pump::with_target(bus, feed), Store::open_in_memory().unwrap(), "test");

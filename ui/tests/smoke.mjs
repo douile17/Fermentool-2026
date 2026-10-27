@@ -217,6 +217,10 @@ try {
   // PDS II choice; the cable is fixed at 9600 baud 8E1, no baud to pick.
   check('each pump has its photo and a LabQ, LabV, PDS II choice', await js(`(() => { const it = [...document.querySelectorAll('.pumps .item')]; return it.length === 2 && it.every((i) => { const g = i.querySelector('[role=radiogroup][aria-label$="pump model"]'); const r = g ? [...g.querySelectorAll('[role=radio]')].map((b) => b.textContent.trim()) : []; return !!i.querySelector('.pic img') && r.join(',') === 'LabQ,LabV,PDS II'; }); })()`));
   check('the cable says 9600 baud, no baud to pick', await js(`/9600 baud/.test(document.querySelector('.conn .bus')?.textContent ?? '') && ![...document.querySelectorAll('.settings-pane select')].some((s) => /baud/i.test(s.getAttribute('aria-label') ?? '') || [...s.options].some((o) => /baud/i.test(o.textContent)))`));
+  // Max rpm and steps are the model's (2026-10-26): no field to set them; the
+  // refill speed steps by its model's rpm step (0.1 on a LabQ, 0.01 else)
+  check('no max rpm field: the top speed is the model one', await js(`![...document.querySelectorAll('.pumps label')].some((l) => /max rpm/i.test(l.textContent))`));
+  check('the refill speed steps by its pump model', await js(`(() => { const m = [...document.querySelectorAll('.pumps [aria-label="Refill pump model"] [role=radio]')].find((b) => b.getAttribute('aria-checked') === 'true')?.textContent.trim(); const i = document.querySelector('.pumps .more input'); return !!m && !!i && Number(i.step) === (m === 'LabQ' ? 0.1 : 0.01); })()`));
   // PDS II on the refill row shows its Head; then left without Save: the saved model comes back
   const refillModel = `[...document.querySelectorAll('.pumps [aria-label="Refill pump model"] [role=radio]')]`;
   const savedRefill = await js(`${refillModel}.find((b) => b.getAttribute('aria-checked') === 'true')?.textContent.trim()`);

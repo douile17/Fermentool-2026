@@ -12,7 +12,7 @@
   import { get, post, del } from '../lib/api.js';
   import { num, dur, stamp, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { canStartRun } from '../lib/link.js';
-  import { modelOf } from '../lib/pumps.js';
+  import { modelOf, setpointStep } from '../lib/pumps.js';
   import ErrorText from '../components/ErrorText.svelte';
   import Hint from '../components/Hint.svelte';
   import PumpHead from '../components/PumpHead.svelte';
@@ -1128,7 +1128,7 @@
                 An ml/min run is driven in rpm with this tube's ml per rpm: the pump's head and
                 tubing table never come into it.
               </Hint>{/if}</span>
-              <input type="number" step="0.1" min="0" bind:value={d.setpoint} disabled={locked} placeholder="e.g. 100"
+              <input type="number" step={setpointStep(app.status?.pump_model, d.control_var)} min="0" bind:value={d.setpoint} disabled={locked} placeholder="e.g. 100"
                 class:missing={!(Number(d.setpoint) > 0)} onchange={() => { d.setpoint_set = true; persist(); }} />
             </label>
             <label class="field" id="cal-burst"><span>Each measurement lasts, min<Hint label="About the measurement time">

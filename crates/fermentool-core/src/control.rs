@@ -142,8 +142,11 @@ pub struct DaemonStatus {
     pub pump_model: &'static str,
     /// The feed pump's head, a PDS II only.
     pub pump_head: Option<u8>,
-    /// The feed pump's top speed (rpm).
+    /// The feed pump's top speed (rpm), its model's.
     pub pump_max_rpm: f64,
+    /// The feed pump's setpoint steps, its model's: rpm and ml/min.
+    pub pump_rpm_step: f64,
+    pub pump_flow_step: f64,
     /// Set when a run completed and the pump is still holding its final speed.
     pub holding: Option<HoldingStatus>,
     /// `false` while the serial link to the pump is lost (the daemon is
@@ -244,6 +247,8 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         pump_model: st.pump_model,
         pump_head: st.pump_head,
         pump_max_rpm: st.pump_max_rpm,
+        pump_rpm_step: st.pump_rpm_step,
+        pump_flow_step: st.pump_flow_step,
         holding: st.holding,
         serial_ok: st.serial_ok,
         write_fails: st.write_fails,

@@ -7,10 +7,10 @@ import { modelOf, pumpProblem, samePump } from './pumps.js';
 export const REFILL_RPM_MIN = 0.1;
 
 /** What the daemon would refuse in `[refill]`, as a sentence; null if fine.
- *  `feed` is the feed pump, `{ address, model, head }`; `maxRpm` the refill
- *  pump's own top speed. Mirrors `RefillConfig::problem` (config.rs) and the
- *  run-time clash check. */
-export function refillProblem({ address, model = 'labq', head = 1, speedRpm, maxRpm, feed }) {
+ *  `feed` is the feed pump, `{ address, model, head }`; the speed is bounded
+ *  by the refill pump model's top speed. Mirrors `RefillConfig::problem`
+ *  (config.rs) and the run-time clash check. */
+export function refillProblem({ address, model = 'labq', head = 1, speedRpm, feed }) {
   const m = modelOf(model);
   const a = Number(address);
   if (!Number.isInteger(a) || a < 1 || a > m.maxAddress) return `The refill pump's MODBUS address must be 1 to ${m.maxAddress}.`;
@@ -22,7 +22,7 @@ export function refillProblem({ address, model = 'labq', head = 1, speedRpm, max
     return m.id === 'pds2' && feed.model === 'pds2'
       ? `Head ${Number(head)} of address ${a} is the feed pump's: pick another head.`
       : `Address ${a} is the feed pump's: set another address in the refill pump's own menu, then here.`;
-  return refillSpeedProblem(speedRpm, maxRpm ?? m.maxRpm);
+  return refillSpeedProblem(speedRpm, m.maxRpm);
 }
 
 /** The refill speed against the refill pump's top speed `max`; null if fine. */
@@ -35,18 +35,17 @@ export function refillSpeedProblem(speedRpm, max) {
 const lower = (t) => t.charAt(0).toLowerCase() + t.slice(1);
 
 /** Settings > Pumps' check before Save, one sentence at a time: the feed
- *  pump, then the refill pump's own address, head and max rpm (a max of 0
- *  says so, not "between 0.1 and 0 rpm"), then the clash and its speed.
- *  `{ message, speed }`, `speed` when the refill speed is what is wrong (its
- *  field is in the Change panel, which then opens), or null. `feed` and
- *  `refill` are `{ address, model, head, maxRpm }`. */
+ *  pump, then the refill pump's own address and head, then the clash and
+ *  its speed. `{ message, speed }`, `speed` when the refill speed is what is
+ *  wrong (its field is in the Change panel, which then opens), or null.
+ *  `feed` and `refill` are `{ address, model, head }`. */
 export function pumpsProblem({ feed, refill, speedRpm }) {
   const f = pumpProblem(feed);
   if (f) return { message: `Feed pump: ${lower(f)}`, speed: false };
   const m = pumpProblem(refill);
   if (m) return { message: `Refill pump: ${lower(m)}`, speed: false };
   const r = refillProblem({ ...refill, speedRpm, feed: { address: feed.address, model: feed.model, head: feed.head } });
-  if (r) return { message: r, speed: r === refillSpeedProblem(speedRpm, refill.maxRpm ?? modelOf(refill.model).maxRpm) };
+  if (r) return { message: r, speed: r === refillSpeedProblem(speedRpm, modelOf(refill.model).maxRpm) };
   return null;
 }
 
