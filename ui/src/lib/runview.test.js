@@ -193,6 +193,23 @@ describe('holdBand', () => {
   });
 });
 
+describe('the held rate in the hold', () => {
+  const cycle = { phase: 'idle', halted: false, low_g: 4000, high_g: 5200 };
+  const nowMs = Date.parse('2026-10-22T14:30:00Z');
+  it('runState names the held rate after a change, the curve end value otherwise', () => {
+    const s = { active: { run_id: 1 } };
+    expect(runState(s, true, true).title).toBe('Curve done, holding its end value');
+    expect(runState(s, true, true, '2.500 ml/min')).toMatchObject({ word: 'Holding', title: 'Curve done, holding 2.500 ml/min' });
+    expect(runState(s, true, false, '2.500 ml/min').title).toBe('Running normally');
+  });
+  it('holdBand says it with no refill waiting, and with one', () => {
+    expect(holdBand({ cycle: null, inS: null, nowMs, holdS: 4800 }, '2.500 ml/min').next.sub).toBe('curve done 1 h 20 ago, holding 2.500 ml/min');
+    expect(holdBand({ cycle: null, inS: null, nowMs, holdS: 4800 }).next.sub).toBe('curve done 1 h 20 ago, pump still feeding');
+    const b = holdBand({ cycle, inS: 600, nowMs, holdS: 4800 }, '2.500 ml/min');
+    expect(b.detail).toBe('Done 1 h 20 ago, holding 2.500 ml/min. Stop records the run as completed.');
+  });
+});
+
 describe('refillMarkAt', () => {
   it('inside the curve, at its time', () => {
     expect(refillMarkAt({ t: 3600, label: 'refill 14:00' }, 7200)).toEqual({ t: 3600, label: 'refill 14:00', edge: false });

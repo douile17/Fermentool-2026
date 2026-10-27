@@ -129,8 +129,10 @@ export function refillDueInS({ cycle, weightG, ...flow }) {
  *  needs someone. tone: 'ok' (feeding) | 'fill' (the bottle being refilled)
  *  | 'warn' | 'bad' | 'idle'; the band takes its colour. `word` is the
  *  state in one word (the pill), `icon` the large picture beside it:
- *  'pump' | 'fill' | 'full' | 'bottle-warn' | 'alarm' | 'warn' | 'idle'. */
-export function runState(status, connected, inHold) {
+ *  'pump' | 'fill' | 'full' | 'bottle-warn' | 'alarm' | 'warn' | 'idle'.
+ *  `held`: the rate a change set in the hold, formatted ("2.500 ml/min"),
+ *  named in the hold's title instead of "its end value". */
+export function runState(status, connected, inHold, held = null) {
   const s = status ?? {};
   const c = s.trim_c != null ? `×${s.trim_c.toFixed(3)}` : 'its last value';
   const trimmed = !!s.active?.gravimetric_trim;
@@ -257,7 +259,7 @@ export function runState(status, connected, inHold) {
       tone: 'ok',
       word: 'Holding',
       icon: 'pump',
-      title: 'Curve done, holding its end value',
+      title: held ? `Curve done, holding ${held}` : 'Curve done, holding its end value',
       detail: 'Still regulated and recorded. Stopping now records the run as completed.',
     };
   return { tone: 'ok', word: 'Feeding', icon: 'pump', title: 'Running normally' };
@@ -317,10 +319,11 @@ const kgOf = (g) => `${(g / 1000).toFixed(2)} kg`;
  *  automatic refill goes on, so its time is what the band says next, and
  *  Stop moves into the line under the title; with none waiting, the band
  *  asks for Stop. `{ next, detail }`, `detail` null to keep runState's. */
-export function holdBand({ cycle, inS, nowMs, holdS }) {
+export function holdBand({ cycle, inS, nowMs, holdS }, held = null) {
   const nr = nextRefill({ cycle, inS, nowMs });
-  if (nr) return { next: nr, detail: `Done ${hm(holdS)} ago, the pump still feeds. Stop records the run as completed.` };
-  return { next: { what: 'Stop the run when you are done', sub: `curve done ${hm(holdS)} ago, pump still feeding` }, detail: null };
+  // `held`: the rate a change set in the hold, "2.500 ml/min" (null: the curve's end value)
+  if (nr) return { next: nr, detail: `Done ${hm(holdS)} ago, ${held ? `holding ${held}` : 'the pump still feeds'}. Stop records the run as completed.` };
+  return { next: { what: 'Stop the run when you are done', sub: `curve done ${hm(holdS)} ago, ${held ? `holding ${held}` : 'pump still feeding'}` }, detail: null };
 }
 
 /** The chart's refill mark: at its time inside the curve's span, or on the
