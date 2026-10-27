@@ -380,6 +380,38 @@ template only targets group chats), which is why ntfy is the default.
   `docs/notes-de-session-*.md` (latest: `2026-10-21`, its section 8 is the
   open list). User-facing changes: `CHANGELOG.md`.
 
+## RS-485 bus: one pump switched off silences the other (2026-10-23)
+
+Seen on this bench: refill pump (address 2) switched off, feed pump
+(address 1) on, and the feed pump stopped answering (`serial_lost` 09:46:54
+to 10:24:57, `serial_recovered` within seconds of address 2 back on). The
+user confirmed it either way round: switch off either pump and the bus
+goes silent. So the daemon cannot tell which pump was switched off: seen from the cable,
+both are silent. Hence the UI says "Pumps not answering" and blames neither
+(`lib/link.js`, `runview.js`); "Refill pump not answering" only while the
+feed pump still answers. **During
+a run, switching off the refill pump stops the feed following its curve**
+(the pump keeps its last setpoint).
+
+- Cabling: FTDI USB-RS485-WE, orange (A) and yellow (B) only, daisy-chained
+  USB → pump 1 → pump 2. No termination, no bias. The LabQ DB15 has no RS-485
+  ground (`docs/wiring.md`), so the black wire has nowhere to go: correct.
+- Likely cause (not measured): pump 2's unpowered transceiver loads A/B.
+- The user keeps the cabling as is for now. When it comes back:
+  1. Confirm first: pump 2 off **and** its cable unplugged from pump 1; the
+     feed pump answering confirms it. Optionally A-B idle voltage, pump 2 on
+     vs off.
+  2. Fix, preferred: an RS-485 hub with isolated ports, one pump per port, no
+     software change (still one COM port, addresses 1 and 2). Cheap trial:
+     external bias, ~680 Ω A to +5 V (red) and B to GND (black), cable side
+     only; helps only if pump 2 loads the line lightly. Two USB adapters (one
+     per pump) would need the refill pump to get its own port in the daemon
+     (today it rides the feed pump's transport, `Pump::with_address`).
+  3. Planned (user, 2026-10-23): move to an isolated RS-485 hub soon. Once
+     there, a silent pump can be named again (the distinction in `link.js`).
+- `docs/wiring.md` lists the FTDI USB-RS485-WE as an isolated adapter; as far
+  as known it is not galvanically isolated. To check and correct.
+
 ## Curve engine (`crates/fermentool-curves`)
 
 `CurveSpec::value_at(elapsed)` is the single entry point and is **pure in

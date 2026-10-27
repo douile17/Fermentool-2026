@@ -2,6 +2,17 @@
 
 ## Non publié (depuis 0.1.5)
 
+### Pompes muettes sur le câble partagé (23 octobre)
+
+- Quand le câble ne répond plus, la ligne en haut de page dit « Pumps not
+  answering » avec les adresses et le port, sans accuser une pompe : les deux
+  partagent le câble, et une pompe éteinte rend l'autre muette aussi, le
+  logiciel ne peut donc pas savoir laquelle. Elle rappelle de vérifier que
+  les deux sont allumées. Une pompe seule sur son câble reste « Pump not
+  answering » avec son adresse. Pendant un run avec remplissage automatique,
+  une pompe de remplissage muette alors que l'alimentation répond est dite
+  « Refill pump not answering » (orange : l'alimentation continue).
+
 ### History, calibration, remplissage (20 et 21 octobre)
 
 - Fiche d'un run dans History refaite : le nom et les dates d'abord, puis le
