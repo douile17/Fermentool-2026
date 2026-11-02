@@ -127,6 +127,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scale/connect", post(scale_connect))
         .route("/api/scale/disconnect", post(scale_disconnect))
         .route("/api/pump/stop", post(pump_stop))
+        .route("/api/pump/prime", post(pump_prime))
+        .route("/api/pump/prime/stop", post(pump_prime_stop))
         .route("/api/scale/refill_mode", post(scale_refill_mode))
         .route("/api/scale/refill_done", post(scale_refill_done))
         .route("/api/refill/test", post(refill_test))
@@ -751,6 +753,32 @@ async fn pump_stop(State(s): State<AppState>) -> ApiResult<Response> {
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "stopped": true })).into_response())
+}
+
+#[derive(Deserialize)]
+struct PrimeBody {
+    direction: crate::config::Direction,
+}
+
+/// Calibration: prime the feed line at the pump's top speed, `direction`
+/// (asked again the other way while priming, the pump turns around), until
+/// `/api/pump/prime/stop` or 5 min. Refused during a run.
+async fn pump_prime(State(s): State<AppState>, Json(b): Json<PrimeBody>) -> ApiResult<Response> {
+    s.control
+        .call(|reply| Command::PrimeStart(b.direction, reply))
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Detail)?;
+    Ok(Json(json!({ "priming": true, "max_s": crate::engine::PRIME_MAX.as_secs() })).into_response())
+}
+
+async fn pump_prime_stop(State(s): State<AppState>) -> ApiResult<Response> {
+    s.control
+        .call(Command::PrimeStop)
+        .await
+        .map_err(|_| ApiError::Down)?
+        .map_err(ApiError::Detail)?;
+    Ok(Json(json!({ "priming": false })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1815,6 +1843,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn priming_shows_in_the_status_until_stopped() {
+        let app = router(test_state());
+        let res = app.clone().oneshot(post_json("/api/pump/prime", json!({ "direction": "ccw" }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let st = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
+        assert_eq!(st["priming"]["direction"], "ccw");
+        assert_eq!(st["priming"]["max_s"], 300);
+        let res = app.clone().oneshot(post_json("/api/pump/prime/stop", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let st = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
+        assert!(st["priming"].is_null());
+        // nothing left to stop
+        let res = app.oneshot(post_json("/api/pump/prime/stop", json!({}))).await.unwrap();
+        assert!(res.status().is_client_error());
     }
 
     #[tokio::test]

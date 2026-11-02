@@ -41,8 +41,10 @@ use crate::trim;
 /// bus stays quiet on gentle curves.
 pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
+mod prime;
 mod refill;
 mod refill_cycle;
+pub use prime::{PrimingStatus, PRIME_MAX};
 pub use refill_cycle::{CycleStatus, RefillAlarm};
 pub use refill::{RefillStatus, TEST_RUN as REFILL_TEST_RUN};
 
@@ -519,6 +521,8 @@ pub struct EngineStatus {
     pub pump_address: u8,
     /// The configured port (`transport` says `"sim"` while it will not open).
     pub serial_port: String,
+    /// The feed line being primed (calibration), `None` otherwise.
+    pub priming: Option<PrimingStatus>,
 }
 
 /// A completed run whose final setpoint the pump is still holding.
@@ -786,6 +790,8 @@ pub struct Engine<T: Transport> {
     warnings: Vec<String>,
     /// The refill pump on the same line (`[refill]`).
     refill: refill::RefillLink,
+    /// The feed line being primed from the calibration, outside any run.
+    priming: Option<prime::Priming>,
 }
 
 /// Cap on `weight_buffer`'s length: a gravimetric run with no refill appends
@@ -1075,6 +1081,7 @@ impl<T: Transport> Engine<T> {
             stop_pending,
             warnings: Vec::new(),
             refill: refill::RefillLink::default(),
+            priming: None,
         }
     }
 
@@ -1496,6 +1503,7 @@ impl<T: Transport> Engine<T> {
             stop_pending: self.stop_pending.is_some(),
             warnings: self.warnings.clone(),
             refill: self.refill_status(),
+            priming: self.priming_status(),
             pump_address: self.pump.address(),
             serial_port: self.serial.path.clone(),
         }
@@ -1782,6 +1790,8 @@ impl<T: Transport> Engine<T> {
         let c = if cfg.gravimetric_trim { seed_c } else { 1.0 };
         let first = quantize(spec.value_at(Duration::ZERO) * c, drive_grid(cfg.control_var, drive, self.feed.kind.model()));
 
+        // The run takes the pump over from a line being primed.
+        self.prime_end_for(std::time::Instant::now(), now, "a run started");
         // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
         // head-type / tubing-size registers are deliberately left untouched, see
         // the note in migrations/0001_init.sql.
@@ -3739,7 +3749,7 @@ mod tests {
         t0() + SignedDuration::from_secs(secs)
     }
 
-    fn engine() -> Engine<SimPump> {
+    pub(super) fn engine() -> Engine<SimPump> {
         Engine::new(
             Pump::new(SimPump::new(1), 1),
             Store::open_in_memory().unwrap(),

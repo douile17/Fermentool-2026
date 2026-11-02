@@ -128,6 +128,10 @@ pub enum Command {
     RefillNow(oneshot::Sender<Result<(), String>>),
     /// "Stop refill": stop a refill, hold the automatic refill.
     RefillPause(oneshot::Sender<Result<(), String>>),
+    /// Calibration: prime the feed line at full speed this way (again the
+    /// other way: turn the pump around), until `PrimeStop` or 5 min.
+    PrimeStart(crate::config::Direction, oneshot::Sender<Result<(), ErrDetail>>),
+    PrimeStop(oneshot::Sender<Result<(), ErrDetail>>),
     /// Change the rate of the active Constant run; replies `(from, to)`.
     SetConstantRate(f64, oneshot::Sender<Result<(f64, f64), ErrDetail>>),
     Shutdown,
@@ -195,6 +199,8 @@ pub struct DaemonStatus {
     pub pump_address: u8,
     /// The configured port (`transport` says `"sim"` while it will not open).
     pub serial_port: String,
+    /// The feed line being primed (calibration), `None` otherwise.
+    pub priming: Option<crate::engine::PrimingStatus>,
 }
 
 /// Sending / receiving on the control channel failed, the thread is gone.
@@ -276,6 +282,7 @@ pub fn current_status<T: Transport>(engine: &Engine<T>, grace: Duration) -> Daem
         refill: st.refill,
         pump_address: st.pump_address,
         serial_port: st.serial_port,
+        priming: st.priming,
     }
 }
 
@@ -375,6 +382,18 @@ fn control_loop<T: Transport + SwapTransport>(
                     }
                     Some(_) => {}
                     None => run_epoch = None,
+                }
+
+                // Priming the feed line ends by itself at its limit.
+                if engine.prime_next_due().is_some_and(|due| Instant::now() >= due) {
+                    let changed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        engine.prime_service(Instant::now(), Timestamp::now())
+                    }))
+                    .unwrap_or(false);
+                    if changed {
+                        let _ = events.send(current_status(engine, grace));
+                    }
+                    return Step::Next;
                 }
 
                 // The refill pump: its Stop is the first frame on the line at
@@ -576,7 +595,7 @@ fn control_loop<T: Transport + SwapTransport>(
                         end.map_or(j, |e| e.min(j)).min(w).saturating_duration_since(Instant::now())
                     }
                     // Idle: wake for the link probe if one is scheduled, else just poll.
-                    _ => [next_probe, next_scale_probe, engine.refill_next_due()]
+                    _ => [next_probe, next_scale_probe, engine.refill_next_due(), engine.prime_next_due()]
                         .into_iter()
                         .flatten()
                         .min()
@@ -586,6 +605,7 @@ fn control_loop<T: Transport + SwapTransport>(
                 match rx.recv_timeout(wait) {
                     Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            engine.prime_end_for(Instant::now(), Timestamp::now(), "the daemon stopped");
                             engine.refill_shutdown()
                         }));
                         return Step::Stop;
@@ -1036,6 +1056,14 @@ fn handle<T: Transport + SwapTransport>(engine: &mut Engine<T>, cmd: Command, gr
         }
         Command::RefillTest(reply) => {
             let _ = reply.send(engine.refill_test(Instant::now()));
+            true
+        }
+        Command::PrimeStart(direction, reply) => {
+            let _ = reply.send(engine.prime_start(direction, Instant::now(), Timestamp::now()).map_err(|e| e.detail()));
+            true
+        }
+        Command::PrimeStop(reply) => {
+            let _ = reply.send(engine.prime_stop(Instant::now(), Timestamp::now()).map_err(|e| e.detail()));
             true
         }
         Command::RefillNow(reply) => {
