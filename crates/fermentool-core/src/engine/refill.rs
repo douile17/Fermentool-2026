@@ -64,6 +64,8 @@ pub(super) struct RefillLink {
     pub(super) stop_owed: bool,
     /// Stops not acknowledged in a row.
     pub(super) stop_fails: u32,
+    /// `alarm_refill_stop_failed` was raised for this streak of failed Stops.
+    pub(super) stop_failed_said: bool,
     /// The run's refill levels (`refill_cycle`), `None` outside such a run.
     pub(super) plan: Option<super::refill_cycle::Plan>,
     pub(super) phase: super::refill_cycle::Phase,
@@ -142,18 +144,21 @@ impl<T: Transport> Engine<T> {
     pub fn refill_change_refused(&self, cfg: &RefillConfig) -> Option<String> {
         let (old, new) = (self.refill.cfg.target(), cfg.target());
         let other_kind = self.refill.cfg.pump_model != cfg.pump_model || old.kind != new.kind;
-        if other_kind && self.refill.run {
+        // Another address is another pump too: moved mid-fill, the Stop went
+        // to the new one and the old one filled on (audit, 2 Nov 2026).
+        let moved = other_kind || old.address != new.address;
+        if moved && self.refill.run {
             return Some(
-                "Not during a run with automatic refill: the refill pump's model and head are locked until it stops."
+                "Not during a run with automatic refill: the refill pump's address, model and head are locked until it stops."
                     .into(),
             );
         }
         // A run that drove it is waiting to be resumed: it would resume on
         // another pump. Not a Stop still owed after a run ended: the new
         // model takes it (`set_refill`), and a wrong model is what made it fail.
-        if other_kind && self.refill.awaiting_resume {
+        if moved && self.refill.awaiting_resume {
             return Some(
-                "Not while a run with automatic refill is interrupted: the refill pump's model and head are locked until it is resumed or ended."
+                "Not while a run with automatic refill is interrupted: the refill pump's address, model and head are locked until it is resumed or ended."
                     .into(),
             );
         }
@@ -231,6 +236,7 @@ impl<T: Transport> Engine<T> {
             self.refill.stop_owed = false;
             self.refill.recovering = false;
             self.refill.stop_fails = 0;
+            self.refill.stop_failed_said = false;
         } else {
             self.refill.stop_fails = self.refill.stop_fails.saturating_add(1);
         }
@@ -341,6 +347,11 @@ impl<T: Transport> Engine<T> {
     /// The run ended (stopped, aborted, or discarded after a crash): a last
     /// Stop; one that does not get through is retried every minute.
     pub(super) fn refill_run_ended(&mut self, now: Instant) {
+        // Stopped mid-fill, the pump is running: a lost Stop is owed, sent
+        // again every second, not a minute later (~285 g at its top speed).
+        if self.refill_filling() {
+            self.refill.stop_owed = true;
+        }
         if self.refill.plan.is_some() {
             self.refill_plan_end();
         }
@@ -859,6 +870,7 @@ mod tests {
         b.refill_after_boot(t0);
         let labv = RefillConfig { pump_model: PumpModelCfg::Labv, speed_rpm: 100.0, ..at(2) };
         assert!(b.refill_change_refused(&labv).is_some(), "the check alone says it too");
+        assert!(b.refill_change_refused(&at(3)).is_some(), "another address is another pump");
         assert!(b.refill_change_refused(&RefillConfig { speed_rpm: 120.0, ..at(2) }).is_none());
         let err = b.set_refill(labv.clone(), t0).unwrap_err();
         assert!(err.contains("model and head are locked"), "{err}");

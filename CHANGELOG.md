@@ -2,6 +2,28 @@
 
 ## Non publié (depuis 0.1.5)
 
+### Audit du refill automatique (2 novembre)
+
+- L'adresse de la pompe de refill est verrouillée pendant un run avec
+  refill (et tant qu'un tel run attend d'être repris), comme son modèle et
+  sa tête. Changée pendant un remplissage, le Stop partait à la nouvelle
+  adresse et l'ancienne pompe continuait : 1,1 kg devenus 2,8 kg en essai.
+- Soulever la bouteille de la balance ne démarre plus la pompe de refill :
+  la première lecture (près de 0 g, sous le niveau bas) suffisait.
+- Un run arrêté en plein remplissage dont le Stop se perd le renvoie
+  chaque seconde, plus au bout d'une minute.
+- L'alarme « The refill pump does not stop » part toujours : les nouveaux
+  essais de la boucle de contrôle pouvaient faire sauter le compte.
+- Un refill dû dont la pompe ne démarre pas est notifié (« Refill due, the
+  refill pump did not start ») et sonne jusqu'au prochain démarrage :
+  sinon la bouteille se vidait sans message.
+- « Refill now » juste après un démarrage raté ne s'arrête plus dans la
+  seconde (le Stop encore dû l'arrêtait, puis une fausse alarme « dry »).
+- « Refill now » après un remplissage coupé par la balance compte un seul
+  refill, sans remplissage de plus derrière.
+- Coupé faute de montée, le remplissage ne fait plus sonner « the refill
+  pump keeps going a few minutes » à côté de l'alarme d'arrêt.
+
 ### Nouveaux pictogrammes (2 novembre)
 
 - Les icônes de l'interface (menu, réglages, boutons, sélecteur de tube)

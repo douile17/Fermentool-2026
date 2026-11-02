@@ -306,6 +306,12 @@ impl<T: Transport> Engine<T> {
             return false;
         }
         self.refill.phase = Phase::Filling { since_t: t, start_g: weight_g };
+        // Running on purpose now: a Stop still owed (an earlier Start that
+        // failed) would stop this fill within a second.
+        self.refill.stop_owed = false;
+        // This fill takes over a fill cut by a silent balance ("Refill now"
+        // meanwhile): its end is the refill, not one more cut.
+        self.refill.resume_fill = false;
         self.refill.fill = FillTrack::default();
         self.refill.fill.push(t, weight_g);
         let high_g = self.refill.plan.as_ref().expect("a cycle has a plan").high_g;
@@ -395,6 +401,13 @@ impl<T: Transport> Engine<T> {
                     return;
                 }
                 if self.scale_state != trim::ScaleState::Normal || self.refill.stop_owed {
+                    return;
+                }
+                // The balance's state is the previous read's: a bottle lifted
+                // off the pan reads near 0 g while still `Normal`, under the
+                // low level. A jump is a hand, never the feed drawing.
+                let prev = self.last_weight_g.map(|w| w * self.scale_cfg.position.sign());
+                if prev.is_some_and(|p| (weight_g - p).abs() > trim::PERTURBATION_MIN_G) {
                     return;
                 }
                 if self.refill.resume_fill {
@@ -493,7 +506,10 @@ impl<T: Transport> Engine<T> {
                     return;
                 }
                 self.refill.stop_owed = true;
-                if self.refill.stop_fails == STOP_FAILS_ALARM {
+                // At or past: the control loop's own retries count too, and
+                // may step over it (said once per streak).
+                if self.refill.stop_fails >= STOP_FAILS_ALARM && !self.refill.stop_failed_said {
+                    self.refill.stop_failed_said = true;
                     self.refill_alarm(
                         RefillAlarm::StopFailed,
                         now,
@@ -1123,4 +1139,138 @@ mod tests {
         assert!(b.kinds().contains(&"refill_start".to_string()), "{:?}", b.kinds());
     }
 
+    #[test]
+    fn a_bottle_lifted_off_the_pan_does_not_start_the_refill_pump() {
+        // The balance's state is the previous read's: the first read of a
+        // lift was still `Normal`, near 0 g, under the low level.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        for i in 1..30 {
+            b.second(i);
+        }
+        let keep = b.w;
+        b.w = 3.0;
+        b.second(30);
+        assert!(!b.refill_running(), "a lifted bottle started the refill pump: {:?}", b.kinds());
+        b.w = keep;
+        b.second(31);
+        assert!(!b.refill_running(), "nor putting it back: {:?}", b.kinds());
+    }
+
+    #[test]
+    fn a_run_stopped_mid_fill_whose_stop_is_lost_sends_it_again_within_a_second() {
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        until_refill(&mut b);
+        b.e.pump.transport_mut().set_plugged(2, false);
+        let now = Instant::now();
+        b.e.stop_run(t0() + jiff::SignedDuration::from_secs(2000)).unwrap();
+        let due = b.e.refill_next_due().expect("a Stop is owed");
+        assert!(due <= now + Duration::from_secs(2), "next Stop in {:?}", due.saturating_duration_since(now));
+        b.e.pump.transport_mut().set_plugged(2, true);
+        b.e.refill_service(due);
+        assert!(!b.refill_running());
+    }
+
+    #[test]
+    fn a_refill_pump_ignoring_stop_is_called_out_whoever_retried_last() {
+        // The control loop's retries count too: they could step over the
+        // count, and the alarm was never said.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let mut i = until_refill(&mut b);
+        while b.w < 1080.0 {
+            b.second(i);
+            i += 1;
+        }
+        b.e.pump.transport_mut().set_plugged(2, false);
+        while !matches!(b.e.refill.phase, Phase::Stopping { .. }) {
+            b.second(i);
+            i += 1;
+        }
+        b.e.refill_service(Instant::now() + Duration::from_secs(5));
+        b.e.refill_service(Instant::now() + Duration::from_secs(10));
+        for _ in 0..30 {
+            b.second(i);
+            i += 1;
+        }
+        let said = b.kinds().iter().filter(|k| *k == "alarm_refill_stop_failed").count();
+        assert_eq!(said, 1, "fails {}: {:?}", b.e.refill.stop_fails, b.kinds());
+    }
+
+    #[test]
+    fn the_refill_address_is_locked_during_the_run() {
+        // Moved mid-fill, the Stop went to the new address and the old pump
+        // filled the 1100 g bottle to 2803 g.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let mut i = until_refill(&mut b);
+        let err = b.e.set_refill(RefillConfig { pump_address: 3, ..RefillConfig::default() }, Instant::now()).unwrap_err();
+        assert!(err.contains("address, model and head are locked"), "{err}");
+        let mut high_seen: f64 = 0.0;
+        for _ in 0..600 {
+            b.second(i);
+            i += 1;
+            high_seen = high_seen.max(b.w);
+        }
+        assert!(high_seen < 1100.0 + 15.0, "{high_seen}");
+    }
+
+    #[test]
+    fn refill_now_after_a_failed_start_fills_on() {
+        // The failed Start leaves a Stop owed: it stopped the next fill
+        // within a second, which then read as a dry reservoir.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        for i in 1..60 {
+            b.second(i);
+        }
+        b.e.pump.transport_mut().set_plugged(2, false);
+        assert!(b.e.refill_now(t0() + jiff::SignedDuration::from_secs(60)).is_err());
+        b.e.pump.transport_mut().set_plugged(2, true);
+        b.e.refill_now(t0() + jiff::SignedDuration::from_secs(61)).unwrap();
+        b.e.refill_service(Instant::now() + Duration::from_secs(5));
+        assert!(b.refill_running(), "the owed Stop stopped the fill");
+    }
+
+    #[test]
+    fn refill_now_after_a_cut_fill_is_one_refill() {
+        // "Refill now" before the cut fill resumed: the cut was journalled
+        // again, and one more fill followed.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let mut i = until_refill(&mut b);
+        while b.w < 800.0 {
+            b.second(i);
+            i += 1;
+        }
+        for _ in 0..=(REFILL_BLIND_S as i64) {
+            b.e.attach_scale_for_test(Box::new(LostRead));
+            b.e.scale_tick(t0() + jiff::SignedDuration::from_secs(i));
+            i += 1;
+        }
+        assert!(!b.refill_running());
+        b.second(i);
+        i += 1;
+        b.e.refill_now(t0() + jiff::SignedDuration::from_secs(i)).unwrap();
+        for _ in 0..300 {
+            b.second(i);
+            i += 1;
+        }
+        let kinds = b.kinds();
+        assert_eq!(kinds.iter().filter(|k| *k == "refill_start").count(), 2, "{kinds:?}");
+        let refills: Vec<String> = b
+            .e
+            .store
+            .events(Some(b.run_id), 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == "refill")
+            .filter_map(|ev| ev.detail)
+            .collect();
+        assert_eq!(refills.len(), 1, "{refills:?}");
+        assert!(!refills[0].ends_with(crate::engine::REFILL_CUT_MARK), "{refills:?}");
+        let (before, after) = crate::engine::parse_refill(&refills[0]).unwrap();
+        assert!(before < 600.0 && after > 1050.0, "from before the first fill to the top: {refills:?}");
+    }
 }

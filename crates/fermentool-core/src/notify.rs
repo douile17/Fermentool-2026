@@ -100,6 +100,9 @@ pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
         "alarm_refill_no_rise" => (Alarm, "Refill: the bottle is not filling, the refill pump keeps going a few minutes".into()),
         "alarm_refill_dry" => (Alarm, "Refill stopped: nothing comes (reservoir empty?)".into()),
         "refill_rising" => (Good, "Refill: the bottle fills again".into()),
+        // Due, and the refill pump did not start: tried again only once it
+        // answers a Stop, so a silent one leaves the bottle to run dry.
+        "refill_start_failed" => (Alarm, "Refill due, the refill pump did not start".into()),
         // Older journals: these cut the refill before 2026-10-19.
         "alarm_refill_no_flow" => (Alarm, "Refill: nothing comes (reservoir empty or line off)".into()),
         "alarm_refill_overfill" => (Alarm, "Refill: the bottle is above its level".into()),
@@ -135,6 +138,7 @@ pub fn family_of(kind: &str) -> Option<&'static str> {
         "alarm_refill_no_flow" | "alarm_refill_overfill" | "alarm_refill_timeout"
         | "alarm_refill_stop_failed" | "alarm_refill_dry" => Some("refill"),
         "alarm_refill_no_rise" => Some("refill_rise"),
+        "refill_start_failed" => Some("refill_start"),
         // "abort" ends the run: said once, nothing goes on to repeat.
         _ => None,
     }
@@ -151,7 +155,9 @@ pub fn clears(kind: &str) -> Option<Option<&'static str>> {
         "pump_stopped" => Some("stop"),
         "refill_restarted" => Some("refill"),
         // The bottle rises again, or the fill ends (high level, Stop refill).
-        "refill_rising" | "refill_stop" | "refill_paused" => Some("refill_rise"),
+        // The cut ends it too: "keeps going a few minutes" is no longer true.
+        "refill_rising" | "refill_stop" | "refill_paused" | "alarm_refill_dry" => Some("refill_rise"),
+        "refill_start" => Some("refill_start"),
         "stop" | "abort" => None,
         _ => return None,
     })
@@ -964,6 +970,20 @@ mod tests {
         apply_clears(&mut pages, 7, "stop");
         assert_eq!(pages.iter().map(|p| p.family).collect::<Vec<_>>(), ["stop"]);
         apply_clears(&mut pages, 7, "pump_stopped");
+        assert!(pages.is_empty());
+    }
+
+    #[test]
+    fn refill_pages_end_with_their_condition() {
+        // Cut as dry: "the refill pump keeps going" rang on beside the cut.
+        let mut pages = vec![page(7, "refill_rise")];
+        apply_clears(&mut pages, 7, "alarm_refill_dry");
+        assert!(pages.is_empty());
+        assert_eq!(family_of("alarm_refill_dry"), Some("refill"));
+        // A refill due whose pump did not start rings until one starts.
+        assert_eq!(family_of("refill_start_failed"), Some("refill_start"));
+        let mut pages = vec![page(7, "refill_start")];
+        apply_clears(&mut pages, 7, "refill_start");
         assert!(pages.is_empty());
     }
 
