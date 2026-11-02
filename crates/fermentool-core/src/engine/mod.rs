@@ -1628,6 +1628,11 @@ impl<T: Transport> Engine<T> {
             kind: "setpoint_change".into(),
             detail: Some(format!("{from:.3} -> {value:.3} {unit}")),
         });
+        // The weighed g/min starts again from the new rate, as after a
+        // refill: a slope over both rates read the old one long after (the
+        // Overview's next refill came too early on a lower rate).
+        self.weight_buffer.clear();
+        self.last_rate_g_per_min = None;
         Ok((from, value))
     }
 
@@ -6705,6 +6710,31 @@ mod tests {
         // The commanded volume counts each rate for its own time: 50 + 0.5 mL.
         let vol = st.volume_added_ml.unwrap();
         assert!((vol - (5.0 * 10.0 + 3.0 * 10.0 / 60.0)).abs() < 1e-6, "{vol}");
+    }
+
+    #[test]
+    fn the_weighed_rate_restarts_at_a_rate_change() {
+        // The status's g/min sets the Overview's next refill. A slope over
+        // the whole stretch since the last refill still read the old rate
+        // long after a change: a lower rate showed the refill too early, a
+        // higher one too late (run 224).
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        e.start_run(RunConfig { gravimetric_trim: true, ..constant_cfg(60.0, 36_000) }, t0()).unwrap();
+        let mut w = 5_000.0;
+        let mut drain = |e: &mut Engine<SimPump>, from: i64, to: i64, rate: f64| {
+            for i in from..to {
+                e.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+                e.scale_tick(at(i));
+                w -= rate * e.trim_c() / 60.0;
+            }
+        };
+        drain(&mut e, 0, 600, 60.0);
+        e.set_constant_rate(6.0, 600.0, at(600)).unwrap();
+        drain(&mut e, 600, 661, 6.0);
+        let g = e.status().rate_g_per_min.expect("a rate after a minute at the new one");
+        let want = 6.0 * e.trim_c();
+        assert!((g.abs() - want).abs() < 0.1 * want, "{g} g/min, the new rate is {want}");
     }
 
     #[test]
