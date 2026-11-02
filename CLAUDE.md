@@ -481,7 +481,7 @@ template only targets group chats), which is why ntfy is the default.
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
 - The session logs, findings on the hardware and the to-do list:
-  `docs/notes-de-session-*.md` (latest: `2026-10-28`, its section 12 is the
+  `docs/notes-de-session-*.md` (latest: `2026-11-02`, its section 4 is the
   open list). User-facing changes: `CHANGELOG.md`.
 
 ## RS-485 bus: one pump switched off silences the other (2026-10-23)
