@@ -222,6 +222,7 @@ const TITLES = {
   alarm_saturated: 'Alarm: correction out of bounds',
   alarm_wrong_side: 'Alarm: balance on the other side',
   alarm_refill_no_rise: 'Alarm: bottle not filling',
+  alarm_refill_dry: 'Alarm: refill stopped, nothing comes',
   alarm_refill_overfill: 'Alarm: bottle overfilled',
   alarm_refill_stop_failed: 'Alarm: refill pump did not stop',
   alarm_cleared: 'Alarm cleared',

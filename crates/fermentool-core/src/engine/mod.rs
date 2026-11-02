@@ -2333,8 +2333,12 @@ pub fn tracking_report(store: &Store, run_id: i64, rho: f64) -> Result<Option<Tr
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut refills: Vec<RefillRecord> = Vec::new();
     for (t_s, before_g, after_g, span) in group_refills(&found, &estimated) {
+        // Up to the "after" weight (read at `t_s`) and no further: feed
+        // drawn after it is already in the bottle's fall from it. A refill
+        // pump left on a dry reservoir kept the estimate going 58 s past it
+        // (run 242), counted twice.
         let drawn_g = match span {
-            Some([from, to]) => store.delivered_over(run_id, from, to)?.unwrap_or(0.0).max(0.0),
+            Some([from, to]) => store.delivered_over(run_id, from, to.min(t_s))?.unwrap_or(0.0).max(0.0),
             None => 0.0,
         };
         refills.push(RefillRecord { t_s, before_g, after_g, drawn_g });
@@ -5330,6 +5334,48 @@ mod tests {
             before.delivered_ml + 60.0
         );
         assert!((after.required_ml - (before.required_ml + 60.0)).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_feed_drawn_during_a_refill_stops_at_the_weight_after_it() {
+        // 28 Oct 2026, run 242: the refill pump went on pumping a dry
+        // reservoir after the level had settled; the estimate ran 58 s past
+        // the "after" weight, and that feed was counted twice (once drawn,
+        // once in the bottle's fall from "after"): Feed bottle 9 g over.
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        let id = e.start_run(flat_60_ml_min_cfg(), t0()).unwrap();
+        for seq in 0..=400 {
+            e.store()
+                .append_tick(&NewTick {
+                    run_id: id,
+                    seq,
+                    wall_time: at(seq),
+                    elapsed_s: seq as f64,
+                    target: 60.0,
+                    written_ok: true,
+                    readback: None,
+                    note: None,
+                    weight_g: Some(5000.0),
+                    delivered_g: Some(seq as f64),
+                    // estimated from 100 s to 300 s; the weight after the
+                    // refill was read at 200 s
+                    delivered_estimated: (100..=300).contains(&seq),
+                })
+                .unwrap();
+        }
+        e.store()
+            .log_event(&NewEvent {
+                run_id: Some(id),
+                wall_time: at(200),
+                level: EventLevel::Info,
+                kind: "refill".into(),
+                detail: Some(refill_detail(4000.0, 5000.0)),
+            })
+            .unwrap();
+        let report = tracking_report(e.store(), id, 1.0).unwrap().unwrap();
+        let drawn = report.refills[0].drawn_g;
+        assert!((drawn - 100.0).abs() < 2.0, "drawn up to the weight after, not past it: {drawn}");
     }
 
     #[test]

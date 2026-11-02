@@ -97,7 +97,8 @@ pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
         "crash_detected" => (Alarm, "Fermentool was interrupted during the run".into()),
         "resume" => (Good, "Run resumed".into()),
         "refill" => (Info, "Bottle refilled".into()),
-        "alarm_refill_no_rise" => (Alarm, "Refill: the bottle is not filling, the refill pump keeps going".into()),
+        "alarm_refill_no_rise" => (Alarm, "Refill: the bottle is not filling, the refill pump keeps going a few minutes".into()),
+        "alarm_refill_dry" => (Alarm, "Refill stopped: nothing comes (reservoir empty?)".into()),
         "refill_rising" => (Good, "Refill: the bottle fills again".into()),
         // Older journals: these cut the refill before 2026-10-19.
         "alarm_refill_no_flow" => (Alarm, "Refill: nothing comes (reservoir empty or line off)".into()),
@@ -132,7 +133,7 @@ pub fn family_of(kind: &str) -> Option<&'static str> {
         "crash_detected" => Some("crash"),
         "stop_pending" => Some("stop"),
         "alarm_refill_no_flow" | "alarm_refill_overfill" | "alarm_refill_timeout"
-        | "alarm_refill_stop_failed" => Some("refill"),
+        | "alarm_refill_stop_failed" | "alarm_refill_dry" => Some("refill"),
         "alarm_refill_no_rise" => Some("refill_rise"),
         // "abort" ends the run: said once, nothing goes on to repeat.
         _ => None,

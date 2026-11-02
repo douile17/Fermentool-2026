@@ -97,7 +97,7 @@ export function refillView(refill) {
   if (c?.halted)
     return { tone: 'bad', label: `Refill: ${cycleLine(c)}`, title: 'Automatic refill stopped (an alarm, or Stop refill). Overview, Refill now, starts it again.' };
   if (c?.phase === 'filling' && c.not_rising)
-    return { tone: 'bad', label: 'Refill: the bottle is not filling', title: 'The refill pump keeps going, in case the line is only priming: check the reservoir, the line and the pump.' };
+    return { tone: 'bad', label: 'Refill: the bottle is not filling', title: 'The refill pump keeps going up to 3 min, in case the line is only priming, then stops: check the reservoir, the line and the pump.' };
   if (c?.phase === 'filling')
     return { tone: 'warn', label: `Refill: ${cycleLine(c)}`, title: 'The refill pump is filling the weighed bottle; the regulation holds its correction meanwhile.' };
   if (c) return { tone: 'ok', label: `Refill: ${cycleLine(c)}`, title: `The refill pump (${addr}) answers, stopped until the bottle falls under its refill level.` };

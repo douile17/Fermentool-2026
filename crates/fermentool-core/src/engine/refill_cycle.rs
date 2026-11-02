@@ -51,6 +51,11 @@ pub const RISE_WINDOW_S: f64 = 30.0;
 /// refill only matches.
 const RISE_MIN_STEPS: f64 = 10.0;
 const RISE_MIN_G: f64 = 2.0;
+/// A fill in which the bottle never rose is cut after this long: the line
+/// primes in about a minute. One that rose, then stops rising, is cut at
+/// once: the reservoir ran dry or the line came off (28 Oct 2026, run 242:
+/// the refill pump turned on until stopped by hand).
+pub const PRIME_GRACE_S: f64 = 180.0;
 /// The measured rise is trusted once it spans this long.
 const RATE_MIN_SPAN_S: f64 = 10.0;
 /// Stops not acknowledged before the refill pump is called out of control.
@@ -102,6 +107,8 @@ pub(super) struct FillTrack {
     /// [`RATE_MIN_SPAN_S`].
     rate_g_s: Option<f64>,
     not_rising: bool,
+    /// The bottle rose over a window of this fill: the line is primed.
+    rose: bool,
 }
 
 impl FillTrack {
@@ -125,6 +132,8 @@ impl FillTrack {
 pub enum RefillAlarm {
     Overfill,
     StopFailed,
+    /// Nothing comes any more (or never came): the refill pump is stopped.
+    Dry,
 }
 
 impl RefillAlarm {
@@ -132,6 +141,7 @@ impl RefillAlarm {
         match self {
             RefillAlarm::Overfill => "alarm_refill_overfill",
             RefillAlarm::StopFailed => "alarm_refill_stop_failed",
+            RefillAlarm::Dry => "alarm_refill_dry",
         }
     }
 }
@@ -426,9 +436,30 @@ impl<T: Transport> Engine<T> {
                     return;
                 }
                 let rise_min = (RISE_MIN_STEPS * self.scale_resolution_g).max(RISE_MIN_G);
+                if rise >= rise_min {
+                    self.refill.fill.rose = true;
+                }
+                // Judged by the balance alone, never against an expected
+                // flow (a slow pump that fills keeps rising): risen then
+                // still, or never risen past the priming grace.
+                let rose = self.refill.fill.rose;
+                if rise < rise_min && (rose || dur >= PRIME_GRACE_S) {
+                    self.refill_stop_fill(t, start_g);
+                    let why = if rose {
+                        format!("the bottle took {gained:+.0} g, then moved {rise:+.1} g over the last {span:.0} s: the reservoir is empty or the line came off")
+                    } else {
+                        format!("nothing came in {dur:.0} s ({gained:+.1} g): the reservoir is empty, the line is off, or the refill pump is slower than the feed")
+                    };
+                    self.refill_alarm(
+                        RefillAlarm::Dry,
+                        now,
+                        format!("refill pump stopped, {why}. The automatic refill waits for Refill now"),
+                    );
+                    return;
+                }
                 if rise < rise_min && !self.refill.fill.not_rising {
-                    // Said, not acted on: the line may only be priming, and a
-                    // refill is wanted even a poor one.
+                    // Said, not acted on yet: the line may only be priming,
+                    // up to PRIME_GRACE_S.
                     self.refill.fill.not_rising = true;
                     tracing::warn!("alarm_refill_no_rise: {rise:+.1} g over {span:.0} s");
                     self.refill_event(
@@ -436,8 +467,9 @@ impl<T: Transport> Engine<T> {
                         EventLevel::Error,
                         "alarm_refill_no_rise",
                         format!(
-                            "refill pump on for {dur:.0} s at {} rpm, the bottle moved {rise:+.1} g over the last {span:.0} s: it keeps pumping in case the line is priming. Check the reservoir, the line and the refill pump",
-                            self.refill.cfg.speed_rpm
+                            "refill pump on for {dur:.0} s at {} rpm, the bottle moved {rise:+.1} g over the last {span:.0} s: it keeps pumping up to {:.0} min in case the line is priming. Check the reservoir, the line and the refill pump",
+                            self.refill.cfg.speed_rpm,
+                            PRIME_GRACE_S / 60.0
                         ),
                     );
                 } else if rise >= rise_min && self.refill.fill.not_rising {
@@ -817,21 +849,58 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_reservoir_is_notified_and_the_refill_pump_keeps_going() {
+    fn a_reservoir_empty_from_the_start_is_cut_after_the_priming_grace() {
+        // Nothing ever rose: the line may be priming (about a minute), so
+        // the pump goes on, but not for good.
         let mut b = Bench::new(Store::open_in_memory().unwrap());
         b.start();
         let start = until_refill(&mut b);
         b.dry = true;
-        for i in start..start + 600 {
+        let mut i = start;
+        while i < start + 120 {
             b.second(i);
+            i += 1;
+        }
+        assert!(b.refill_running(), "still priming, maybe");
+        assert!(b.e.refill_cycle_status().unwrap().not_rising);
+        while i < start + 600 {
+            b.second(i);
+            i += 1;
         }
         let kinds = b.kinds();
         assert_eq!(kinds.iter().filter(|k| *k == "alarm_refill_no_rise").count(), 1, "said once: {kinds:?}");
-        assert!(b.refill_running(), "never cut: the line may only be priming");
-        let st = b.e.refill_cycle_status().unwrap();
-        assert!(!st.halted);
-        assert!(st.not_rising);
-        assert_eq!(st.phase, "filling");
+        assert_eq!(kinds.iter().filter(|k| *k == "alarm_refill_dry").count(), 1, "{kinds:?}");
+        assert!(!b.refill_running(), "cut after the priming grace");
+        assert!(b.e.refill_cycle_status().unwrap().halted, "no new fill until Refill now");
+    }
+
+    #[test]
+    fn a_reservoir_that_runs_dry_mid_fill_stops_the_refill_pump() {
+        // 28 Oct 2026, run 242: the bottle took 614 g, then the reservoir
+        // was empty and the refill pump went on turning until stopped by
+        // hand. Risen, then not rising: no priming to wait for.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.start();
+        let start = until_refill(&mut b);
+        let mut i = start;
+        while i < start + 60 {
+            b.second(i);
+            i += 1;
+        }
+        assert!(b.refill_running());
+        b.dry = true;
+        let dry_at = i;
+        while b.refill_running() {
+            b.second(i);
+            i += 1;
+            assert!(i < dry_at + 60, "still pumping {}s after the reservoir ran dry", i - dry_at);
+        }
+        let kinds = b.kinds();
+        assert!(kinds.contains(&"alarm_refill_dry".to_string()), "{kinds:?}");
+        assert!(!kinds.contains(&"alarm_refill_no_rise".to_string()), "no priming said: {kinds:?}");
+        assert!(b.e.refill_cycle_status().unwrap().halted);
+        let dry = b.e.store.events(Some(b.run_id), 10_000).unwrap().into_iter().find(|e| e.kind == "alarm_refill_dry").unwrap();
+        assert!(dry.detail.unwrap().contains("Refill now"), "says how to go on");
     }
 
     #[test]

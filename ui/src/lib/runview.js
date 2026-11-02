@@ -224,7 +224,7 @@ export function runState(status, connected, inHold) {
       word: 'Not filling',
       icon: 'bottle-warn',
       title: 'The bottle is not filling',
-      detail: 'The refill pump keeps going, in case the line is only priming.',
+      detail: 'The refill pump keeps going up to 3 min, in case the line is only priming, then stops.',
       check: 'Reservoir empty? Line off, pinched or not primed? Refill pump turning? Stop refill if it cannot work.',
     };
   if (cycle?.phase === 'filling')
