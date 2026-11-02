@@ -53,7 +53,10 @@
   --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   /* The run state's titles: Barlow, a DIN-like face read from across the lab. */
   --font-title: "Barlow", "IBM Plex Sans", system-ui, "Segoe UI", Arial, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  /* Figures, units, state words: IBM Plex Sans with figures of equal width
+     (body, below), since 2026-10-28. Plex Mono's dotted zero was disliked;
+     the name stays, 28 rules use it. */
+  --mono: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -138,6 +141,8 @@ body {
   font-family: var(--font);
   font-size: 14px;
   line-height: 1.6;
+  /* every figure the same width, so a value that changes keeps its place */
+  font-variant-numeric: tabular-nums;
   color: var(--ink);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;

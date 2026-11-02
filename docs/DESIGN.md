@@ -74,7 +74,13 @@ of `app.css`; no literal colour in a component.
 
 - **IBM Plex Sans** for the UI: no 1/l/I or 0/O confusion, made for technical
   interfaces. Compared on mockups with Manrope, Barlow, Archivo, Recursive.
-- **IBM Plex Mono** for numbers, units, state words, table data.
+- **Figures in IBM Plex Sans too**, with figures of equal width
+  (`font-variant-numeric: tabular-nums`, set on `body`): numbers, units,
+  state words, table data. Through the `--mono` token, whose name stayed.
+  Until 2026-10-28 this was IBM Plex Mono; the user disliked its dotted zero
+  (Plex Mono has no plain one, only a slashed one), compared on a page with
+  Plex Mono slashed, Plex Sans slashed, Roboto Mono and DM Mono. Do not bring
+  a dotted or slashed zero back.
 - **Barlow 600** (`--font-title`) for **state titles only** (Overview band,
   the bar over other pages): DIN-like, read from across the lab. Narrower, so
   a size up (22 px) to read as large as Plex.

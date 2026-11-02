@@ -4,7 +4,9 @@
 // "9.000 ml/min" (the Overview, a rising curve with its next refill near
 // the end).
 
-/** IBM Plex Mono's advance, as a share of the font size. */
+/** A character's advance, as a share of the font size: IBM Plex Sans's
+ *  tabular figures, a little over its letters (a box a hair too wide only
+ *  leaves more room). Measured for Plex Mono until 2026-10-28. */
 const ADVANCE = 0.6;
 
 /** The box of a text drawn at baseline (x, y): `{ x, y, w, h }`, its top
