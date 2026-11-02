@@ -109,8 +109,10 @@ Test : `the_balance_settling_after_a_refill_does_not_move_c` (dérive de
   modifications locales en cours), smoke test 61/61.
 - Correction du pic après refill : aucun run actif. Un premier déploiement
   à 13:44 a été compilé depuis la copie de travail, donc avec le `ui/dist`
-  local (modification d'`App.svelte` en cours) : remplacé par un daemon
-  compilé depuis une copie propre du commit de la correction.
+  local (modification d'`App.svelte` en cours). Le run 252 a démarré
+  dessus à 13:46 : il tourne avec la correction (même code Rust que
+  `5cc700d`) mais avec l'interface locale. Un daemon compilé depuis une
+  copie propre de `5cc700d` attend la fin du run pour le remplacer.
 
 ## 5. Pas fait, à faire
 
