@@ -332,6 +332,20 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   start, and **at once when Settings changes it mid-fill**
   (`refill_speed_now`, event `refill_speed`); a direction change waits for
   the next fill (reversed mid-fill it would empty the bottle).
+- **The refill pump's address, model and head are locked** during a run
+  with refill, and while such a run awaits resume
+  (`refill_change_refused`, the Settings field greyed): changed mid-fill,
+  the Stop went to the new address and the old pump kept filling (1.1 kg
+  became 2.8 kg in a test).
+- **A refill pump start that succeeds clears `stop_owed` and
+  `resume_fill`** (`refill_start_pump`): a Stop still owed from a failed
+  start cut the next fill at once, then raised a false "dry" alarm. A run
+  ended mid-fill owes its Stop at once (`refill_run_ended`), retried every
+  second, and "does not stop" is raised once (`stop_failed_said`).
+- **A weight jump past `PERTURBATION_MIN_G` never starts a fill**: a bottle
+  lifted off the pan read ~0 g, under the low level.
+- A refill due whose pump does not start is notified
+  (`refill_start_failed`, paged until the next start).
 - **A fill that stops rising is cut** (`refill_cycle.rs`, 2026-10-28, run
   242: a dry reservoir left the refill pump turning until stopped by hand).
   By the balance alone, never against an expected flow (that cut a slow
@@ -488,7 +502,7 @@ template only targets group chats), which is why ntfy is the default.
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
 - The session logs, findings on the hardware and the to-do list:
-  `docs/notes-de-session-*.md` (latest: `2026-11-02`, its section 4 is the
+  `docs/notes-de-session-*.md` (latest: `2026-11-02`, its section 5 is the
   open list). User-facing changes: `CHANGELOG.md`.
 
 ## RS-485 bus: one pump switched off silences the other (2026-10-23)
