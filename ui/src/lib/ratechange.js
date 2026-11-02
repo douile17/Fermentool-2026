@@ -17,17 +17,19 @@ export function rateSteps(run) {
   return steps.map((s, i) => ({ ...s, last: i === steps.length - 1 }));
 }
 
-/** The day and time of a step, "Mon 20:30": Run again speaks of real moments
- *  of the week, the charts of run time. */
+/** The day and time of a step, "Mon 20:30", and for a change how far into
+ *  the run it came, "Mon 20:30, at 6 h 20": the moment of the week, and the
+ *  experiment's time the charts count in. */
 export function rateLabel(step) {
   const d = new Date(step.wallMs);
   if (Number.isNaN(d.getTime())) return '–';
   const day = d.toLocaleDateString(LOCALE, { weekday: 'short' });
-  return `${day} ${d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`;
+  const when = `${day} ${d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`;
+  return step.atStart ? when : `${when}, at ${atRun(step.elapsedS)}`;
 }
 
 /** Since when the rate of a Constant run holds, under the Overview's feed
- *  rate: "constant since the start", "since Mon 20:30". */
+ *  rate: "constant since the start", "since Mon 20:30, at 6 h 20". */
 export function rateSince(run) {
   const steps = rateSteps(run);
   return steps.length === 1 ? 'constant since the start' : `since ${rateLabel(steps.at(-1))}`;

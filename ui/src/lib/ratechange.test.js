@@ -41,16 +41,16 @@ describe('rateSteps', () => {
 });
 
 describe('rateLabel', () => {
-  it('says the day and the time of a step', () => {
+  it('says the day and the time of a step, and how far into the run a change came', () => {
     const s = rateSteps(run214);
-    expect(s.map((x) => rateLabel(x))).toEqual(['Mon 14:10', 'Mon 20:30', 'Tue 08:15']);
+    expect(s.map((x) => rateLabel(x))).toEqual(['Mon 14:10', 'Mon 20:30, at 6 h 20', 'Tue 08:15, at 18 h 05']);
   });
 });
 
 describe('rateSince', () => {
   it('says since when the rate holds', () => {
     expect(rateSince(unchanged)).toBe('constant since the start');
-    expect(rateSince(run214)).toBe('since Tue 08:15');
+    expect(rateSince(run214)).toBe('since Tue 08:15, at 18 h 05');
   });
 });
 

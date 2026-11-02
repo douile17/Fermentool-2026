@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  alarmCount, atRun, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines, pumpLine,
+  alarmCount, atRun, runTimeAt, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines, pumpLine,
   refillRows, regulationFigures, verdict, whenLine,
 } from './rundetail.js';
 
@@ -196,6 +196,18 @@ describe('atRun', () => {
     expect(atRun(47 * 60 + 10)).toBe('47 min');
     expect(atRun(4 * 3600 + 45 * 60 + 46)).toBe('4 h 45');
     expect(atRun(26 * 3600 + 3 * 60)).toBe('26 h 03');
+  });
+});
+
+describe('runTimeAt', () => {
+  const start = '2026-10-27T12:39:56Z';
+  it('says how far into the run an event came, from its time of day', () => {
+    expect(runTimeAt('2026-10-27T18:59:56Z', start)).toBe('6 h 20');
+    expect(runTimeAt('2026-10-27T13:27:06Z', start)).toBe('47 min');
+  });
+  it('says 0 min in the first minute, nothing without a start', () => {
+    expect(runTimeAt('2026-10-27T12:40:10Z', start)).toBe('0 min');
+    expect(runTimeAt('2026-10-27T12:40:10Z', null)).toBe('');
   });
 });
 

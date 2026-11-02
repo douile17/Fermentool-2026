@@ -12,6 +12,7 @@
   import StateIcon from '../components/StateIcon.svelte';
   import ChangeRate from '../components/ChangeRate.svelte';
   import { canChangeRate, curveFact, rateSince, rateSteps } from '../lib/ratechange.js';
+  import { runTimeAt } from '../lib/rundetail.js';
   import { cycleLine } from '../lib/refill.js';
 
   // Overview follows feeding cycles only: a calibration burst is watched
@@ -753,7 +754,7 @@
     <ol class="acts">
       {#each events as e (e.id)}
         <li class="act {e.level}">
-          <time class="mono">{shortTime(e.wall_time)}</time>
+          <span class="when"><time class="mono">{shortTime(e.wall_time)}</time>{#if runTimeAt(e.wall_time, run.started_at)}<span class="mono at">{runTimeAt(e.wall_time, run.started_at)}</span>{/if}</span>
           <span><b>{e.kind.replaceAll('_', ' ')}</b>{#if e.detail}<span class="body">, {e.detail}</span>{/if}</span>
         </li>
       {:else}
@@ -985,10 +986,13 @@
     display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 var(--s-6);
   }
   .act {
-    display: grid; grid-template-columns: 5.5em 1fr; gap: var(--s-3); align-items: baseline;
+    display: grid; grid-template-columns: 6em 1fr; gap: var(--s-3); align-items: baseline;
     padding: var(--s-2) 0; border-top: 1px solid var(--line-soft); font-size: 13px; min-width: 0;
   }
   .act time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  /* how far into the run, under the time of day */
+  .act .when { display: flex; flex-direction: column; }
+  .act .at { color: var(--muted); font-size: 11px; white-space: nowrap; }
   .act b { font-weight: 500; }
   .act .body { color: var(--muted); overflow-wrap: anywhere; }
   .act.warn b { color: var(--warn-ink); }

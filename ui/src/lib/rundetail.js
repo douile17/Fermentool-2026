@@ -135,6 +135,15 @@ export function atRun(t_s) {
   return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}`;
 }
 
+/** How far into the run a moment of the day came, "6 h 20", "0 min" in the
+ *  first minute; '' without a start. Beside a time of day (Overview). */
+export function runTimeAt(iso, startedAt) {
+  const t = (Date.parse(iso) - Date.parse(startedAt)) / 1000;
+  if (!Number.isFinite(t)) return '';
+  const a = atRun(t);
+  return a === '0' ? '0 min' : a;
+}
+
 /** Minutes, rounded, "27 min"; seconds under a minute. */
 export const mins = (s) => (s < 60 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
 
