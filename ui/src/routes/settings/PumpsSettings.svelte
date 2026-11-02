@@ -54,8 +54,8 @@
 
   const portPath = $derived(path === '__custom' ? custom.trim() : path);
   const runActive = $derived(!!app.status?.active);
-  // a run refilling the bottle drives the refill pump: its model and head
-  // stay, as while such a run waits to be resumed (refillKindLocked)
+  // a run refilling the bottle drives the refill pump: its address, model
+  // and head stay, as while such a run waits to be resumed (refillKindLocked)
   const refillInRun = $derived(!!app.status?.refill?.in_run);
   const refillLocked = $derived(refillKindLocked(app.status));
   // an interrupted run resumes only on the feed pump it drove
@@ -365,7 +365,7 @@
         <div class="ctl">
           {@render models('Refill', refillModel, pickRefill, busy || refillLocked)}
           <label class="lbl addr">Address
-            <input type="number" min="1" max={modelOf(refillModel).maxAddress} bind:value={refillAddress} disabled={busy} />
+            <input type="number" min="1" max={modelOf(refillModel).maxAddress} bind:value={refillAddress} disabled={busy || refillLocked} />
           </label>
           {#if refillModel === 'pds2'}
             <label class="lbl head">Head
@@ -409,13 +409,13 @@
     </label>
     <button class="btn-primary" type="button" disabled={busy || !dirty} onclick={save}>{busy ? 'Saving…' : 'Save'}</button>
     {#if refillInRun}
-      <p class="field-note why">A run is active: the cable, the feed pump and the refill pump's model and head are locked until it stops.</p>
+      <p class="field-note why">A run is active: the cable, the feed pump and the refill pump's address, model and head are locked until it stops.</p>
     {:else if runActive}
       <p class="field-note why">A run is active: the cable and the feed pump are locked until it stops.</p>
     {:else if recoveryPending}
-      <p class="field-note why">An interrupted run waits: the feed pump{refillLocked ? " and the refill pump's model and head are" : ' is'} locked until it is resumed or ended.</p>
+      <p class="field-note why">An interrupted run waits: the feed pump{refillLocked ? " and the refill pump's address, model and head are" : ' is'} locked until it is resumed or ended.</p>
     {:else if refillLocked}
-      <p class="field-note why">A run with automatic refill waits to be resumed: the refill pump's model and head are locked until it resumes or is aborted.</p>
+      <p class="field-note why">A run with automatic refill waits to be resumed: the refill pump's address, model and head are locked until it resumes or is aborted.</p>
     {/if}
   {/snippet}
 </SettingsCard>

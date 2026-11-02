@@ -234,6 +234,8 @@ try {
   check('the state is a tinted band, Disconnect without a box on it', await js(`(() => { const h = document.querySelector('.settings-pane .head'); const d = h && [...h.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Disconnect'); return !!h && getComputedStyle(h).backgroundColor !== 'rgba(0, 0, 0, 0)' && (!d || getComputedStyle(d).backgroundColor === 'rgba(0, 0, 0, 0)'); })()`));
   check('the cable button says Connect or Disconnect', await js(`(() => { const b = [...document.querySelectorAll('.head button')].map((x) => x.textContent.trim()); return b.includes('Connect') !== b.includes('Disconnect'); })()`));
   check('it lists the feed and the refill pump, each with an address', await js(`document.querySelectorAll('.pumps .item').length === 2 && document.querySelectorAll('.pumps .addr input').length === 2`));
+  // the refill address is another pump: locked with its model (audit 2026-11-02)
+  check('the refill address locks with the refill model', await js(`(() => { const a = document.querySelectorAll('.pumps .addr input')[1]; const m = document.querySelector('.pumps [aria-label="Refill pump model"] [role=radio]'); return !!a && !!m && a.disabled === m.disabled; })()`));
   check(
     'Change opens the refill pump settings and its Test button',
     (await click('.pumps .change', '')) &&
