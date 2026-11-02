@@ -184,6 +184,27 @@ pub fn c_at(history: &std::collections::VecDeque<(f64, f64)>, t_s: f64) -> Optio
 /// How long the c history reaches back: an alarm's onset is never older.
 pub const C_HISTORY_S: f64 = 3600.0;
 
+/// After a refill the balance reads high for a couple of minutes (load cell
+/// creep under the kilo just poured, the liquid settling): run 251 lost 3 %
+/// less than the pump delivered over the first two minutes. The reads of
+/// that stretch stay out of the ratio window, and c rides on the ratio from
+/// before the refill until the reads after it fill a settled window.
+pub const REFILL_SETTLE_S: f64 = 180.0;
+
+/// The ratio to regulate on: the measured one once it rests on a settled
+/// window, else the ratio from before a refill while `frozen`. Clears
+/// `frozen` at the first settled window.
+pub fn ratio_after_refill(measured: Option<Ratio>, k_before: Option<f64>, frozen: &mut bool) -> Option<Ratio> {
+    match measured {
+        Some(r) if r.settled => {
+            *frozen = false;
+            Some(r)
+        }
+        _ if *frozen => k_before.map(|k| Ratio { k, settled: true }),
+        r => r,
+    }
+}
+
 /// Bound the point history to `cap`: the newer half stays at full density,
 /// the older half is evenly thinned. The span back to the first point is
 /// kept, so a slow feed still reaches the window's minimum mass.
@@ -529,6 +550,20 @@ mod tests {
         let k = early_ratio(&pts, 0.1).expect("25 s and 3.75 g of history");
         assert!((k - 0.78).abs() < 0.05, "got {k}");
         assert_eq!(early_ratio(&pts[..10], 0.1), None, "under 20 s");
+    }
+
+    #[test]
+    fn after_a_refill_c_rides_on_the_ratio_before_it_until_a_settled_window() {
+        let short = Some(Ratio { k: 0.98, settled: false });
+        let mut frozen = true;
+        assert_eq!(ratio_after_refill(None, Some(1.03), &mut frozen), Some(Ratio { k: 1.03, settled: true }));
+        assert_eq!(ratio_after_refill(short, Some(1.03), &mut frozen), Some(Ratio { k: 1.03, settled: true }));
+        assert!(frozen);
+        let settled = Some(Ratio { k: 1.031, settled: true });
+        assert_eq!(ratio_after_refill(settled, Some(1.03), &mut frozen), settled);
+        assert!(!frozen);
+        // Not frozen: whatever was measured, a short window included.
+        assert_eq!(ratio_after_refill(short, Some(1.03), &mut frozen), short);
     }
 
     #[test]

@@ -2,6 +2,18 @@
 
 ## Non publié (depuis 0.1.5)
 
+### Correction après un refill (2 novembre)
+
+- Plus de pic de correction après un refill. Pendant les ~2 minutes qui
+  suivent, la balance lit un peu haut (fluage sous le kilo versé, liquide
+  qui se pose) : sur le run 251, le flacon perdait 3 % de moins que ce que
+  la pompe débitait. Le ratio de la pompe, calculé presque sur ces seules
+  minutes, montait c de 1,7 % pendant 5 minutes. Après un refill, la
+  régulation garde maintenant le ratio d'avant le refill, jusqu'à ce que
+  5 minutes de lectures prises après les 3 premières minutes permettent de
+  le mesurer à nouveau. Rejoué sur les pesées du run 251, le ratio reste à
+  1,029 au lieu de tomber à 0,98.
+
 ### Audit du refill automatique (2 novembre)
 
 - L'adresse de la pompe de refill est verrouillée pendant un run avec

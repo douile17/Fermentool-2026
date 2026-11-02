@@ -892,6 +892,13 @@ struct Tracker {
     c_hist: std::collections::VecDeque<(f64, f64)>,
     /// When the current run of saturated updates began.
     saturated_since_t: Option<f64>,
+    /// Until this time the reads after a refill stay out of `points`
+    /// ([`tracking::REFILL_SETTLE_S`]).
+    #[serde(skip)]
+    ratio_hold_until_t: Option<f64>,
+    /// Since a refill, c rides on `k` from before it, until the reads after
+    /// it fill a settled window ([`tracking::ratio_after_refill`]).
+    ratio_frozen: bool,
 }
 
 /// Delivered mass below `-max(WRONG_SIDE_MIN_G, WRONG_SIDE_FRACTION *
@@ -2585,6 +2592,12 @@ impl<T: Transport> Engine<T> {
             tr.delivered_g += tracking::settle_anchor(&a, weight_g, tr.commanded_g, tr.k, resolution_g);
             if a.refill && tr.alarm.is_some() {
                 tr.points.clear();
+            } else if a.refill && tr.k.is_some() {
+                // Regulated on the first minutes after a refill, the ratio
+                // read the balance settling, not the pump (run 251).
+                tr.points.clear();
+                tr.ratio_hold_until_t = Some(t + tracking::REFILL_SETTLE_S);
+                tr.ratio_frozen = true;
             }
         } else if let Some(w0) = tr.last_weight_g {
             tr.delivered_g += w0 - weight_g;
@@ -2597,11 +2610,17 @@ impl<T: Transport> Engine<T> {
         if let Some(last) = self.recent_reads.back_mut() {
             last.1 = Some(tr.delivered_g);
         }
-        tr.points.push(tracking::TrackPoint {
+        let point = tracking::TrackPoint {
             t_s: t,
             commanded_g: tr.commanded_g,
             delivered_g: tr.delivered_g,
-        });
+        };
+        if tr.ratio_hold_until_t.is_some_and(|until| t < until) {
+            // The balance still settling after a refill.
+        } else {
+            tr.ratio_hold_until_t = None;
+            tr.points.push(point);
+        }
         if tr.points.len() > WEIGHT_BUFFER_CAP {
             tr.points = tracking::thin(&tr.points, WEIGHT_BUFFER_CAP);
         }
@@ -2702,7 +2721,11 @@ impl<T: Transport> Engine<T> {
         if cleared {
             self.scale_ok = true;
         } else if self.scale_ok && raise.is_none() && tr.alarm.is_none() {
-            let ratio = tracking::delivery_ratio(&tr.points, resolution_g);
+            let ratio = tracking::ratio_after_refill(
+                tracking::delivery_ratio(&tr.points, resolution_g),
+                tr.k,
+                &mut tr.ratio_frozen,
+            );
             if ratio.is_none() && tr.k.is_none() {
                 // No ratio yet (the first few g of a slow feed). A deficit well
                 // past start-up noise means the pump is really off (tube moved,
@@ -4094,6 +4117,39 @@ mod tests {
         let tr = st.tracking.unwrap();
         assert!(st.scale_ok && tr.alarm.is_none(), "{tr:?}");
         assert!((tr.delivered_ml - truth).abs() < 0.01 * truth, "{} vs {truth}", tr.delivered_ml);
+    }
+
+    #[test]
+    fn the_balance_settling_after_a_refill_does_not_move_c() {
+        // Run 251: 10 ml/min, the pump delivering 103 %, c settled at ~0.971;
+        // ~1 kg poured, then the balance reads high by a creep of ~0.6 g over
+        // two minutes. Regulated on the first minutes after the refill, the
+        // ratio read 0.99 and c went up 1.7 % for five minutes.
+        let spec = CurveSpec::linear(10.0, 10.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let k = 1.03;
+        let mut w = 4_500.0;
+        let mut cs = Vec::new();
+        for i in 0..5_000i64 {
+            if (3_000..3_500).contains(&i) {
+                w += 2.0;
+            }
+            let creep = if i >= 3_500 { 0.6 * (1.0 - (-((i - 3_500) as f64) / 60.0).exp()) } else { 0.0 };
+            // ±0.1 g of balance noise: a ratio leaning on one read (a join
+            // across the refill) is off by a few % with it.
+            let noise = 0.1 * ((i * 7_919 % 3) - 1) as f64;
+            let read = ((w + creep + noise) * 10.0).round() / 10.0;
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[read])));
+            e.scale_tick(at(i));
+            cs.push(e.trim_c());
+            w -= k * spec.value_at(Duration::from_secs(i as u64)) / 60.0 * e.trim_c();
+        }
+        let before = cs[2_990];
+        assert!((before - 1.0 / k).abs() < 0.01, "c settled at {before}");
+        let swing = cs[3_000..].iter().map(|c| (c - before).abs()).fold(0.0, f64::max);
+        assert!(swing < 0.006, "c moved {swing} after the refill (was {before})");
     }
 
     #[test]

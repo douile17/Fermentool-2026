@@ -313,7 +313,14 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   "Refill bottle". Over once the level (weight + k x commanded) holds still
   20 s, then 10 s. A slow rise rewinds the count to the lowest Normal read
   (`rewind_slow_rise`). The ratio history survives a refill, except under an
-  alarm (dry bottle). No gain over the weight before = a lift, not a refill.
+  alarm (dry bottle), but c no longer regulates on it: after a refill the
+  points are cleared, the reads of the next `REFILL_SETTLE_S` (3 min) stay
+  out (the balance creeps high after the kilo poured: run 251's ratio read
+  0.98 instead of 1.03 and c spiked 1.7 %), and c rides on the `k` from
+  before the refill (`ratio_frozen`, `ratio_after_refill`) until the reads
+  after it fill a settled window. Splicing the reads after onto those
+  before was tried: one noisy read at the join skewed every cross pair,
+  k read 1.037 on run 251's replay. No gain over the weight before = a lift, not a refill.
 - Settings > Pumps shows each pump on the cable with its state. The refill
   pump is asked by `POST /api/refill/ping` (a read of its speed register,
   never a Start; `Engine::refill_ping`) while the page is open: every 15 s,

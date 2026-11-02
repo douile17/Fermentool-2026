@@ -63,6 +63,41 @@ test qui échouait avant la correction (détail dans `CHANGELOG.md`) :
 8. Remplissage coupé faute de montée : la page « keeps going » ne sonne
    plus à côté de l'alarme (`clears` de `refill_rise`).
 
+## 3 bis. Pic de correction après chaque refill
+
+Constat (run 251, 10 ml/min, refill de ~1 kg à 10:41-10:51) : après le
+refill, la consigne monte de 9,72 à 9,88 ml/min (c +1,7 %) pendant ~5 min,
+puis redescend. À chaque refill.
+
+Cause, mesurée sur les pesées :
+- la pompe ne change pas : ratio 1,023 à 1,030 avant, 1,030 à 1,032 de 5 à
+  15 min après ;
+- mais sur les 2 premières minutes après le refill, le flacon perd ~3 % de
+  moins (ratio 0,99 sur 1 min) : la balance lit quelques dixièmes de g trop
+  haut. Fluage du capteur sous le kilo versé, ou liquide qui se pose : pas
+  mesuré ;
+- le code amplifiait : la fenêtre du ratio (300 s) compte le temps du
+  refill, donc juste après elle ne tient que le dernier point d'avant plus
+  les quelques secondes d'après. Theil-Sen y lit la dérive, ratio « settled »,
+  c monte de 0,5 % par mise à jour.
+
+Correction (`tracking::ratio_after_refill`, `REFILL_SETTLE_S`) : après un
+refill sans alarme, les points sont effacés, les lectures des 3 minutes
+suivantes ne servent pas au ratio, et c reste sur le ratio d'avant le refill
+jusqu'à ce que les lectures d'après remplissent une fenêtre settled. Le
+volume livré se compte toujours à la pesée, le rattrapage du déficit reste
+actif.
+
+Essayé et abandonné : raccorder les lectures d'après à celles d'avant. Au
+rejeu du run 251, une seule lecture bruitée à la jonction décalait toutes
+les paires : ratio 1,037, c −1,4 %. Le rejeu de la version retenue garde
+1,029 puis 1,031. Le rejeu ne juge que le ratio, pas le rattrapage du
+déficit (les pesées enregistrées portent le pic réel) : **à vérifier au
+prochain refill d'un vrai run**.
+
+Test : `the_balance_settling_after_a_refill_does_not_move_c` (dérive de
+0,6 g après le refill, bruit ±0,1 g), échouait à 2,3 % sans la correction.
+
 ## 4. Déploiements
 
 - Hugeicons, puis Solar : aucun run actif.
@@ -72,6 +107,10 @@ test qui échouait avant la correction (détail dans `CHANGELOG.md`) :
 - Audit du refill : **run 251 « test const » arrêté** (Stop, à la demande),
   daemon compilé depuis une copie propre de `fba71fa` (sans les
   modifications locales en cours), smoke test 61/61.
+- Correction du pic après refill : aucun run actif. Un premier déploiement
+  à 13:44 a été compilé depuis la copie de travail, donc avec le `ui/dist`
+  local (modification d'`App.svelte` en cours) : remplacé par un daemon
+  compilé depuis une copie propre du commit de la correction.
 
 ## 5. Pas fait, à faire
 
