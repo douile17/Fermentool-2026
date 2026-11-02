@@ -217,6 +217,14 @@ try {
   check('Settings opens', await click('button', 'Settings'));
   await sleep(800);
   check('the Display section shows a tube size', (await click('button', 'Display')) && (await sleep(800), await js(`!!document.querySelector('.sample .pri')`)));
+  // The tint under a picked choice slides (lib/segthumb.js). Its observer
+  // once reacted to its own class change, looped and froze the page: a page
+  // that answers within 3 s, with the tint placed under the pick.
+  const thumb = await Promise.race([
+    js(`(() => { const s = document.querySelector('.settings-pane .seg'); return !!s && s.classList.contains('thumbed') && parseFloat(s.style.getPropertyValue('--thumb-w')) > 0; })()`),
+    sleep(3000).then(() => 'frozen'),
+  ]);
+  check('a choice has its sliding tint, the page answering', thumb === true, String(thumb));
   // Pumps: the cable and every pump on it (2026-10-21). Looked at only:
   // never saved, reconnected nor tested (a Test runs a pump).
   check('the Pumps section opens', (await click('.side button', 'Pumps')) && (await sleep(1200), await js(`!!document.querySelector('.pumps')`)));

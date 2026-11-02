@@ -201,7 +201,26 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   border: 1px solid var(--line);
   border-radius: var(--radius-ctl);
   overflow: hidden;
+  position: relative;
+  isolation: isolate;
+  background: var(--surface);
 }
+/* The tint under the picked choice, placed by `segThumb` (lib/segthumb.js):
+   it slides to a new pick instead of jumping. */
+.seg::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--thumb-w, 0);
+  transform: translateX(var(--thumb-x, 0));
+  background: color-mix(in srgb, var(--teal-700) 12%, var(--surface));
+  opacity: 0;
+  z-index: -1;
+  transition: transform 0.28s cubic-bezier(0.3, 0.7, 0.3, 1), width 0.28s cubic-bezier(0.3, 0.7, 0.3, 1), opacity 0.2s ease;
+}
+.seg.thumbed::before { opacity: 1; }
+/* first placed, or picked after none was: it appears there, no slide */
+.seg.thumb-still::before { transition: opacity 0.2s ease; }
 /* Stretched to a field's width (a grid cell), the buttons share it equally
    instead of leaving blank space after the last one. */
 .seg button {
@@ -209,9 +228,10 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   white-space: nowrap;
   border: none;
   border-radius: 0;
-  background: var(--surface);
+  background: transparent;
   color: var(--muted);
   padding: var(--s-2) var(--s-4);
+  transition: color 0.28s ease;
 }
 /* a thin rule between two choices (cw | ccw), so they read as two buttons */
 .seg button + button { border-left: 1px solid var(--line); }
@@ -228,7 +248,12 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
   background: color-mix(in srgb, var(--measured) 16%, var(--surface)); color: color-mix(in srgb, var(--measured) 75%, var(--ink));
 }
-.seg button.on { background: color-mix(in srgb, var(--teal-700) 12%, var(--surface)); color: var(--teal-ink); font-weight: 600; }
+.seg button.on { color: var(--teal-ink); font-weight: 600; }
+/* a .seg without the sliding tint keeps its pick tinted in place */
+.seg:not(.thumbed) button.on { background: color-mix(in srgb, var(--teal-700) 12%, var(--surface)); }
+@media (prefers-reduced-motion: reduce) {
+  .seg::before, .seg button { transition: none; }
+}
 
 /* card */
 .card {

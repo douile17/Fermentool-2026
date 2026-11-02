@@ -20,6 +20,7 @@
   import labqPhoto from '../../assets/pumps/labq.jpg';
   import labvPhoto from '../../assets/pumps/labv.jpg';
   import pds2Photo from '../../assets/pumps/pds2.jpg';
+  import { segThumb } from '../../lib/segthumb.js';
 
   // `group` (passed to every section) is not shown here: the side menu says it.
 
@@ -276,7 +277,7 @@
 {/snippet}
 
 {#snippet models(who, value, pick, locked)}
-  <div class="seg models" role="radiogroup" aria-label="{who} pump model" tabindex="-1" onkeydown={radioKeys}>
+  <div use:segThumb class="seg models" role="radiogroup" aria-label="{who} pump model" tabindex="-1" onkeydown={radioKeys}>
     {#each MODELS as m}
       <button type="button" role="radio" aria-checked={value === m.id} tabindex={rovingTab(value === m.id, false)}
         class:on={value === m.id} disabled={locked} onclick={() => pick(m.id)}>{m.label}</button>
@@ -384,7 +385,7 @@
             <input type="number" min="0.1" max={refillTop} step={refillStep} bind:value={speed} />
           </label>
           <div class="field"><span>Direction</span>
-            <div class="seg" role="radiogroup" aria-label="Refill pump direction" tabindex="-1" onkeydown={radioKeys}>
+            <div use:segThumb class="seg" role="radiogroup" aria-label="Refill pump direction" tabindex="-1" onkeydown={radioKeys}>
               <button role="radio" aria-checked={direction === 'cw'} tabindex={rovingTab(direction === 'cw', false)}
                 class:on={direction === 'cw'} title="Clockwise" onclick={() => (direction = 'cw')}>↻ cw</button>
               <button role="radio" aria-checked={direction === 'ccw'} tabindex={rovingTab(direction === 'ccw', false)}

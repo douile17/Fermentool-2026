@@ -15,6 +15,7 @@
   import TubePicker from '../components/TubePicker.svelte';
   import { sizeParts, tubeLabel } from '../lib/tubesize.js';
   import { downloadSettings, readSettings } from '../lib/runfile.js';
+  import { segThumb } from '../lib/segthumb.js';
 
   let f = $state({
     name: '',
@@ -517,7 +518,7 @@
       <h3>Pump and tube</h3>
       <div class="row">
         <div class="field"><span>Set the pump in</span>
-          <div class="seg" role="radiogroup" aria-label="Pump unit" tabindex="-1" onkeydown={radioKeys}>
+          <div use:segThumb class="seg" role="radiogroup" aria-label="Pump unit" tabindex="-1" onkeydown={radioKeys}>
             <button role="radio" aria-checked={f.control_var === 'ml_min'} tabindex={rovingTab(f.control_var === 'ml_min', false)}
               class:on={f.control_var === 'ml_min'} onclick={() => (f.control_var = 'ml_min')}>ml/min</button>
             <button role="radio" aria-checked={f.control_var === 'rpm'} tabindex={rovingTab(f.control_var === 'rpm', false)}
@@ -525,7 +526,7 @@
           </div>
         </div>
         <div class="field"><span>Pump direction{#if !f.direction}<span class="choose">choose</span>{/if}</span>
-          <div class="seg" class:need={!f.direction} id="pump-direction" role="radiogroup" aria-label="Pump direction" tabindex="-1" onkeydown={radioKeys}>
+          <div use:segThumb class="seg" class:need={!f.direction} id="pump-direction" role="radiogroup" aria-label="Pump direction" tabindex="-1" onkeydown={radioKeys}>
             <button role="radio" aria-checked={f.direction === 'cw'} tabindex={rovingTab(f.direction === 'cw', !f.direction)}
               class:on={f.direction === 'cw'} title="Clockwise" onclick={() => (f.direction = 'cw')}>↻ cw</button>
             <button role="radio" aria-checked={f.direction === 'ccw'} tabindex={rovingTab(f.direction === 'ccw', false)}
@@ -533,7 +534,7 @@
           </div>
         </div>
         <div class="field"><span>Regulation</span>
-          <div class="seg" role="radiogroup" aria-label="Regulation" tabindex="-1" onkeydown={radioKeys}>
+          <div use:segThumb class="seg" role="radiogroup" aria-label="Regulation" tabindex="-1" onkeydown={radioKeys}>
             <button role="radio" aria-checked={trimOn} tabindex={rovingTab(trimOn, false)} class:on={trimOn}
               disabled={!scaleConfigured} title={scaleConfigured ? 'The balance corrects the pump' : 'No balance set up'}
               onclick={() => (f.gravimetric_trim = true)}><span class="opt"><Icon name="weight" size={15} />Balance regulation</span></button>
@@ -544,7 +545,7 @@
         {#if refillShown}
           {@const byHand = f.auto_refill === false}
           <div class="field"><span>Bottle refill{#if refillNeeded}<span class="choose">choose</span>{/if}</span>
-            <div class="seg" class:need={refillNeeded} id="nr-refill" role="radiogroup" aria-label="Bottle refill" tabindex="-1" onkeydown={radioKeys}>
+            <div use:segThumb class="seg" class:need={refillNeeded} id="nr-refill" role="radiogroup" aria-label="Bottle refill" tabindex="-1" onkeydown={radioKeys}>
               <button role="radio" aria-checked={autoRefill} tabindex={rovingTab(autoRefill, refillNeeded)} class:on={autoRefill}
                 title="The refill pump tops the weighed bottle up from the reservoir" onclick={() => (f.auto_refill = true)}><span class="opt"><Icon name="droplet" size={15} />Refill pump</span></button>
               <button role="radio" aria-checked={byHand} tabindex={rovingTab(byHand, false)} class:on={byHand}
@@ -645,7 +646,7 @@
             {/if}
             {#if f.kind === 'exponential'}
               <div class="field"><span>Set by</span>
-                <div class="seg" role="radiogroup" aria-label="Exponential set by" tabindex="-1" onkeydown={radioKeys}>
+                <div use:segThumb class="seg" role="radiogroup" aria-label="Exponential set by" tabindex="-1" onkeydown={radioKeys}>
                   <button role="radio" aria-checked={f.mode === 'endpoints'} tabindex={rovingTab(f.mode === 'endpoints', false)}
                     class:on={f.mode === 'endpoints'} onclick={() => (f.mode = 'endpoints')}>start → end</button>
                   <button role="radio" aria-checked={f.mode === 'physio'} tabindex={rovingTab(f.mode === 'physio', false)}

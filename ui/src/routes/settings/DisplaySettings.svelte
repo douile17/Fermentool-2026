@@ -3,6 +3,7 @@
   import { loadConfig, patchConfig } from '../../lib/config.js';
   import { sizeParts } from '../../lib/tubesize.js';
   import SettingsCard from './SettingsCard.svelte';
+  import { segThumb } from '../../lib/segthumb.js';
 
   // `group` (passed to every section) is not shown here: the side menu says it.
 
@@ -56,7 +57,7 @@
 >
   <div class="field">
     <span>Tube sizes in</span>
-    <div class="seg" role="radiogroup" aria-label="Tube sizes in">
+    <div use:segThumb class="seg" role="radiogroup" aria-label="Tube sizes in">
       <button role="radio" aria-checked={tubeSizes === 'mm'} class:on={tubeSizes === 'mm'} onclick={() => pick('mm')}>mm first</button>
       <button role="radio" aria-checked={tubeSizes === 'in'} class:on={tubeSizes === 'in'} onclick={() => pick('in')}>inches first</button>
     </div>
