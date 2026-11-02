@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultMeasurement, fitLine, measurementProfile, pushStable, redoAllSummary, stableMean, withoutMeasurements } from './measurement.js';
+import { defaultMeasurement, fitLine, measurementProfile, pushStable, redoAllSummary, stableMean, withoutMeasurements, directionLocked, withDirection } from './measurement.js';
 
 // A 240 s measurement drawing `gPerS` from a bottle of 5029.3 g, read in
 // 0.1 g steps, like run 178 of calibration #14.
@@ -103,5 +103,26 @@ describe('redo all three', () => {
     expect(after.bursts).toEqual([]);
     expect(after).toMatchObject({ tubing_lot_id: '17297216', setpoint: 150, direction: 'ccw', target_min: 4 });
     expect(d.bursts).toHaveLength(3); // the draft passed in is untouched
+  });
+});
+
+// 27 Oct 2026: a measurement pumped the wrong way, stopped, still locked the
+// direction; only dropping it unlocked it.
+describe('the direction after a measurement', () => {
+  const stopped = [{ slot: 0, run_id: 227, weight_g: null, alarm: 'slow' }];
+  it('stays free while no measurement is weighed', () => {
+    expect(directionLocked([])).toBe(false);
+    expect(directionLocked(stopped)).toBe(false);
+    expect(directionLocked([...stopped, { slot: 1, run_id: 228, weight_g: 24.5 }])).toBe(true);
+  });
+  it('a new direction drops the measurements pumped the other way', () => {
+    const d = { tubing_lot_id: '17297216', setpoint: 100, direction: 'cw', direction_set: true, bursts: stopped };
+    const after = withDirection(d, 'ccw');
+    expect(after).toMatchObject({ direction: 'ccw', direction_set: true, bursts: [], tubing_lot_id: '17297216', setpoint: 100 });
+    expect(d.bursts).toHaveLength(1); // the draft passed in is untouched
+  });
+  it('the same direction drops nothing', () => {
+    const d = { direction: 'cw', direction_set: true, bursts: stopped };
+    expect(withDirection(d, 'cw').bursts).toBe(stopped);
   });
 });

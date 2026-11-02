@@ -105,3 +105,18 @@ export function redoAllSummary(bursts) {
 /** The session after "Redo all 3": every measurement dropped, the tube and
  *  the pump setup kept (unlike Abandon, which clears them too). */
 export const withoutMeasurements = (draft) => ({ ...draft, bursts: [] });
+
+// --- the direction once measurements exist -----------------------------------
+
+/** The pump direction is locked once a measurement is weighed: its weight
+ *  holds for that direction only. One stopped before its weight (pumped the
+ *  wrong way, 27 Oct 2026) leaves it free. */
+export const directionLocked = (bursts) => (bursts ?? []).some((b) => b.weight_g != null);
+
+/** The session with the pump turning `dir`: a new direction drops the
+ *  measurements pumped the other way (none of them weighed, or it would be
+ *  locked); their runs stay in the journal. */
+export function withDirection(draft, dir) {
+  if (draft.direction === dir) return { ...draft, direction_set: true };
+  return { ...draft, direction: dir, direction_set: true, bursts: [] };
+}

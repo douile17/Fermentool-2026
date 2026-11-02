@@ -16,6 +16,22 @@ const ML_PER_RPM_PER_MM2 = 0.064;
 /** Grams that count as "the balance moved": 3 steps, and at least 0.2 g. */
 export const movedG = (resG) => Math.max(3 * (resG > 0 ? resG : 0.1), 0.2);
 
+/** The wrong way by this many times `movedG` is the pump, not a hand on the
+ *  bench: 0.6 g on a 0.1 g balance, a few seconds of a slow line. */
+const BACKWARDS = 3;
+
+/** The way the weight goes as a burst pumps, from `[scale] position`: -1
+ *  under the feed bottle, +1 under the collecting beaker, null unknown. */
+export const weighDir = (position) => (position === 'feed' ? -1 : position === 'receiver' ? 1 : null);
+
+/** The grams a burst collected, from the balance: the change the right way
+ *  for its side (negative when it went the wrong way), either way when the
+ *  side is unknown. Null without a reading. */
+export function collectedG(w, startG, dir) {
+  if (w == null || startG == null) return null;
+  return dir ? dir * (w - startG) : Math.abs(w - startG);
+}
+
 /**
  * The expected flow of a burst, in ml/min: the setpoint in ml/min, or in rpm
  * times an earlier calibration's ml per rpm, or times the bore's rough one.
@@ -55,20 +71,27 @@ export function stallCheckAtS({ mlMin, densityGPerMl, resG, burstS }) {
  *   line): under 40 % of the expected flow when that flow is known from a
  *   real calibration or an ml/min setpoint (`trusted`), under a quarter when
  *   it is only the bore's rough figure;
+ * - 'backwards': the weight went the wrong way for the balance's side (up
+ *   under the feed bottle): the pump turns the wrong way and pushes the
+ *   line's feed back. Said at once, not after the checks' wait.
  * `null` when all is well, or too early to say.
- * The direction is whatever the weight did first: down under the feed
- * bottle, up under the collecting beaker.
+ * The direction is `dir` (`weighDir`): down under the feed bottle, up under
+ * the collecting beaker; unknown (null), whatever the weight did first.
  */
-export function burstTrouble({ samples, checkAtS, resG, mlMin = null, densityGPerMl = 1, trusted = false }) {
-  if (checkAtS == null || !samples?.length) return null;
+export function burstTrouble({ samples, checkAtS, resG, mlMin = null, densityGPerMl = 1, trusted = false, dir: side = null }) {
+  if (!samples?.length) return null;
   const last = samples[samples.length - 1];
-  if (!(last.t >= checkAtS)) return null;
   const moved = movedG(resG);
   const w0 = samples[0].w;
-  // the way the weight went first, once it went clearly
-  const first = samples.find((s) => Math.abs(s.w - w0) >= moved);
+  // 27 Oct 2026: a pump turning the wrong way pushed the line back into the
+  // bottle; the weight rose and read as flow until the line ran empty.
+  if (side && side * (last.w - w0) <= -BACKWARDS * moved) return 'backwards';
+  if (checkAtS == null || !(last.t >= checkAtS)) return null;
+  // the way the weight went first, once it went clearly (the way it should,
+  // when the balance's side is known)
+  const first = samples.find((s) => (side ? side * (s.w - w0) : Math.abs(s.w - w0)) >= moved);
   if (!first) return 'still';
-  const dir = Math.sign(first.w - w0);
+  const dir = side ?? Math.sign(first.w - w0);
   // the last window, from a reading at least checkAtS old (and after the
   // weight first moved, so the start-up itself does not count)
   const from = last.t - checkAtS;

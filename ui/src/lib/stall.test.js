@@ -2,20 +2,20 @@
 // Every case that went wrong on the bench is here: a burst must raise its
 // alarm, a working one never, down to very slow lines.
 import { describe, expect, it } from 'vitest';
-import { burstTrouble, expectedMlMin, movedG, stallCheckAtS } from './stall.js';
+import { burstTrouble, collectedG, expectedMlMin, movedG, stallCheckAtS, weighDir } from './stall.js';
 
 // A fixed noise, so a run is the same every time: +-0.04 g around the step.
 const noise = (t) => ((t * 7919) % 9) / 100 - 0.04;
 
 /** The first alarm a burst raises, and when; null if none. */
-function firstAlarm({ flow, weightAt, durS, trusted, resG = 0.1, density = 1 }) {
+function firstAlarm({ flow, weightAt, durS, trusted, resG = 0.1, density = 1, dir = null }) {
   const mlMin = expectedMlMin(flow);
   const checkAtS = stallCheckAtS({ mlMin, densityGPerMl: density, resG, burstS: durS });
   const samples = [];
   for (let t = 0; t <= durS; t++) {
     const w = Math.round(weightAt(t) / resG) * resG + (t ? noise(t) : 0);
     samples.push({ t, w });
-    const r = burstTrouble({ samples, checkAtS, resG, mlMin, densityGPerMl: density, trusted });
+    const r = burstTrouble({ samples, checkAtS, resG, mlMin, densityGPerMl: density, trusted, dir });
     if (r) return { kind: r, at: t };
   }
   return null;
@@ -96,5 +96,46 @@ describe('when the checks run', () => {
     expect(expectedMlMin({ controlVar: 'rpm', setpoint: 100, mlPerRpm: 0.04 })).toBeCloseTo(4);
     expect(expectedMlMin({ controlVar: 'rpm', setpoint: 100, innerMm: 0.8 })).toBeCloseTo(4.096);
     expect(expectedMlMin({ controlVar: 'rpm', setpoint: 0 })).toBeNull();
+  });
+});
+
+// 27 Oct 2026: the pump turned the wrong way, pushed the line's feed back
+// into the bottle on the balance, and the weight rising read as a working
+// burst (the absolute change), until the line ran empty minutes later.
+describe('a pump turning the wrong way', () => {
+  const backInto = (from = 700) => (t) => from + Math.min(6.2 * t / 60, 4);
+  it('is said at once when the balance is under the feed bottle', () => {
+    const a = firstAlarm({ flow: CAL, weightAt: backInto(), durS: 300, trusted: true, dir: -1 });
+    expect(a?.kind).toBe('backwards');
+    expect(a.at).toBeLessThan(15);
+  });
+  it('the same under the collecting beaker, the weight falling', () => {
+    const a = firstAlarm({ flow: CAL, weightAt: draws(6.2), durS: 300, trusted: true, dir: 1 });
+    expect(a?.kind).toBe('backwards');
+  });
+  it('the right way raises nothing, with the side known', () => {
+    expect(firstAlarm({ flow: CAL, weightAt: draws(6.2), durS: 300, trusted: true, dir: -1 })).toBeNull();
+    expect(firstAlarm({ flow: CAL, weightAt: (t) => 100 + (6.2 * t) / 60, durS: 300, trusted: true, dir: 1 })).toBeNull();
+  });
+  it('a hand on the bench is not the wrong way', () => {
+    const bump = (t) => 700 - (6.2 * t) / 60 + (t === 3 ? 0.3 : 0);
+    expect(firstAlarm({ flow: CAL, weightAt: bump, durS: 300, trusted: true, dir: -1 })).toBeNull();
+  });
+});
+
+describe('weighDir and collectedG', () => {
+  it('the feed bottle loses weight, the beaker gains it', () => {
+    expect(weighDir('feed')).toBe(-1);
+    expect(weighDir('receiver')).toBe(1);
+    expect(weighDir(undefined)).toBe(null);
+  });
+  it('counts only what went the right way', () => {
+    expect(collectedG(695.5, 700, -1)).toBeCloseTo(4.5);
+    expect(collectedG(704, 700, -1)).toBeCloseTo(-4);
+    expect(collectedG(704, 700, 1)).toBeCloseTo(4);
+  });
+  it('either way when the side is not known, as before', () => {
+    expect(collectedG(695.5, 700, null)).toBeCloseTo(4.5);
+    expect(collectedG(null, 700, -1)).toBe(null);
   });
 });

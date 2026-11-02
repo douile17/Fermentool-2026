@@ -20,10 +20,13 @@
   import Steps from '../components/Steps.svelte';
   import MeasurementChart from '../components/MeasurementChart.svelte';
   import {
-    measurementProfile, defaultMeasurement, pushStable, stableMean, redoAllSummary, withoutMeasurements, SKIP_START_S, SKIP_END_S,
+    measurementProfile, defaultMeasurement, pushStable, stableMean, redoAllSummary, withoutMeasurements, directionLocked, withDirection, SKIP_START_S, SKIP_END_S,
   } from '../lib/measurement.js';
-  import { expectedMlMin, stallCheckAtS, burstTrouble } from '../lib/stall.js';
+  import { expectedMlMin, stallCheckAtS, burstTrouble, weighDir, collectedG as collectedFrom } from '../lib/stall.js';
   import { inches, sizeParts, boreClass, parseSize, COMMON_SIZES, MM_PER_IN, KNOWN_BRANDS } from '../lib/tubesize.js';
+  import { segThumb } from '../lib/segthumb.js';
+  import { mmss, primeBand, primeElapsedS } from '../lib/prime.js';
+  import { fade } from 'svelte/transition';
 
   // Mirrors trim::CALIBRATION_CV_WARN_PCT and the trim bounds (Settings,
   // correction limit): warnings only.
@@ -65,6 +68,9 @@
     // [{ run_id, weight_g, start_g }], at most three; start_g is the balance
     // reading just before the burst (null without a balance)
     bursts: [],
+    // a measurement pumped the wrong way since the line was last primed: it
+    // may have emptied back into the bottle (Measurements asks to prime it)
+    line_emptied: false,
   });
 
   let d = $state(blank());
@@ -83,11 +89,15 @@
   let history = $state([]);
 
   let pumpAddr = $state(1);
+  // The way the weight must go as a burst pumps (`[scale] position`): down
+  // under the feed bottle, up under the beaker; null, either way.
+  let weighSide = $state(null);
   $effect(() => {
     get('/api/config')
       .then((c) => {
         pumpAddr = c.pump.address;
         trimLimit = c.scale?.trim_limit_pct ?? 25;
+        weighSide = weighDir(c.scale?.position);
       })
       .catch(() => {});
   });
@@ -147,6 +157,16 @@
 
   const unit = $derived(unitFor(d.control_var));
   const locked = $derived(d.bursts.length > 0);
+  // The direction stays free until a measurement is weighed: one stopped
+  // because the pump turned the wrong way is dropped by picking the other.
+  const dirLocked = $derived(directionLocked(d.bursts));
+  async function pickDirection(dir) {
+    if (dirLocked || burstRunning || working) return;
+    confirmRedo = null;
+    editing = null;
+    Object.assign(d, withDirection(d, dir));
+    await persist();
+  }
   const active = $derived(app.status?.active ?? null);
   // Each burst keeps its card (`slot` 0..2): pumping one again refills its
   // own card, the others stay where they are. `current` is the burst not
@@ -159,12 +179,13 @@
   const needsWeight = $derived(!!current && !burstRunning && current.weight_g == null);
 
   // The connected balance, read once a second while no run is pumping. Its
-  // weight change over a burst is the collected mass, whichever side it is
-  // on (under the collecting beaker, or under the feed bottle).
+  // weight change over a burst is the collected mass, the right way for its
+  // side only: under the feed bottle a rise is the pump turning backwards
+  // and pushing the line's feed back, never feed collected (27 Oct 2026).
   const scaleW = $derived(app.status?.scale_weight_g ?? null);
   const scaleStable = $derived(app.status?.scale_stable === true);
   const collectedG = $derived(
-    current?.start_g != null && scaleW != null ? Math.abs(scaleW - current.start_g) : null,
+    current?.start_g != null && scaleW != null ? collectedFrom(scaleW, current.start_g, weighSide) : null,
   );
   const complete = $derived(
     d.bursts.length === 3 && d.bursts.every((b) => b.weight_g != null && b.weight_g > 0),
@@ -185,7 +206,13 @@
   // The burst with an alarm (CHECK on its card), if any: nothing goes on
   // until it is pumped again, or its alarm waved off with "Keep going".
   const alarmed = $derived(d.bursts.find((b) => b.alarm) ?? null);
+  // The line being primed (any window's): no measurement starts meanwhile.
+  const priming = $derived(app.status?.priming ?? null);
+  // A boolean for the clock: every status frame brings a new `priming`
+  // object, and an effect on it restarted the 500 ms tick before it fired.
+  const primingOn = $derived(priming != null);
   const canStartBurst = $derived(
+    !priming &&
     loaded &&
       formOk &&
       !working &&
@@ -199,7 +226,7 @@
   // Countdown for the burst in progress, from the run's own start and length.
   let now = $state(Date.now());
   $effect(() => {
-    if (!burstRunning) return;
+    if (!burstRunning && !primingOn) return;
     const t = setInterval(() => (now = Date.now()), 500);
     return () => clearInterval(t);
   });
@@ -212,6 +239,8 @@
   async function startBurst() {
     err = null;
     working = true;
+    primedS = null;
+    d.line_emptied = false;
     const slot = freeSlot ?? d.bursts.length;
     const n = slot + 1;
     const setpoint = Number(d.setpoint);
@@ -359,7 +388,7 @@
   });
   const avgW = $derived(stableMean(stableBuf));
   // What a weighing now would record: the mean against the start weight.
-  const weighG = $derived(current?.start_g != null && avgW ? Math.abs(avgW.g - current.start_g) : collectedG);
+  const weighG = $derived(current?.start_g != null && avgW ? collectedFrom(avgW.g, current.start_g, weighSide) : collectedG);
   const canAuto = $derived(scaleW != null && !complete && !otherRunActive && (current == null || current.start_g != null || current.weight_g != null));
   const autoStep = $derived(
     burstRunning
@@ -427,7 +456,71 @@
   function markAlarm(kind) {
     if (!current || current.alarm) return;
     current.alarm = kind;
+    // turned the wrong way, it pushed the line's feed back into the bottle
+    if (kind === 'backwards') d.line_emptied = true;
     persist();
+  }
+
+  // Priming the line (lib/prime.js): the pump flat out the calibration's
+  // way until Stop priming or the daemon's 5 min limit, never a measurement.
+  // The operator held the pump's own prime key for a minute before.
+  const reduceMotion = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const ARROW = { cw: '↻ cw', ccw: '↺ ccw' };
+  let primedS = $state(null);
+  let primeWorking = $state(false);
+  let turned = $state(null);
+  const primeS = $derived(primeElapsedS(priming, now));
+  const band = $derived(primeBand({ priming, primedS, lineEmptied: !!d.line_emptied }));
+  const canPrime = $derived(loaded && directionOk && !burstRunning && !otherRunActive && canStartRun(app.status) && !primeWorking);
+  // Priming ended (here, in another window, or at the limit): how long.
+  let lastPrimeS = null;
+  $effect(() => {
+    if (priming) {
+      lastPrimeS = primeS;
+      return;
+    }
+    if (lastPrimeS == null) return;
+    primedS = lastPrimeS;
+    lastPrimeS = null;
+    untrack(() => {
+      if (d.line_emptied) {
+        d.line_emptied = false;
+        persist();
+      }
+    });
+  });
+  async function prime(dir = d.direction) {
+    err = null;
+    primeWorking = true;
+    primedS = null;
+    try {
+      await post('/api/pump/prime', { direction: dir });
+    } catch (e) {
+      err = { message: e.message, hint: e.hint ?? null };
+    } finally {
+      primeWorking = false;
+    }
+  }
+  async function stopPriming() {
+    primeWorking = true;
+    try {
+      await post('/api/pump/prime/stop', {});
+    } catch (e) {
+      err = { message: e.message, hint: e.hint ?? null };
+    } finally {
+      primeWorking = false;
+    }
+  }
+  // The direction from the band: the calibration's own (Pump setup's), so
+  // it drops measurements pumped the other way; while priming, the pump
+  // turns around at once.
+  async function primeTurn(dir) {
+    if (dir === d.direction || dirLocked) return;
+    await pickDirection(dir);
+    if (d.direction !== dir || !priming) return;
+    await prime(dir);
+    turned = dir;
+    setTimeout(() => turned === dir && (turned = null), 4000);
   }
 
   let weightInput = $state('');
@@ -903,6 +996,7 @@
       mlMin: burstMlMin,
       densityGPerMl: Number(d.density_g_per_ml),
       trusted: flowTrusted,
+      dir: weighSide,
     });
     return t && !stallKept.includes(`${current.run_id}:${t}`) ? t : null;
   });
@@ -922,12 +1016,14 @@
     reversed: 'The weight went back the wrong way during this measurement.',
     dry: 'This measurement came out with almost nothing on the balance.',
     slow: 'The flow was far below what this tube should give.',
+    backwards: 'The weight went the wrong way: the pump turned the wrong way.',
   };
   const TROUBLE = {
     still: 'The balance has not moved since the measurement started',
     stopped: 'The balance has stopped moving',
     reversed: 'The weight is going back the wrong way',
     slow: 'The flow is far below what this tube should give',
+    backwards: 'The weight is going the wrong way',
   };
   async function stopStalled() {
     if (d.auto) await setAuto(false);
@@ -1058,7 +1154,7 @@
           <section class="dia" aria-label="Diameters">
             <div class="dia-head">
               <h4>Diameters</h4>
-              <div class="seg small" role="radiogroup" aria-label="Diameters in">
+              <div use:segThumb class="seg small" role="radiogroup" aria-label="Diameters in">
                 <button role="radio" aria-checked={unitNow === 'mm'} class:on={unitNow === 'mm'} disabled={locked} onclick={() => setDiaUnit('mm')}>mm</button>
                 <button role="radio" aria-checked={unitNow === 'in'} class:on={unitNow === 'in'} disabled={locked} onclick={() => setDiaUnit('in')}>inches</button>
               </div>
@@ -1118,10 +1214,10 @@
             <h3>Pump setup</h3>
           </div>
           <div class="fields four">
-            <div class="field"><span>Pump direction{#if !directionOk && !locked}<span class="choose">choose</span>{/if}</span>
-              <div class="seg" class:need={!directionOk && !locked} id="pump-direction" role="group" aria-label="Pump direction">
-                <button disabled={locked} class:on={d.direction === 'cw'} onclick={() => { d.direction = 'cw'; d.direction_set = true; persist(); }} title="Clockwise">↻ cw</button>
-                <button disabled={locked} class:on={d.direction === 'ccw'} onclick={() => { d.direction = 'ccw'; d.direction_set = true; persist(); }} title="Counter-clockwise">↺ ccw</button>
+            <div class="field"><span>Pump direction{#if !directionOk && !dirLocked}<span class="choose">choose</span>{/if}</span>
+              <div use:segThumb class="seg" class:need={!directionOk && !dirLocked} id="pump-direction" role="group" aria-label="Pump direction">
+                <button disabled={dirLocked || burstRunning} class:on={d.direction === 'cw'} onclick={() => pickDirection('cw')} title="Clockwise">↻ cw</button>
+                <button disabled={dirLocked || burstRunning} class:on={d.direction === 'ccw'} onclick={() => pickDirection('ccw')} title="Counter-clockwise">↺ ccw</button>
               </div>
             </div>
             <label class="field" id="cal-setpoint"><span>Setpoint, {unit}{#if d.control_var === 'rpm'}<Hint label="Why rpm">
@@ -1173,7 +1269,9 @@
           <label class="field narrow"><span>Operator (optional)</span>
             <input type="text" bind:value={d.operator} onchange={persist} />
           </label>
-          {#if locked}<p class="k">Locked after the first measurement.</p>{/if}
+          {#if locked && !dirLocked && !burstRunning}
+            <p class="k" id="cal-dir-free">Locked after the first measurement, except the direction until one is weighed: changing it drops the measurement{d.bursts.length === 1 ? '' : 's'} pumped {d.direction}.</p>
+          {:else if locked}<p class="k">Locked after the first measurement.</p>{/if}
           <div class="nav-row">
             {@render abandonLink()}
             <span class="acts">
@@ -1251,12 +1349,54 @@
             {#if headline.s}<span class="now-s">{headline.s}</span>{/if}
           </div>
 
+          {#if !burstRunning && !complete && !(needsWeight && !current?.alarm) && directionOk}
+            <div class="prime t-{band}">
+              <PumpHead direction={d.direction} frac={0.9} size={34} spin={band === 'run'} />
+              {#key band}
+                <div class="prime-body" in:fade={{ duration: reduceMotion ? 0 : 200 }}>
+                  <div class="prime-txt">
+                    {#if band === 'ask'}
+                      <b>The line may have emptied back into the bottle.</b>
+                      <span>A measurement turned the wrong way. Prime the line before measuring again.</span>
+                    {:else if band === 'run'}
+                      <b>Priming the line</b>
+                      <span>Max speed, <span class="mono nw">{ARROW[priming.direction]}</span>. Stop once feed comes out of the end; wrong way, switch the direction. Stops by itself at <span class="mono nw">{mmss(priming.max_s)}</span>.</span>
+                      {#if turned}<span class="turned" in:fade={{ duration: reduceMotion ? 0 : 250 }}>Turned around: now {ARROW[turned]}.</span>{/if}
+                    {:else if band === 'done'}
+                      <b class="primed">Line primed</b>
+                      <span>Primed for <span class="mono nw">{mmss(primedS)}</span>. Start measurement {(freeSlot ?? 0) + 1} when ready.</span>
+                    {:else}
+                      <span>Line empty or full of air? Priming runs the pump at max speed until you stop it.</span>
+                    {/if}
+                    {#if dirLocked}<span>Direction locked: a measurement was weighed turning {ARROW[d.direction]}.</span>{/if}
+                  </div>
+                  <div class="prime-acts">
+                    <div use:segThumb class="seg small" role="group" aria-label="Pump direction">
+                      <button disabled={dirLocked || primeWorking} class:on={d.direction === 'cw'} onclick={() => primeTurn('cw')} title="Clockwise">↻ cw</button>
+                      <button disabled={dirLocked || primeWorking} class:on={d.direction === 'ccw'} onclick={() => primeTurn('ccw')} title="Counter-clockwise">↺ ccw</button>
+                    </div>
+                    {#if band === 'run'}
+                      <span class="prime-clock mono" aria-live="off">{mmss(primeS)}</span>
+                      <button class="btn-danger small" disabled={primeWorking} onclick={stopPriming}>Stop priming</button>
+                    {:else if band === 'done'}
+                      <button class="btn-ghost small" disabled={!canPrime} onclick={() => prime()}>Prime again</button>
+                    {:else}
+                      <button class="btn-ghost small" disabled={!canPrime} onclick={() => prime()}>Prime the line</button>
+                    {/if}
+                  </div>
+                </div>
+              {/key}
+            </div>
+          {/if}
+
           {#if trouble}
             <div class="stall" role="alert">
               <span>
                 <b>{TROUBLE[trouble]}</b>
-                ({num(collectedG, wDig)} g in {dur(burstElapsedS)}).
-                {trouble === 'reversed'
+                ({num(Math.abs(collectedG ?? 0), wDig)} g {collectedG < 0 ? 'back ' : ''}in {dur(burstElapsedS)}).
+                {trouble === 'backwards'
+                  ? `Is the pump turning the right way? This measurement turns ${d.direction}: stop it, pick the other direction, and prime the line again.`
+                  : trouble === 'reversed'
                   ? 'Is the line still on the pump head and in the liquid, the bottle still on the balance?'
                   : trouble === 'slow'
                     ? `About ${num(burstMlMin, 1)} ml/min expected. Is the line clamped in the pump head, not just siphoning?`
@@ -1714,6 +1854,29 @@
   .muted { color: var(--muted); }
   .warn { font-size: 13px; color: var(--danger-ink); margin: 0; }
   .k.bad { color: var(--danger-ink); }
+  /* Priming the line: quiet, orange when a measurement went the wrong way,
+     blue while the pump fills the line; the tint moves, the words fade. */
+  .prime {
+    display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-4);
+    padding: var(--s-3) var(--s-4); border-radius: 10px; border: 1px solid var(--line);
+    background: var(--surface); margin-bottom: var(--s-3);
+    transition: background-color 0.35s ease, border-color 0.35s ease;
+  }
+  .prime.t-ask { background: var(--warn-bg); border-color: transparent; }
+  .prime.t-ask b { color: var(--warn-ink); }
+  .prime.t-run { background: var(--fill-bg); border-color: transparent; }
+  .prime.t-run b { color: var(--fill-ink); }
+  .prime .primed { color: var(--green-ink); }
+  .prime-body { flex: 1 1 360px; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-4); }
+  .prime-txt { flex: 1 1 280px; min-width: 0; display: grid; gap: 2px; font-size: 13px; }
+  .prime-txt b { font-size: 14px; }
+  .prime-acts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }
+  .prime-clock { font-size: 20px; font-weight: 500; color: var(--fill-ink); min-width: 4.2ch; }
+  .prime .turned { color: var(--fill-ink); font-size: 12px; }
+  .prime .nw { white-space: nowrap; }
+  /* on a tinted band, a ghost button needs the card's ground to read as one */
+  .prime .btn-ghost { background: var(--surface); }
+  @media (prefers-reduced-motion: reduce) { .prime { transition: none; } }
   .stall {
     display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--s-2) var(--s-4);
     padding: var(--s-3) var(--s-4); border-radius: var(--radius-ctl); font-size: 13.5px;
