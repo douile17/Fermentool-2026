@@ -25,7 +25,7 @@ this without being asked.
 
 **Before any UI change, read `docs/DESIGN.md`**: the settled design direction
 (colour only when a state needs an eye, the state system and `StateIcon`,
-Plex / Plex Mono / Barlow, charts from 0, `*-ink` tokens at WCAG AA) and the
+Plex Sans for text and figures (no dotted zero) / Barlow, charts from 0, `*-ink` tokens at WCAG AA) and the
 process (mockup on a separate page first, implement on the user's go). Follow
 it instead of re-proposing it; the user should not have to explain it again.
 
@@ -261,6 +261,27 @@ end. Calibration bursts are the exception: they still finish and stop
 the pump at their duration (their weighing window). `HoldingStatus` /
 `stop_pump` remain only for a hold left by an older daemon.
 
+## Tubing calibration: direction and priming (2026-10-27/28)
+
+- The weight must go the way `[scale] position` says (`weighDir`: down
+  under the feed bottle, up under a receiver). The wrong way by 3 x
+  `movedG` is the `backwards` alert at once, and the collected weight
+  counts only the right way (`collectedG`, `lib/stall.js`): a pump turning
+  the wrong way pushed the line's feed back into the bottle and read as
+  flow (run 227). A beaker on the balance with `position = feed` now reads
+  as the wrong way.
+- The direction locks at the first weighed measurement only
+  (`directionLocked`); changed before, it drops the unweighed ones
+  (`withDirection`, `lib/measurement.js`).
+- Priming (`engine/prime.rs`, `POST /api/pump/prime` / `prime/stop`,
+  `status.priming`): the feed pump at its top speed the calibration's way,
+  until Stop or `PRIME_MAX` (5 min, the control loop's); asked the other way
+  while priming, it turns around. Not a run: refused during one, ended by
+  one starting, events without a run. No measurement starts while priming
+  (`canStartBurst`). The page's clock effect depends on a boolean
+  (`primingOn`): on the `priming` object, renewed by every status frame, it
+  restarted its tick before it ever fired.
+
 ## Gravimetric trim: regulation and alarms (`tracking.rs`, `engine::scale_tick`)
 
 - c starts at the tubing calibration's `c0` (`Tracker::c_seed`). Before the
@@ -304,6 +325,18 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   start, and **at once when Settings changes it mid-fill**
   (`refill_speed_now`, event `refill_speed`); a direction change waits for
   the next fill (reversed mid-fill it would empty the bottle).
+- **A fill that stops rising is cut** (`refill_cycle.rs`, 2026-10-28, run
+  242: a dry reservoir left the refill pump turning until stopped by hand).
+  By the balance alone, never against an expected flow (that cut a slow
+  pump that filled, runs 186/192, removed 2026-10-19): risen during this
+  fill, then under the rise threshold over 30 s, the refill pump stops at
+  once, `alarm_refill_dry`, the cycle halted until Refill now; never risen
+  (priming), `alarm_refill_no_rise`, then the same cut at `PRIME_GRACE_S`
+  (3 min). A slow pump that fills keeps rising and is never cut.
+- **The feed drawn during a refill (`drawn_g`) stops at the "after" weight**
+  (`tracking_report`, the `refill` event's time): the estimate ran 58 s past
+  it on run 242 and Feed bottle counted that feed twice (9 g over). The
+  daemon's own delivered figure, the regulation's, was right.
 - No "runs dry" time anywhere: the balance weighs the bottle, its cap and its
   tubing too, whose weight changes per bottle. Only differences of weight are
   projected (`drawnInS`: the next refill).
@@ -386,6 +419,11 @@ in `rundetail.js` as tested plain functions, not in the component.
   (`settings.css`: no box, red ink, unplug icon); a white outlined button
   looked stuck on. Tone classes are `t-ok`…: `settings.css` styles a bare
   `.ok` inside `.settings-pane`, never name a class `.ok` there.
+- Every `.seg` (choice buttons) carries `use:segThumb` (`lib/segthumb.js`):
+  its tint slides to the pick, placed on the `.seg`'s own `::before`. A new
+  `.seg` gets the action too. Its observer must ignore the `.seg`'s own class
+  changes (it sets them): reacting to them looped and froze the page; the
+  smoke test checks the page still answers.
 - Save stays disabled until something changes; a two-way choice (Display)
   or a single switch (Crash resume) applies on the click. The calibration
   measurement grace is in `config.toml` only (`[resume] grace_minutes`). Rare or destructive actions of a list row go into a
@@ -443,7 +481,7 @@ template only targets group chats), which is why ntfy is the default.
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
 - The session logs, findings on the hardware and the to-do list:
-  `docs/notes-de-session-*.md` (latest: `2026-10-21`, its section 8 is the
+  `docs/notes-de-session-*.md` (latest: `2026-10-28`, its section 12 is the
   open list). User-facing changes: `CHANGELOG.md`.
 
 ## RS-485 bus: one pump switched off silences the other (2026-10-23)

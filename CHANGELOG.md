@@ -2,6 +2,61 @@
 
 ## Non publié (depuis 0.1.5)
 
+### Réserve de refill vide : la pompe s'arrête (28 octobre)
+
+- Un remplissage où la bouteille a monté puis ne monte plus pendant 30 s
+  (réserve vide, tuyau débranché) arrête la pompe de refill et lève une
+  alarme ; le remplissage automatique attend « Refill now ». Avant, la
+  pompe tournait jusqu'à un arrêt à la main (run 242). Un remplissage où
+  rien ne monte dès le départ (le tuyau s'amorce) continue, 3 min au plus.
+  Une pompe lente qui remplit, même doucement, n'est jamais coupée : le
+  jugement se fait à la balance seule, comme depuis le 19 octobre.
+- « Feed bottle » ne compte plus deux fois le feed tiré pendant un refill
+  qui a continué après la stabilisation du niveau : le run 242 affichait
+  9 g de trop par rapport à la balance de récupération. Corrigé aussi pour
+  les runs passés, à leur réouverture.
+
+### Amorcer le tuyau depuis la calibration (28 octobre)
+
+- Dans l'étape Measurements, « Prime the line » fait tourner la pompe à sa
+  vitesse max, dans le sens de la calibration, jusqu'à « Stop priming » ou
+  5 min au plus : plus besoin de rester appuyé sur la touche de la pompe.
+  Ce n'est pas une mesure, rien n'est pesé ; le début et la fin sont notés
+  dans le journal. Refusé pendant un run, et aucune mesure ne démarre
+  pendant l'amorçage.
+- Le sens se change dans le bandeau, avant ou pendant l'amorçage : la pompe
+  s'arrête et repart aussitôt dans l'autre sens. C'est le sens de la
+  calibration (même règle que dans Pump setup).
+- Après une mesure qui a tourné à l'envers, le bandeau passe en orange et
+  demande d'amorcer avant de mesurer à nouveau.
+- Les boutons de choix (cw | ccw, mm | inches, rpm | ml/min…) font glisser
+  leur fond vers le choix cliqué, dans toute l'app.
+
+### Calibration : une pompe qui tourne à l'envers est signalée (27 octobre)
+
+- Pendant une mesure, un poids qui va dans le mauvais sens pour la place
+  de la balance (il monte sous la bouteille de feed) est signalé tout de
+  suite : « The weight is going the wrong way », en demandant si la pompe
+  tourne dans le bon sens. Avant, la pompe à l'envers repoussait le feed du
+  tuyau dans la bouteille et cette prise de poids comptait comme du feed
+  recueilli, jusqu'à ce que le tuyau soit vide.
+- Le poids recueilli ne compte plus que dans le bon sens : une mesure à
+  l'envers ne peut plus être enregistrée comme une pesée valable.
+- Le sens de la pompe reste modifiable dans « Pump setup » tant qu'aucune
+  mesure n'est pesée : une mesure arrêtée parce que la pompe tournait à
+  l'envers est jetée en choisissant l'autre sens, sans « Drop it » ni
+  Abandon. Le tube et le réglage sont gardés.
+
+### Prochain remplissage juste après un changement de débit (27 octobre)
+
+- L'heure du prochain remplissage automatique sur l'Overview suit le
+  nouveau débit dès qu'il est pesé : elle gardait l'ancien longtemps après
+  un changement (trop tôt après une baisse, trop tard après une hausse). Le
+  remplissage lui-même partait déjà au bon poids.
+- « Recent activity » dit sous l'heure de chaque événement le temps depuis
+  le début du run ; « since Tue 08:15, at 18 h 05 » sous le débit et dans
+  « Change rate », de même dans le choix du débit de « Run again ».
+
 ### Pompes muettes sur le câble partagé (23 octobre)
 
 - Quand le câble ne répond plus, la ligne en haut de page dit « Pumps not
