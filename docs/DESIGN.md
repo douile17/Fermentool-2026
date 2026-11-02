@@ -86,6 +86,15 @@ of `app.css`; no literal colour in a component.
   a size up (22 px) to read as large as Plex.
 - All fonts are **bundled** (`@fontsource`, imported in `main.js`): the lab PC
   may be offline. No font from a CDN.
+- **Pictograms: Solar, linear style** (480 Design, CC BY 4.0, 1.5 px stroke
+  on a 24 grid), chosen 2026-11-02 on a page comparing 29 libraries (Lucide
+  before, Hugeicons tried). Their shapes are copied into
+  `components/Icon.svelte` (no package, works offline); add a glyph from the
+  same set, never mix in another library. CC BY asks for a credit: keep the
+  "Icons" line in Settings > About. Solar has no plain hand and no crossed
+  plug: "By hand" uses `user-hand-up`, Disconnect `unlink-minimalistic`.
+  The state pictures (pump head, bottle, alarm triangle) and the Settings
+  gear are our own drawings, not icons.
 
 ## 5. Charts
 
@@ -119,6 +128,10 @@ of `app.css`; no literal colour in a component.
 
 - Radius 14 px cards, 9 px controls; hairline `--line` border, a barely
   visible shadow. Cards set off by role, not every block.
+- A tag or chip with words in it (the band's state word, "choose", run
+  states, tube chips, badges) is a **rounded rectangle**, `--radius-tag`
+  (6 px), never a full pill (decided 2026-11-02). Full rounding stays for
+  what has no words: dots, progress bars, switches, round icon buttons.
 - Spacing scale 4 / 8 / 12 / 16 / 24 / 32 / 48 (`--s-1` … `--s-7`).
 - Rail (200 px) + fluid content; collapses to a top strip under 720 px.
 - The big feed rate is the largest thing on the Overview.

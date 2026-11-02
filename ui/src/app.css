@@ -44,6 +44,8 @@
 
   --radius: 14px;
   --radius-ctl: 9px;
+  /* a tag or chip with words in it: a rounded rectangle, never a full pill */
+  --radius-tag: 6px;
   --shadow: 0 1px 2px rgba(18, 41, 46, 0.04);
   --shadow-pop: 0 12px 40px rgba(18, 41, 46, 0.16);
 
@@ -249,7 +251,7 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .seg.need button:hover { background: color-mix(in srgb, var(--measured) 12%, var(--surface)); }
 /* "choose" badge on a field label: a choice no default makes for you. */
 .choose {
-  margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  margin-left: 6px; padding: 1px 7px; border-radius: var(--radius-tag);
   font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
   background: color-mix(in srgb, var(--measured) 16%, var(--surface)); color: color-mix(in srgb, var(--measured) 75%, var(--ink));
 }
@@ -278,7 +280,7 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 /* pills */
 .pill {
   font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
-  padding: 2px 8px; border-radius: 6px;
+  padding: 2px 8px; border-radius: var(--radius-tag);
   background: var(--surface-sunken); color: var(--muted);
 }
 .pill.running { background: color-mix(in srgb, var(--green-500) 16%, var(--surface)); color: var(--green-ink); }

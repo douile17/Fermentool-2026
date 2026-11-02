@@ -75,7 +75,7 @@
   ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--s-2); }
   li {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 4px 10px 4px 6px; border-radius: 999px;
+    padding: 4px 10px 4px 6px; border-radius: var(--radius-tag);
     border: 1px solid var(--line); background: var(--surface);
     font-size: 13px; color: var(--muted);
     transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
@@ -84,7 +84,7 @@
   li:not(.done):has(.jump) { border-color: color-mix(in srgb, var(--measured) 55%, var(--surface)); }
   .jump {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 4px 10px 4px 6px; border: none; border-radius: 999px;
+    padding: 4px 10px 4px 6px; border: none; border-radius: var(--radius-tag);
     background: transparent; color: var(--ink); font: inherit; font-size: 13px; cursor: pointer;
   }
   .jump:hover { background: color-mix(in srgb, var(--measured) 10%, var(--surface)); }

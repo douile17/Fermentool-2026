@@ -810,7 +810,7 @@
   .detail-head h2 { margin: 4px 0 2px; font-size: 22px; text-wrap: balance; overflow-wrap: anywhere; }
   .when { display: flex; flex-wrap: wrap; column-gap: var(--s-2); font-size: 13px; color: var(--muted); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s-2); }
-  .chip { padding: 3px 10px; border-radius: 999px; background: var(--surface-sunken); font-size: 13px; color: var(--ink); }
+  .chip { padding: 3px 10px; border-radius: var(--radius-tag); background: var(--surface-sunken); font-size: 13px; color: var(--ink); }
   .chip b { font-weight: 600; }
   .when .sep { opacity: 0.6; }
   .nw { white-space: nowrap; }

@@ -862,7 +862,7 @@
   .band-state { display: flex; align-items: center; gap: var(--s-4); flex: 1 1 300px; min-width: 0; }
   .band-text { min-width: 0; flex: 1; }
   .band-word {
-    display: inline-block; margin-bottom: 4px; padding: 2px 8px; border-radius: 999px;
+    display: inline-block; margin-bottom: 4px; padding: 2px 8px; border-radius: var(--radius-tag);
     font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
     color: var(--muted); background: color-mix(in srgb, var(--muted) 14%, transparent);
   }

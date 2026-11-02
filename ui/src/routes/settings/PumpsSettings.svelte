@@ -466,7 +466,7 @@
   .pic img { max-width: 108px; max-height: 84px; object-fit: contain; display: block; }
   .hd {
     position: absolute; right: 4px; bottom: 4px; font: 600 10.5px var(--mono); white-space: nowrap;
-    background: var(--teal-700); color: var(--on-primary); padding: 1px 6px; border-radius: 999px;
+    background: var(--teal-700); color: var(--on-primary); padding: 1px 6px; border-radius: var(--radius-tag);
   }
   .top { grid-area: top; display: flex; align-items: center; gap: var(--s-1) var(--s-3); flex-wrap: wrap; min-width: 0; min-height: 28px; }
   .nm { font-weight: 600; }
@@ -488,7 +488,7 @@
   .quiet { grid-area: state; justify-self: end; align-self: center; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
   .badge {
     grid-area: state; justify-self: end; align-self: center; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
-    font-size: 12px; font-weight: 600; padding: 3px 10px 3px 8px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; padding: 3px 10px 3px 8px; border-radius: var(--radius-tag);
     background: var(--danger-bg); color: var(--danger-ink);
   }
   .badge::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }

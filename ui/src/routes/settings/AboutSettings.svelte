@@ -95,6 +95,13 @@
       <dt>Licence</dt>
       <dd>{about.license}</dd>
 
+      <!-- CC BY 4.0 asks for this credit -->
+      <dt>Icons</dt>
+      <dd>
+        <a href="https://www.figma.com/community/file/1166831539721848736" target="_blank" rel="noopener">Solar</a>
+        by 480 Design, <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>
+      </dd>
+
       <dt>Daemon running for</dt>
       <dd title={new Date(about.started_at_ms).toLocaleString(LOCALE)}>
         {since(about.started_at_ms)}, since {new Date(about.started_at_ms).toLocaleString(LOCALE)}

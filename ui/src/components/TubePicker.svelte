@@ -6,6 +6,7 @@
   // mm and inches (Settings, Display, says which leads). One row per tube
   // with its newest calibration; older ones on request.
   import { app } from '../lib/state.svelte.js';
+  import Icon from './Icon.svelte';
   import { num, stamp } from '../lib/fmt.js';
   import { sizeParts, diaParts, boreKey, boreClass, sizeMatches, tubeLabel } from '../lib/tubesize.js';
 
@@ -209,13 +210,13 @@
       <span class="t1">Choose the tube on the pump</span>
       <span class="t2">{cals.length ? `${groups.length} tube${groups.length === 1 ? '' : 's'} calibrated` : 'No tube calibrated yet'}</span>
     {/if}
-    <span class="chg">{open ? 'Close' : chosen ? 'Change tube' : 'Choose'}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></span>
+    <span class="chg">{open ? 'Close' : chosen ? 'Change tube' : 'Choose'}<Icon name="chevron-down" size={16} /></span>
   </button>
 
   {#if open}
     <div class="pop" bind:this={pop}>
       <label class="search">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+        <Icon name="search" size={16} />
         <input bind:this={search} bind:value={q} oninput={() => (active = 0)} onkeydown={onKey}
           placeholder="Type a lot, a reference, 0.063, 1/16 or 1.6" aria-label="Find a tube" autocomplete="off"
           role="combobox" aria-expanded="true" aria-controls="tube-list" aria-activedescendant={picks[active] ? `tube-opt-${picks[active].c.id}` : undefined} />
@@ -295,12 +296,12 @@
     padding: 7px 12px; border-radius: 8px; border: 1px solid var(--teal-700); color: var(--teal-700);
     font-size: 13px; font-weight: 600; white-space: nowrap; transition: background 0.15s, color 0.15s;
   }
-  .chg svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2.2; transition: transform 0.15s; }
+  .chg :global(svg) { transition: transform 0.15s; }
   .trigger:hover .chg, .trigger[aria-expanded='true'] .chg { background: var(--teal-700); color: var(--on-primary); }
-  .trigger[aria-expanded='true'] .chg svg { transform: rotate(180deg); }
+  .trigger[aria-expanded='true'] .chg :global(svg) { transform: rotate(180deg); }
 
   .badge {
-    display: inline-flex; align-items: center; padding: 0 7px; border-radius: 999px; white-space: nowrap;
+    display: inline-flex; align-items: center; padding: 0 7px; border-radius: var(--radius-tag); white-space: nowrap;
     font-size: 11px; font-weight: 600;
     background: color-mix(in srgb, var(--lime-300) 50%, var(--surface)); color: var(--green-600);
   }
@@ -313,12 +314,12 @@
     box-shadow: var(--shadow-pop);
   }
   .search { display: flex; align-items: center; gap: var(--s-2); padding: 0 var(--s-3); border-bottom: 1px solid var(--line); }
-  .search svg { width: 16px; height: 16px; flex: none; stroke: var(--muted); fill: none; stroke-width: 2; }
+  .search :global(svg) { flex: none; color: var(--muted); }
   .search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 11px 0; box-shadow: none; }
   .count { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
   .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px var(--s-3); border-bottom: 1px solid var(--line); background: var(--surface-sunken); }
-  .chip { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink); font-size: 12.5px; cursor: pointer; white-space: nowrap; }
+  .chip { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 10px; border: 1px solid var(--line); border-radius: var(--radius-tag); background: var(--surface); color: var(--ink); font-size: 12.5px; cursor: pointer; white-space: nowrap; }
   .chip b { font-family: var(--mono); font-weight: 600; }
   .chip small { font-family: var(--mono); color: var(--muted); }
   .chip .dot { align-self: center; width: 9px; height: 9px; border-radius: 50%; background: var(--c-line); margin-right: 2px; }
@@ -361,5 +362,5 @@
   .foot label { display: flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; }
   .foot-acts { display: flex; gap: var(--s-4); flex-wrap: wrap; }
   .linkish { background: none; border: none; padding: 0; font: inherit; color: var(--teal-700); text-decoration: underline; cursor: pointer; }
-  @media (prefers-reduced-motion: reduce) { .chg, .chg svg { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .chg, .chg :global(svg) { transition: none; } }
 </style>

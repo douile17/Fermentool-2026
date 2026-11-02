@@ -2,6 +2,18 @@
 
 ## Non publié (depuis 0.1.5)
 
+### Nouveaux pictogrammes (2 novembre)
+
+- Les icônes de l'interface (menu, réglages, boutons, sélecteur de tube)
+  passent de Lucide à Solar (480 Design) : un trait plus fin et plus rond.
+  Choisies sur une page qui comparait 29 bibliothèques. Leur licence
+  (CC BY 4.0) demande de citer l'auteur : une ligne « Icons » dans
+  Settings > About. Les dessins d'état (pompe, bouteille, alarme) et
+  l'engrenage ne changent pas.
+- Les étiquettes avec du texte (le mot d'état du bandeau, « choose »,
+  les états des runs, les tubes, les badges) deviennent des rectangles aux
+  coins arrondis au lieu de bulles.
+
 ### Réserve de refill vide : la pompe s'arrête (28 octobre)
 
 - Un remplissage où la bouteille a monté puis ne monte plus pendant 30 s

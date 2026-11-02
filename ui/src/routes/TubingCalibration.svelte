@@ -1935,7 +1935,7 @@
   .field.narrow { max-width: 280px; }
   .field.grow { flex: 1 1 260px; }
   .chip {
-    padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line);
+    padding: 5px 11px; border-radius: var(--radius-tag); border: 1px solid var(--line);
     background: var(--surface); color: var(--ink); font-size: 12.5px;
   }
   .chip:not(:disabled):hover { border-color: var(--teal-400); }
@@ -2037,7 +2037,7 @@
   .bcard.next { border-style: dashed; background: transparent; }
   .bcard.next .bc-head b, .bcard.next .bc-big { color: var(--muted); }
   .bc-head { display: flex; justify-content: space-between; align-items: center; }
-  .btag { font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--surface-sunken); color: var(--muted); }
+  .btag { font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: var(--radius-tag); background: var(--surface-sunken); color: var(--muted); }
   .btag.t-ok { background: color-mix(in srgb, var(--green-500) 16%, var(--surface)); color: var(--green-600); }
   .btag.t-now { background: var(--teal-700); color: var(--on-primary); text-transform: uppercase; letter-spacing: 0.06em; }
   .held { font-size: 13px; font-weight: 600; color: var(--danger-ink); }
@@ -2203,7 +2203,7 @@
   .hist tr.archived td { background: var(--surface); }
   .hist tr.archived td:first-child { box-shadow: none; }
   .bore-tag {
-    display: inline-flex; align-items: baseline; padding: 0 8px; border-radius: 999px; white-space: nowrap;
+    display: inline-flex; align-items: baseline; padding: 0 8px; border-radius: var(--radius-tag); white-space: nowrap;
     background: var(--surface); border: 1px solid var(--c-line); color: var(--c-ink); font-weight: 600;
   }
   .bore-tag .sec { font-weight: 400; }
