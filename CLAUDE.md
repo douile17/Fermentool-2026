@@ -506,7 +506,7 @@ template only targets group chats), which is why ntfy is the default.
   the user asked for the deploy, `POST /api/shutdown`, `cargo build
   --release -p fermentool-core` and `cargo build --release -p
   fermentool-camera --features capture` (the camera helper, next to the
-  daemon in `targetelease`), start the exe, check `/api/status` and that
+  daemon in `target\release`), start the exe, check `/api/status` and that
   the served bundle contains the change; tell the user to Ctrl+F5 (an open
   tab keeps the old UI in memory).
 - **During an active run, run heavy work at low priority**, so Windows
@@ -572,7 +572,7 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   frame, not at open.
 - **Build the helper with the daemon**: `cargo build --release -p
   fermentool-camera --features capture`, so `fermentool-camera.exe` sits
-  next to `fermentool-core.exe` in `targetelease` (the daemon looks for it
+  next to `fermentool-core.exe` in `target\release` (the daemon looks for it
   there; a deploy of `fermentool-core` alone reports "Camera helper missing").
   The installer ships it as a sidecar (`copy-sidecar.ps1`).
 - The live view grabs only while a viewer is counted (`LIVE_FPS` 5). Every
