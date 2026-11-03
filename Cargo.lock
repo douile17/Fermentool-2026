@@ -1281,6 +1281,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum",
+ "fermentool-camera",
  "fermentool-curves",
  "fermentool-modbus",
  "jiff",

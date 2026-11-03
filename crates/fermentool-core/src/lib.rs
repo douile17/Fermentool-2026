@@ -6,6 +6,7 @@
 //! [`timing`] logs per-minute summaries of the loops' timing.
 
 pub mod api;
+pub mod camera;
 pub mod config;
 pub mod control;
 pub mod engine;
