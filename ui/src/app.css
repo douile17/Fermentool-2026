@@ -47,7 +47,6 @@
   --video-tag: rgba(18, 41, 46, 0.72);
   --video-ink: #ffffff;
   --video-muted: #a9bdbc;
-  --video-live: #37d39b;
 
   --radius: 14px;
   --radius-ctl: 9px;
@@ -106,7 +105,6 @@
     --video-tag: rgba(18, 41, 46, 0.72);
     --video-ink: #ffffff;
     --video-muted: #a9bdbc;
-    --video-live: #37d39b;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
     --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.4);
   }
@@ -148,7 +146,6 @@
   --video-tag: rgba(18, 41, 46, 0.72);
   --video-ink: #ffffff;
   --video-muted: #a9bdbc;
-  --video-live: #37d39b;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.4);
 }

@@ -291,6 +291,18 @@ try {
   const camCfg = async () => JSON.stringify((await (await fetch(`${URL}/api/config`)).json()).camera ?? null);
   const camBefore = await camCfg();
   const answers = (expr) => Promise.race([js(expr), sleep(3000).then(() => 'frozen')]);
+  // A live view left must close its stream: the daemon's viewer count back
+  // to what it was before (another open tab may hold one), within 5 s.
+  const camViewers = async () => (await (await fetch(`${URL}/api/camera`)).json()).viewers;
+  const viewersBefore = await camViewers();
+  check('GET /api/camera counts the live viewers', Number.isInteger(viewersBefore), String(viewersBefore));
+  const viewersBack = async () => {
+    for (let i = 0; i < 25; i++) {
+      if ((await camViewers()) <= viewersBefore) return true;
+      await sleep(200);
+    }
+    return false;
+  };
   await cmd('Page.navigate', { url: 'about:blank' });
   await sleep(300);
   await cmd('Page.navigate', { url: `${URL}/#settings/camera` });
@@ -308,6 +320,7 @@ try {
   check('nothing about the camera saved', (await camCfg()) === camBefore);
   await cmd('Page.navigate', { url: 'about:blank' });
   await sleep(300);
+  check('leaving Settings, Camera closes its live preview (viewers back)', await viewersBack(), `viewers ${await camViewers()}, before ${viewersBefore}`);
   await cmd('Page.navigate', { url: `${URL}/#camera` });
   await sleep(2500);
   check('#camera opens the Camera page', (await js(`document.querySelector('.nav-item.active')?.textContent.trim()`)) === 'Camera' && (await js(`document.querySelector('h1')?.textContent.trim()`)) === 'Camera');
@@ -318,6 +331,7 @@ try {
   // --- Tubing calibration last: it is only looked at, its draft untouched
   await click('button', 'Feeding profile');
   await sleep(500);
+  check('leaving the Camera page closes its live view (viewers back)', await viewersBack(), `viewers ${await camViewers()}, before ${viewersBefore}`);
   check('Tubing calibration opens', await click('.tab', 'Tubing calibration'));
   await sleep(1800);
   check('the calibration shows its four steps', (await js(`document.querySelectorAll('.steps .step').length`)) === 4);

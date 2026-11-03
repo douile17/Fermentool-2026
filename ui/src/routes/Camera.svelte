@@ -1,22 +1,29 @@
 <script>
   import { app } from '../lib/state.svelte.js';
-  import { BASE, get } from '../lib/api.js';
-  import { cameraLine, liveShown, liveSrc, noPictureSince, runClock } from '../lib/camera.js';
+  import { get } from '../lib/api.js';
+  import { cameraLine, liveShown, noPictureSince, runClock } from '../lib/camera.js';
   import Icon from '../components/Icon.svelte';
+  import LiveImg from '../components/LiveImg.svelte';
 
   // The camera's live view (mockup of 2026-11-02, its Live part; Take a
   // picture and the Timelapses tab come with the timelapse). The run's state
   // bar is App's, above every page but the Overview.
 
   // GET /api/camera every 2 s while the page is open: the status frame does
-  // not carry the camera.
+  // not carry the camera. A failed poll keeps the last answer but marks the
+  // picture not live (the daemon stopped).
   let cam = $state(null);
+  let pollOk = $state(true);
   $effect(() => {
     let live = true;
     const load = () =>
       get('/api/camera')
-        .then((c) => live && (cam = c))
-        .catch(() => {});
+        .then((c) => {
+          if (!live) return;
+          cam = c;
+          pollOk = true;
+        })
+        .catch(() => live && (pollOk = false));
     load();
     const t = setInterval(load, 2000);
     return () => {
@@ -25,8 +32,19 @@
     };
   });
 
+  // The live view only while the page is visible: a hidden tab or a
+  // minimised window closes the stream, and the daemon stops grabbing.
+  let visible = $state(typeof document === 'undefined' || document.visibilityState === 'visible');
+  $effect(() => {
+    const seen = () => (visible = document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', seen);
+    return () => document.removeEventListener('visibilitychange', seen);
+  });
+
   const line = $derived(cameraLine(cam));
-  const showLive = $derived(liveShown(cam));
+  const showLive = $derived(liveShown(cam, visible));
+  // 'live', 'starting' or 'stale' (LiveImg): Live is said only when it is
+  let live = $state('starting');
   const chosen = $derived(!!cam && (cam.configured || cam.state !== 'off'));
 
   // The run's time over the picture: a dosing run only, as the state bar.
@@ -40,16 +58,9 @@
   });
   const runTime = $derived(run ? runClock((now - Date.parse(run.started_at)) / 1000) : null);
 
-  // The stream is the <img>: mounted only while the camera is connected and
-  // this page shown, it ends with either (the daemon counts it as a viewer
-  // while it loads). Broken (the daemon restarted), it is asked again.
-  let attempt = $state(0);
-  let retry = null;
-  function lostStream() {
-    clearTimeout(retry);
-    retry = setTimeout(() => attempt++, 3000);
-  }
-  $effect(() => () => clearTimeout(retry));
+  // The stream is LiveImg's <img>: mounted only while the camera is
+  // connected and this page shown, it ends with either (the daemon counts it
+  // as a viewer while it loads).
 
   let box = $state(null);
   function fullScreen() {
@@ -86,10 +97,12 @@
     <section class="card live">
       <div class="pic" bind:this={box} style:aspect-ratio={cam.width && cam.height ? `${cam.width} / ${cam.height}` : '16 / 9'}>
         {#if showLive}
-          {#key attempt}
-            <img use:liveSrc={BASE + '/api/camera/live'} alt="Live view of the camera" onerror={lostStream} />
-          {/key}
-          <span class="tag live-tag"><span class="dot" aria-hidden="true"></span>Live</span>
+          <LiveImg {cam} {pollOk} alt="Live view of the camera" bind:live />
+          {#if live === 'live'}
+            <span class="tag live-tag"><span class="dot" aria-hidden="true"></span>Live</span>
+          {:else if live === 'stale'}
+            <span class="tag live-tag frozen"><span class="dot" aria-hidden="true"></span>Not live</span>
+          {/if}
           {#if runTime}<span class="tag time-tag">{runTime}</span>{/if}
         {:else}
           <div class="none">
@@ -122,7 +135,6 @@
     position: relative; overflow: hidden; border-radius: var(--radius-ctl);
     background: var(--video-bg); width: 100%;
   }
-  .pic img { display: block; width: 100%; height: 100%; object-fit: contain; }
   .pic:fullscreen { border-radius: 0; aspect-ratio: auto; }
   .tag {
     position: absolute; top: var(--s-3);
@@ -133,7 +145,9 @@
   }
   .live-tag { left: var(--s-3); font-weight: 600; }
   .time-tag { right: var(--s-3); font-family: var(--mono); }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--video-live); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green-500); }
+  .frozen { color: var(--video-muted); }
+  .frozen .dot { background: var(--video-muted); }
   .none {
     position: absolute; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s-2);

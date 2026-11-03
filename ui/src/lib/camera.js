@@ -32,10 +32,33 @@ export function cameraLine(cam) {
   }
 }
 
-/** The live view is worth opening only while the camera is connected: lost,
- *  the stream would repeat its last picture as if live. */
-export function liveShown(cam) {
-  return cam?.state === 'connected';
+/** The live view is worth opening only while the camera is connected (lost,
+ *  the stream would repeat its last picture as if live) and the page is
+ *  `visible` (`document.visibilityState`): a hidden tab or a minimised
+ *  window would keep the camera grabbing at 5 fps for days. */
+export function liveShown(cam, visible) {
+  return cam?.state === 'connected' && visible === true;
+}
+
+/** A shown live view counts as live this long after its stream was mounted
+ *  before the daemon must count it as a viewer and send pictures. */
+export const LIVE_GRACE_MS = 5000;
+/** A picture older than this, while a viewer is counted, is a frozen one
+ *  (the daemon grabs at 5 fps for a viewer). */
+const FRAME_STALE_MS = 4000;
+
+/** Is a shown live view really live: `'live'`, `'starting'` or `'stale'`?
+ *  `cam` is the last GET /api/camera, `pollOk` whether the last poll
+ *  answered, `shownSince` when the stream was mounted (ms). A stream that
+ *  ended (the daemon stopped or restarted) keeps its last picture without
+ *  an error, so the page tells it from the daemon's side: live only while
+ *  the daemon counts a viewer and its latest picture is fresh; starting for
+ *  `LIVE_GRACE_MS` after a mount; stale after that, or once the polls fail. */
+export function liveState(cam, nowMs, pollOk, shownSince) {
+  if (!pollOk || !cam) return 'stale';
+  const at = cam.frame_at ? Date.parse(cam.frame_at) : NaN;
+  if (cam.viewers > 0 && Number.isFinite(at) && nowMs - at <= FRAME_STALE_MS) return 'live';
+  return nowMs - shownSince < LIVE_GRACE_MS ? 'starting' : 'stale';
 }
 
 /** In the picture box while the camera gives none: since when, if lost. */

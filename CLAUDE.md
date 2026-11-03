@@ -86,7 +86,9 @@ else to install:
 - **Deliverable exe:** `cargo build --release -p fermentool-core` →
   `target/release/fermentool-core.exe`. Self-contained (UI embedded via
   rust-embed), windowless (`windows_subsystem = "windows"`), opens the browser
-  on launch.
+  on launch. The camera needs its helper beside it: `cargo build --release
+  -p fermentool-camera --features capture` → `target/release/fermentool-camera.exe`
+  (without it, Settings says "Camera helper missing").
 - **Rule: a `cargo build` success is not "done".** After building, always run
   the exe and smoke-test it (`curl 127.0.0.1:8730/api/status`, then a clean
   `POST /api/shutdown`) before calling it working. Kill any daemon still
@@ -502,9 +504,11 @@ template only targets group chats), which is why ntfy is the default.
   `WriteConsoleW` and froze the control thread.
 - Deploy: re-check `/api/status`, stop an active run through the API only when
   the user asked for the deploy, `POST /api/shutdown`, `cargo build
-  --release`, start the exe, check `/api/status` and that the served bundle
-  contains the change; tell the user to Ctrl+F5 (an open tab keeps the old UI
-  in memory).
+  --release -p fermentool-core` and `cargo build --release -p
+  fermentool-camera --features capture` (the camera helper, next to the
+  daemon in `targetelease`), start the exe, check `/api/status` and that
+  the served bundle contains the change; tell the user to Ctrl+F5 (an open
+  tab keeps the old UI in memory).
 - **During an active run, run heavy work at low priority**, so Windows
   serves the daemon first: `cmd /c '"...vcvars64.bat" >nul 2>&1 && start "" /b
   /low /wait cargo test ...'` (same for `cargo build`, `npm run build`, Vite,
@@ -566,8 +570,23 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   leaks it on purpose and the daemon quits and respawns the helper to let go.
   A webcam in use by another app shows up as HRESULT 0xC00D3704 at the first
   frame, not at open.
+- **Build the helper with the daemon**: `cargo build --release -p
+  fermentool-camera --features capture`, so `fermentool-camera.exe` sits
+  next to `fermentool-core.exe` in `targetelease` (the daemon looks for it
+  there; a deploy of `fermentool-core` alone reports "Camera helper missing").
+  The installer ships it as a sidecar (`copy-sidecar.ps1`).
 - The live view grabs only while a viewer is counted (`LIVE_FPS` 5). Every
-  live `<img>` uses `liveSrc`, so an unmounted view closes its stream.
+  live `<img>` is `components/LiveImg.svelte` (`liveSrc`), so an unmounted
+  view closes its stream, and it is mounted only while the page is visible
+  (`liveShown(cam, visible)`): a hidden tab stops the grabbing.
+- A finished stream keeps its last picture without an error: the page says
+  Live only from the daemon's side (`liveState`, from `viewers` and
+  `frame_at` of `GET /api/camera`), says "Not live" otherwise and asks the
+  stream again once the daemon answers.
+- Another program holding the webcam (at Open or at a grab) is `in_use`,
+  retried every 15 s, then doubling to 120 s after 10 in a row.
+- The Tauri window's CSP lists the daemon's origin in `img-src` (the live
+  view is a cross-origin `<img>` there); `lib/tauricsp.test.js` checks it.
 - Where to look: `crates/fermentool-core/src/camera.rs`, the camera routes in
   `api.rs`, `crates/fermentool-camera`, `ui/src/lib/camera.js`.
 - The timing comparison (`scripts/timing_report.py`, camera on vs the

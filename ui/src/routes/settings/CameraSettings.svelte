@@ -1,9 +1,10 @@
 <script>
-  import { BASE, get, post } from '../../lib/api.js';
+  import { get, post } from '../../lib/api.js';
   import { loadConfig } from '../../lib/config.js';
-  import { cameraLine, camerasFound, deviceKey, deviceLabel, liveSrc, sizesFor } from '../../lib/camera.js';
+  import { cameraLine, camerasFound, deviceKey, deviceLabel, liveShown, sizesFor } from '../../lib/camera.js';
   import { segThumb } from '../../lib/segthumb.js';
   import Icon from '../../components/Icon.svelte';
+  import LiveImg from '../../components/LiveImg.svelte';
   import LinkHeader from './LinkHeader.svelte';
   import SettingsCard from './SettingsCard.svelte';
 
@@ -18,14 +19,20 @@
   let msg = $state(null);
   let saving = $state(false);
 
-  // the camera's state, every 2 s while the section is open
+  // the camera's state, every 2 s while the section is open (a failed poll
+  // marks the preview not live)
   let cam = $state(null);
+  let pollOk = $state(true);
   $effect(() => {
     let live = true;
     const load = () =>
       get('/api/camera')
-        .then((c) => live && (cam = c))
-        .catch(() => {});
+        .then((c) => {
+          if (!live) return;
+          cam = c;
+          pollOk = true;
+        })
+        .catch(() => live && (pollOk = false));
     load();
     const t = setInterval(load, 2000);
     return () => {
@@ -132,9 +139,16 @@
   }
 
   // "What this camera sees now": the live view while the section is open
-  // and the camera connected (one viewer: the daemon grabs only for one, a
-  // polled frame.jpg stayed the picture of the Connect).
-  const showPreview = $derived(cam?.state === 'connected');
+  // and visible and the camera connected (one viewer: the daemon grabs only
+  // for one, a polled frame.jpg stayed the picture of the Connect).
+  let visible = $state(typeof document === 'undefined' || document.visibilityState === 'visible');
+  $effect(() => {
+    const seen = () => (visible = document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', seen);
+    return () => document.removeEventListener('visibilitychange', seen);
+  });
+  const showPreview = $derived(liveShown(cam, visible));
+  let live = $state('starting');
 </script>
 
 <SettingsCard title="Camera" {err} {msg} loading={!loaded}>
@@ -182,7 +196,8 @@
     <figure class="preview">
       <div class="pic">
         {#if showPreview}
-          <img use:liveSrc={BASE + '/api/camera/live'} alt="What this camera sees now" />
+          <LiveImg {cam} {pollOk} alt="What this camera sees now" bind:live />
+          {#if live === 'stale'}<span class="frozen">Not live</span>{/if}
         {:else}
           <span class="none"><Icon name="camera" size={32} /></span>
         {/if}
@@ -206,10 +221,15 @@
   }
   .preview { flex: 0 1 280px; min-width: 0; margin: 0; display: flex; flex-direction: column; gap: var(--s-1); }
   .pic {
+    position: relative;
     aspect-ratio: 16 / 9; border-radius: var(--radius-ctl); overflow: hidden;
     background: var(--video-bg); display: grid; place-items: center;
   }
-  .pic img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .frozen {
+    position: absolute; top: var(--s-2); left: var(--s-2);
+    padding: 2px 8px; border-radius: var(--radius-tag);
+    background: var(--video-tag); color: var(--video-muted); font-size: 12px;
+  }
   .none { color: var(--video-muted); display: grid; }
   figcaption { font-size: 12px; color: var(--muted); }
 </style>

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { cameraLine, camerasFound, deviceKey, deviceLabel, liveShown, liveSrc, noPictureSince, runClock, sizesFor } from './camera.js';
+import {
+  cameraLine,
+  camerasFound,
+  deviceKey,
+  deviceLabel,
+  LIVE_GRACE_MS,
+  liveShown,
+  liveSrc,
+  liveState,
+  noPictureSince,
+  runClock,
+  sizesFor,
+} from './camera.js';
 import { shortTime } from './fmt.js';
 
 describe('cameraLine', () => {
@@ -86,9 +98,47 @@ describe('sizesFor', () => {
 
 describe('liveShown', () => {
   it('only while the camera is connected', () => {
-    expect(liveShown({ state: 'connected' })).toBe(true);
-    for (const state of ['off', 'connecting', 'in_use', 'lost', 'no_helper']) expect(liveShown({ state })).toBe(false);
-    expect(liveShown(null)).toBe(false);
+    expect(liveShown({ state: 'connected' }, true)).toBe(true);
+    for (const state of ['off', 'connecting', 'in_use', 'lost', 'no_helper']) expect(liveShown({ state }, true)).toBe(false);
+    expect(liveShown(null, true)).toBe(false);
+  });
+  it('never while the page is hidden (a hidden tab must not keep the camera grabbing)', () => {
+    expect(liveShown({ state: 'connected' }, false)).toBe(false);
+    expect(liveShown({ state: 'connected' })).toBe(false);
+  });
+});
+
+describe('liveState', () => {
+  const now = Date.parse('2026-11-03T10:00:00Z');
+  const fed = { state: 'connected', viewers: 1, frame_at: '2026-11-03T09:59:59.800Z' };
+  const shownSince = now - 60_000;
+
+  it('live while a viewer is counted and the pictures are fresh', () => {
+    expect(liveState(fed, now, true, shownSince)).toBe('live');
+    // the daemon's own format, nanoseconds
+    expect(liveState({ ...fed, frame_at: '2026-11-03T09:59:59.800123456Z' }, now, true, shownSince)).toBe('live');
+    expect(liveState(fed, now, true, now)).toBe('live');
+  });
+  it('stale once the polls fail (the daemon stopped)', () => {
+    expect(liveState(fed, now, false, shownSince)).toBe('stale');
+    expect(liveState(fed, now, false, now)).toBe('stale');
+  });
+  it('stale when the daemon counts no viewer (restarted: the stream ended on its last picture)', () => {
+    expect(liveState({ ...fed, viewers: 0, frame_at: null }, now, true, shownSince)).toBe('stale');
+    expect(liveState({ ...fed, viewers: 0 }, now, true, shownSince)).toBe('stale');
+  });
+  it('stale when the latest picture is a few seconds old', () => {
+    expect(liveState({ ...fed, frame_at: '2026-11-03T09:59:54Z' }, now, true, shownSince)).toBe('stale');
+    expect(liveState({ ...fed, frame_at: null }, now, true, shownSince)).toBe('stale');
+  });
+  it('starting during the grace after the stream is mounted (not counted, no picture yet), never live', () => {
+    const fresh = { state: 'connected', viewers: 0, frame_at: null };
+    expect(liveState(fresh, now, true, now - 1000)).toBe('starting');
+    expect(liveState({ ...fed, frame_at: '2026-11-03T09:50:00Z' }, now, true, now - 1000)).toBe('starting');
+    expect(liveState(fresh, now, true, now - LIVE_GRACE_MS - 1)).toBe('stale');
+  });
+  it('nothing heard yet is stale', () => {
+    expect(liveState(null, now, true, shownSince)).toBe('stale');
   });
 });
 
