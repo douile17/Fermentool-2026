@@ -11,7 +11,7 @@ const WINDOW: Duration = Duration::from_secs(60);
 pub enum Metric {
     /// How late a setpoint write started against its 150 ms schedule.
     SetpointLate,
-    /// Interval between control ticks.
+    /// Duration of one control tick (`engine.tick`).
     Tick,
     /// Age of the balance reading when the engine takes it.
     ScaleAge,
@@ -132,6 +132,12 @@ pub fn flush_if_due(now: Instant) {
             max_ms = round(s.max),
         );
     }
+}
+
+/// The samples waiting in the current window (tests only).
+#[cfg(test)]
+pub fn peek(m: Metric) -> Vec<f64> {
+    global().lock().map(|t| t.samples[m.index()].clone()).unwrap_or_default()
 }
 
 #[cfg(test)]

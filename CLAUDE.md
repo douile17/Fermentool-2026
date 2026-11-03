@@ -233,6 +233,18 @@ seconds to load with the balance off). Hence:
   live engine (start/stop, delete a run, status, scale/serial changes) does.
   Every connection has a 5 s `busy_timeout`.
 
+**Timing lines (`timing.rs`).** Once a minute the daemon logs, per metric, a
+`timing` line (`count`, `p50_ms`, `p99_ms`, `max_ms`) in the daily log:
+`setpoint_late` (a setpoint write's start against its 150 ms schedule), `tick`
+(duration of `engine.tick`), `scale_age` (age of the reading the engine takes)
+and `scale_poll` (duration of one balance poll). `setpoint_late` and `tick`
+only during a run. They are pushes into a mutex-guarded buffer, nothing more on
+the control thread, and the mutex is never held across I/O. To compare two
+periods (before and after a heavier neighbour, the camera):
+`python scripts/timing_report.py <log> [<log>...] --a FROM TO --b FROM TO`,
+local ISO times; it prints the median over each range's minutes and the B/A
+ratio of p99.
+
 ## Crash-resume clock anchor
 
 `run_now()` (`control.rs`) has a clock-step guard: it compares wall-clock
