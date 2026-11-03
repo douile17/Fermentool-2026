@@ -286,6 +286,35 @@ try {
     check('Escape closes the menu', await js(`!document.querySelector('.person .menu')`));
   }
 
+  // --- Camera (2026-11-03): looked at only, never Connect, Disconnect nor
+  // Save. Both reached by their deep link, as a bookmark would.
+  const camCfg = async () => JSON.stringify((await (await fetch(`${URL}/api/config`)).json()).camera ?? null);
+  const camBefore = await camCfg();
+  const answers = (expr) => Promise.race([js(expr), sleep(3000).then(() => 'frozen')]);
+  await cmd('Page.navigate', { url: 'about:blank' });
+  await sleep(300);
+  await cmd('Page.navigate', { url: `${URL}/#settings/camera` });
+  await sleep(2500);
+  check('#settings/camera opens the Camera section', (await js(`document.querySelector('.side button.on')?.textContent.trim()`)) === 'Camera');
+  check('it says the camera state in a word, with its Connect or Disconnect', await js(`/^(Connected|Connecting…|Camera in use|Camera not answering|Not connected|Camera helper missing)$/.test(document.querySelector('.settings-pane .head .word')?.textContent.trim() ?? '') && document.querySelectorAll('.settings-pane .head button').length === 1`));
+  check('it has the camera select and the picture sizes', await js(`!!document.querySelector('.settings-pane select[aria-label="Camera"]') && document.querySelectorAll('.settings-pane .seg[aria-label="Picture size"] button').length >= 1`));
+  check('Camera keeps Save off until a change', await js(`[...document.querySelectorAll('.settings-pane button.save')].every((b) => b.disabled)`));
+  if (await js(`(() => { const b = [...document.querySelectorAll('.settings-pane .seg[aria-label="Picture size"] button')].find((x) => !x.classList.contains('on')); if (!b) return false; b.click(); return true; })()`)) {
+    const placed = await answers(`(() => { const s = document.querySelector('.settings-pane .seg[aria-label="Picture size"]'); return !!s && s.classList.contains('thumbed') && parseFloat(s.style.getPropertyValue('--thumb-w')) > 0; })()`);
+    check('a picture size click leaves the page answering, its tint placed', placed === true, String(placed));
+  } else {
+    console.log('skip  the picture size click: one size only');
+  }
+  check('nothing about the camera saved', (await camCfg()) === camBefore);
+  await cmd('Page.navigate', { url: 'about:blank' });
+  await sleep(300);
+  await cmd('Page.navigate', { url: `${URL}/#camera` });
+  await sleep(2500);
+  check('#camera opens the Camera page', (await js(`document.querySelector('.nav-item.active')?.textContent.trim()`)) === 'Camera' && (await js(`document.querySelector('h1')?.textContent.trim()`)) === 'Camera');
+  const shown = await answers(`!!document.querySelector('.camera .pic, .camera .empty')`);
+  check('the Camera page answers, with its picture or its empty state', shown === true, String(shown));
+  check('the Camera page never says burst', await js(`!/burst/i.test(document.querySelector('main')?.innerText ?? '')`));
+
   // --- Tubing calibration last: it is only looked at, its draft untouched
   await click('button', 'Feeding profile');
   await sleep(500);

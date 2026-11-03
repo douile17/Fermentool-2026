@@ -1,5 +1,6 @@
 import PumpsSettings from './PumpsSettings.svelte';
 import BalanceSettings from './BalanceSettings.svelte';
+import CameraSettings from './CameraSettings.svelte';
 import RunSettings from './RunSettings.svelte';
 import NotificationSettings from './NotificationSettings.svelte';
 import DaemonSettings from './DaemonSettings.svelte';
@@ -14,6 +15,7 @@ export const SECTIONS = [
   // the cable and every pump on it (feed, refill), one section (2026-10-21)
   { id: 'pumps', label: 'Pumps', group: 'Hardware', icon: 'pump', component: PumpsSettings },
   { id: 'balance', label: 'Balance', group: 'Hardware', icon: 'weight', component: BalanceSettings },
+  { id: 'camera', label: 'Camera', group: 'Hardware', icon: 'camera', component: CameraSettings },
   { id: 'runs', label: 'Crash resume', group: 'Runs', icon: 'power', component: RunSettings },
   { id: 'notifications', label: 'Notifications', group: 'Alerts', icon: 'bell', component: NotificationSettings },
   { id: 'display', label: 'Display', group: 'System', icon: 'ruler', component: DisplaySettings },

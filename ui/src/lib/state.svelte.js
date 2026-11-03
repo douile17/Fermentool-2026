@@ -4,7 +4,7 @@ export const app = $state({
   status: null,
   /** WebSocket / API reachable. */
   connected: false,
-  /** top-level section from the sidebar: 'pump' | 'settings' */
+  /** top-level section from the sidebar: 'pump' | 'camera' | 'settings' */
   route: 'pump',
   /** sub-view within the pump panel: 'overview' | 'new' | 'history' | 'calibration' */
   tab: 'overview',

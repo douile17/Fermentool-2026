@@ -1,5 +1,6 @@
 // Deep links: `#settings/<section>` opens Settings on that section,
-// `#<tab>` a tab of the pump panel (overview, history, calibration). Read
+// `#<tab>` a tab of the pump panel (overview, history, calibration),
+// `#camera` the Camera page. Read
 // once at start; an unknown link opens the app as usual. Lets a page be
 // bookmarked, and the UX audit capture a Settings section directly.
 
@@ -13,5 +14,6 @@ export function parseHash(hash, sections) {
   const [head, sub] = h.split('/');
   if (head === 'settings') return sub && sections.includes(sub) ? { route: 'settings', section: sub } : { route: 'settings' };
   if (TABS.includes(head)) return { route: 'pump', tab: head };
+  if (head === 'camera') return { route: 'camera' };
   return null;
 }
