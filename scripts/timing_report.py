@@ -61,6 +61,9 @@ def main():
     args = ap.parse_args()
 
     rows = read(args.logs)
+    if not rows:
+        print("no timing lines in the log files", file=sys.stderr)
+        return 1
     a = summarize(rows, *map(local_to_utc, args.a))
     b = summarize(rows, *map(local_to_utc, args.b))
 
@@ -77,9 +80,6 @@ def main():
                 print(f"{m:<14}{name:<6}{n:>8}{p50:>9.1f}{p99:>9.1f}{mx:>9.1f}   {ratio if name == 'B' else ''}")
             else:
                 print(f"{m:<14}{name:<6}{'none':>8}")
-    if not rows:
-        print("no timing lines in the log files", file=sys.stderr)
-        return 1
     return 0
 
 
