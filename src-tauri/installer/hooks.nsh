@@ -37,10 +37,19 @@
   FileClose $1
 !macroend
 
+; The camera helper dies with the daemon (job object, stdin closed), but one
+; that lingers keeps its exe locked: stop it once the daemon is gone, before
+; copying.
+!macro FERMENTOOL_STOP_CAMERA
+  nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process fermentool-camera -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500"'
+  Pop $0
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   DetailPrint "Stopping a running Fermentool daemon before installing..."
   !insertmacro FERMENTOOL_WRITE_STOP_SCRIPT
   !insertmacro FERMENTOOL_STOP_DAEMON "installer"
+  !insertmacro FERMENTOOL_STOP_CAMERA
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
@@ -54,5 +63,6 @@
   DetailPrint "Stopping the Fermentool daemon and removing its log-on task..."
   !insertmacro FERMENTOOL_WRITE_STOP_SCRIPT
   !insertmacro FERMENTOOL_STOP_DAEMON "uninstaller"
+  !insertmacro FERMENTOOL_STOP_CAMERA
   nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\remove-task.ps1"'
 !macroend

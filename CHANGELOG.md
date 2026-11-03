@@ -2,6 +2,16 @@
 
 ## Non publié (depuis 0.1.5)
 
+### Caméra, vue en direct (3 novembre)
+
+- Une page Caméra montre l'image de la webcam en direct (5 images par
+  seconde, seulement tant qu'une fenêtre la regarde), et Settings, Caméra
+  choisit la webcam. L'image est prise par un petit programme à part,
+  `fermentool-camera.exe`, livré dans l'installateur à côté du daemon, à
+  priorité réduite : il s'arrête avec le daemon et ne touche jamais à la
+  pompe ni à la balance. Webcam déjà ouverte par une autre application :
+  la bande le dit (« Camera in use »).
+
 ### Correction après un refill (2 novembre)
 
 - Plus de pic de correction après un refill. Pendant les ~2 minutes qui

@@ -550,6 +550,30 @@ a run, switching off the refill pump stops the feed following its curve**
 - `docs/wiring.md` lists the FTDI USB-RS485-WE as an isolated adapter; as far
   as known it is not galvanically isolated. To check and correct.
 
+## Camera (2026-11-02)
+
+Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
+`docs/superpowers/plans/2026-11-02-camera-*.md`.
+- The webcam is read by a helper process, `fermentool-camera.exe` (shipped
+  next to the daemon, below-normal priority, JPEG frames over a pipe
+  protocol on stdin/stdout). The daemon owns it: it starts and stops it, and
+  the helper never outlives it (a Windows job object kills it with the
+  daemon, and it exits on stdin EOF).
+- **No camera call on the control thread, ever.** Same rule as the serial
+  port: the pump and the balance come first, a webcam must never delay them.
+- **The helper process is the unit of release.** nokhwa's Close does not free
+  the webcam and dropping a `Camera` crashes at `MFShutdown`, so the helper
+  leaks it on purpose and the daemon quits and respawns the helper to let go.
+  A webcam in use by another app shows up as HRESULT 0xC00D3704 at the first
+  frame, not at open.
+- The live view grabs only while a viewer is counted (`LIVE_FPS` 5). Every
+  live `<img>` uses `liveSrc`, so an unmounted view closes its stream.
+- Where to look: `crates/fermentool-core/src/camera.rs`, the camera routes in
+  `api.rs`, `crates/fermentool-camera`, `ui/src/lib/camera.js`.
+- The timing comparison (`scripts/timing_report.py`, camera on vs the
+  baseline) is the acceptance gate: p99 of each metric within 10 % (or
+  20 ms) of the baseline.
+
 ## Curve engine (`crates/fermentool-curves`)
 
 `CurveSpec::value_at(elapsed)` is the single entry point and is **pure in
