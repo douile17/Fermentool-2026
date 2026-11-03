@@ -192,7 +192,7 @@ fn build_scale(cfg: &config::ScaleConfig) -> Option<scale::PolledScale> {
 /// The camera supervisor. Always created, so the routes answer: without the
 /// helper exe it reports `no_helper`. Connects now only when `[camera]` exists
 /// and is `enabled`; nothing else ever calls `set_want` on a config save.
-fn build_camera(config: &config::Config) -> fermentool_core::camera::Camera {
+fn build_camera(config: &config::Config) -> (fermentool_core::camera::Camera, bool) {
     use fermentool_core::camera::{helper_exe, Camera, CameraWant, ProcessLaunch};
     let cam = config.camera.as_ref();
     let test_pattern = cam.is_some_and(|c| c.test_pattern);
@@ -203,10 +203,10 @@ fn build_camera(config: &config::Config) -> fermentool_core::camera::Camera {
         height: c.height,
     });
     match helper_exe() {
-        Some(exe) => Camera::spawn(ProcessLaunch { exe, test_pattern }, want),
+        Some(exe) => (Camera::spawn(ProcessLaunch { exe, test_pattern }, want), false),
         None => {
             tracing::warn!("fermentool-camera.exe not found next to the daemon; the camera is unavailable");
-            Camera::spawn(NoHelperLaunch, want)
+            (Camera::spawn(NoHelperLaunch, want), true)
         }
     }
 }
@@ -220,11 +220,13 @@ impl fermentool_core::camera::Launch for NoHelperLaunch {
     }
 }
 
-async fn shutdown_signal(via_api: Arc<Notify>) {
+async fn shutdown_signal(via_api: Arc<Notify>, stopping: Arc<tokio::sync::watch::Sender<bool>>) {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => tracing::info!("ctrl-c received"),
         _ = via_api.notified() => {}
     }
+    // Open live views end now: graceful shutdown waits for every response.
+    stopping.send_replace(true);
 }
 
 #[tokio::main]
@@ -299,9 +301,13 @@ async fn main() -> anyhow::Result<()> {
     // Opened after the engine's, which has already migrated the file.
     let db = Arc::new(api::ApiDb::new(Store::open(&paths.db).context("open journal for the API")?));
 
-    let camera = build_camera(&config);
+    let (camera, helper_missing) = build_camera(&config);
+    let (stopping, _) = tokio::sync::watch::channel(false);
+    let stopping = Arc::new(stopping);
     let state = AppState {
         camera: camera.clone(),
+        helper_missing,
+        stopping: Arc::clone(&stopping),
         control: Arc::clone(&control),
         config: Arc::new(RwLock::new(config.clone())),
         config_path: Arc::new(paths.config.clone()),
@@ -341,7 +347,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     axum::serve(listener, api::router(state))
-        .with_graceful_shutdown(shutdown_signal(shutdown))
+        .with_graceful_shutdown(shutdown_signal(shutdown, stopping))
         .await
         .context("http server")?;
 
