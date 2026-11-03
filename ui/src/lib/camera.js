@@ -27,7 +27,8 @@ export function cameraLine(cam) {
     case 'no_helper':
       return { tone: 'warn', word: 'Camera helper missing', detail: 'Reinstall Fermentool.' };
     default:
-      return { tone: 'idle', word: 'Not connected', detail: 'No camera chosen.' };
+      // off: saved but disconnected, or none saved yet
+      return { tone: 'idle', word: 'Not connected', detail: cam?.configured ? 'Connect to see the picture.' : 'No camera chosen.' };
   }
 }
 
@@ -35,6 +36,28 @@ export function cameraLine(cam) {
  *  the stream would repeat its last picture as if live. */
 export function liveShown(cam) {
   return cam?.state === 'connected';
+}
+
+/** In the picture box while the camera gives none: since when, if lost. */
+export function noPictureSince(cam) {
+  return cam?.state === 'lost' && cam.since ? `No picture since ${shortTime(cam.since)}` : 'No picture';
+}
+
+/** Svelte action for every live `<img>` (`use:liveSrc={url}`): sets its
+ *  source, and blanks it when the image goes, so the stream's request is
+ *  aborted before removal. Chromium can keep a multipart/x-mixed-replace
+ *  download alive after the element is gone, and the daemon would keep
+ *  counting a viewer (and grabbing). */
+export function liveSrc(node, src) {
+  node.setAttribute('src', src);
+  return {
+    update(next) {
+      node.setAttribute('src', next);
+    },
+    destroy() {
+      node.removeAttribute('src');
+    },
+  };
 }
 
 /** One camera of the list, as a key for a `<select>`: two identical webcams

@@ -1,7 +1,7 @@
 <script>
   import { BASE, get, post } from '../../lib/api.js';
   import { loadConfig } from '../../lib/config.js';
-  import { cameraLine, camerasFound, deviceKey, deviceLabel, sizesFor } from '../../lib/camera.js';
+  import { cameraLine, camerasFound, deviceKey, deviceLabel, liveSrc, sizesFor } from '../../lib/camera.js';
   import { segThumb } from '../../lib/segthumb.js';
   import Icon from '../../components/Icon.svelte';
   import LinkHeader from './LinkHeader.svelte';
@@ -41,11 +41,16 @@
   // The PC's cameras: listed by a helper, a few seconds; "Look again" asks
   // for a fresh list (a camera plugged in since).
   let devices = $state([]);
+  // once a first list arrived: before, the saved camera is not "not detected"
+  let listed = $state(false);
   let looking = $state(false);
   function lookAgain(refresh) {
     looking = true;
     get(`/api/camera/devices${refresh ? '?refresh=1' : ''}`)
-      .then((d) => (devices = d ?? []))
+      .then((d) => {
+        devices = d ?? [];
+        listed = true;
+      })
       .catch((e) => (err = e.message))
       .finally(() => (looking = false));
   }
@@ -80,7 +85,7 @@
   const picked = $derived(devices.find((d) => deviceKey(d.name, d.index) === devKey) ?? null);
   // the saved camera, while the list does not have it (unplugged)
   const missing = $derived(
-    savedDevice && !devices.some((d) => deviceKey(d.name, d.index) === deviceKey(savedDevice.name, savedDevice.index))
+    listed && savedDevice && !devices.some((d) => deviceKey(d.name, d.index) === deviceKey(savedDevice.name, savedDevice.index))
       ? savedDevice
       : null,
   );
@@ -126,14 +131,9 @@
     saving = false;
   }
 
-  // "What this camera sees now": the latest picture, asked again every 2 s
-  // while the section is open and the camera connected.
-  let tick = $state(0);
-  let noPicture = $state(false);
-  $effect(() => {
-    const t = setInterval(() => tick++, 2000);
-    return () => clearInterval(t);
-  });
+  // "What this camera sees now": the live view while the section is open
+  // and the camera connected (one viewer: the daemon grabs only for one, a
+  // polled frame.jpg stayed the picture of the Connect).
   const showPreview = $derived(cam?.state === 'connected');
 </script>
 
@@ -181,13 +181,9 @@
 
     <figure class="preview">
       <div class="pic">
-        <!-- kept mounted while connected: a 404 (no picture yet) is asked
-             again at the next tick, under the placeholder -->
         {#if showPreview}
-          <img class:gone={noPicture} src={`${BASE}/api/camera/frame.jpg?t=${tick}`} alt="What this camera sees now"
-            onload={() => (noPicture = false)} onerror={() => (noPicture = true)} />
-        {/if}
-        {#if !showPreview || noPicture}
+          <img use:liveSrc={BASE + '/api/camera/live'} alt="What this camera sees now" />
+        {:else}
           <span class="none"><Icon name="camera" size={32} /></span>
         {/if}
       </div>
@@ -214,7 +210,6 @@
     background: var(--video-bg); display: grid; place-items: center;
   }
   .pic img { width: 100%; height: 100%; object-fit: contain; display: block; }
-  .pic img.gone { display: none; }
   .none { color: var(--video-muted); display: grid; }
   figcaption { font-size: 12px; color: var(--muted); }
 </style>

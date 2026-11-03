@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cameraLine, camerasFound, deviceKey, deviceLabel, liveShown, runClock, sizesFor } from './camera.js';
+import { cameraLine, camerasFound, deviceKey, deviceLabel, liveShown, liveSrc, noPictureSince, runClock, sizesFor } from './camera.js';
 import { shortTime } from './fmt.js';
 
 describe('cameraLine', () => {
@@ -30,8 +30,15 @@ describe('cameraLine', () => {
       detail: `Since ${shortTime(since)}. The run is not affected.`,
     });
   });
-  it('off', () => {
+  it('off, no camera saved', () => {
     expect(cameraLine({ state: 'off', configured: false })).toEqual({ tone: 'idle', word: 'Not connected', detail: 'No camera chosen.' });
+  });
+  it('off, a camera saved but disconnected', () => {
+    expect(cameraLine({ state: 'off', configured: true })).toEqual({
+      tone: 'idle',
+      word: 'Not connected',
+      detail: 'Connect to see the picture.',
+    });
   });
   it('no helper next to the daemon', () => {
     expect(cameraLine({ state: 'no_helper', configured: false })).toEqual({
@@ -106,5 +113,41 @@ describe('deviceKey', () => {
   it('tells two cameras of one name apart', () => {
     expect(deviceKey('Logitech C920', 0)).not.toBe(deviceKey('Logitech C920', 1));
     expect(deviceKey('Logitech C920', 1)).toBe(deviceKey('Logitech C920', 1));
+  });
+});
+
+describe('noPictureSince', () => {
+  it('says since when the lost camera gave no picture', () => {
+    const since = '2026-11-03T09:41:00Z';
+    expect(noPictureSince({ state: 'lost', since })).toBe(`No picture since ${shortTime(since)}`);
+  });
+  it('a bare "No picture" without a time', () => {
+    expect(noPictureSince({ state: 'in_use' })).toBe('No picture');
+  });
+});
+
+// A fake <img>: its attributes only.
+const fakeImg = () => {
+  const attrs = new Map();
+  return {
+    attrs,
+    setAttribute: (k, v) => attrs.set(k, String(v)),
+    removeAttribute: (k) => attrs.delete(k),
+    getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+  };
+};
+
+describe('liveSrc', () => {
+  it('sets the stream as the source, follows a new one', () => {
+    const img = fakeImg();
+    const a = liveSrc(img, '/api/camera/live');
+    expect(img.getAttribute('src')).toBe('/api/camera/live');
+    a.update('/api/camera/live?x=1');
+    expect(img.getAttribute('src')).toBe('/api/camera/live?x=1');
+  });
+  it('blanks the source when the image goes, so the stream is cut before removal', () => {
+    const img = fakeImg();
+    liveSrc(img, '/api/camera/live').destroy();
+    expect(img.getAttribute('src')).toBeNull();
   });
 });

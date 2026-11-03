@@ -1,7 +1,7 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { BASE, get } from '../lib/api.js';
-  import { cameraLine, liveShown, runClock } from '../lib/camera.js';
+  import { cameraLine, liveShown, liveSrc, noPictureSince, runClock } from '../lib/camera.js';
   import Icon from '../components/Icon.svelte';
 
   // The camera's live view (mockup of 2026-11-02, its Live part; Take a
@@ -30,6 +30,8 @@
   const chosen = $derived(!!cam && (cam.configured || cam.state !== 'off'));
 
   // The run's time over the picture: a dosing run only, as the state bar.
+  // The status carries no elapsed figure: counted from `started_at` as the
+  // Overview does.
   const run = $derived(app.status?.active && app.status.active.kind !== 'calibration' ? app.status.active : null);
   let now = $state(Date.now());
   $effect(() => {
@@ -85,14 +87,14 @@
       <div class="pic" bind:this={box} style:aspect-ratio={cam.width && cam.height ? `${cam.width} / ${cam.height}` : '16 / 9'}>
         {#if showLive}
           {#key attempt}
-            <img src={BASE + '/api/camera/live'} alt="Live view of the camera" onerror={lostStream} />
+            <img use:liveSrc={BASE + '/api/camera/live'} alt="Live view of the camera" onerror={lostStream} />
           {/key}
           <span class="tag live-tag"><span class="dot" aria-hidden="true"></span>Live</span>
           {#if runTime}<span class="tag time-tag">{runTime}</span>{/if}
         {:else}
           <div class="none">
             <Icon name="camera" size={40} />
-            <span>{line.tone === 'warn' ? 'No picture' : line.word}</span>
+            <span>{line.tone === 'warn' ? noPictureSince(cam) : line.word}</span>
             {#if cam.state === 'off'}
               <a href="#settings/camera" onclick={openSettings}>Connect it in Settings, Camera</a>
             {/if}
