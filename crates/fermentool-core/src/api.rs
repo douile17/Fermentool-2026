@@ -1264,7 +1264,9 @@ async fn scale_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
 // camera
 // ---------------------------------------------------------------------------
 
-/// `GET /api/camera`: the supervisor's state, and whether a camera is saved.
+/// `GET /api/camera`: the supervisor's state, whether a camera is saved, the
+/// live viewers counted and the latest picture's time (`frame_at`, null
+/// before any): with them the page tells a frozen picture from a live one.
 async fn camera_status(State(s): State<AppState>) -> ApiResult<Response> {
     let mut v = serde_json::to_value(s.camera.state()).map_err(|e| ApiError::Conflict(e.to_string()))?;
     if s.helper_missing {
@@ -1273,6 +1275,8 @@ async fn camera_status(State(s): State<AppState>) -> ApiResult<Response> {
     }
     let configured = s.config.read().await.camera.as_ref().is_some_and(|c| !c.device.trim().is_empty());
     v["configured"] = json!(configured);
+    v["viewers"] = json!(s.camera.viewers());
+    v["frame_at"] = json!(s.camera.latest().map(|f| f.at.to_string()));
     Ok(Json(v).into_response())
 }
 
@@ -2695,6 +2699,26 @@ mod tests {
         let v = body_json(res).await;
         assert_eq!(v["state"], "off");
         assert_eq!(v["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn camera_status_reports_viewers_and_the_latest_frame_time() {
+        use http_body_util::BodyExt;
+        let v = body_json(router(test_state()).oneshot(get("/api/camera")).await.unwrap()).await;
+        assert_eq!(v["viewers"], 0);
+        assert!(v["frame_at"].is_null(), "{v}");
+
+        let mut st = test_state();
+        st.camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, Some(camera_want()));
+        let app = router(st);
+        let res = app.clone().oneshot(get("/api/camera/live")).await.unwrap();
+        let mut body = res.into_body();
+        tokio::time::timeout(Duration::from_secs(5), body.frame()).await.unwrap().unwrap().unwrap();
+        let v = body_json(app.clone().oneshot(get("/api/camera")).await.unwrap()).await;
+        assert_eq!(v["viewers"], 1);
+        let at: jiff::Timestamp = v["frame_at"].as_str().expect("frame_at").parse().unwrap();
+        assert!(jiff::Timestamp::now().duration_since(at).as_secs() < 5);
+        drop(body);
     }
 
     #[tokio::test]

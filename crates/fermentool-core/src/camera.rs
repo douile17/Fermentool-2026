@@ -51,6 +51,12 @@ pub const LIVE_FPS: u32 = 5;
 /// tight loop (each attempt is a new helper process).
 pub const IN_USE_RETRY: Duration = Duration::from_secs(15);
 
+/// In-use attempts in a row retried every `IN_USE_RETRY`; past them the
+/// delay doubles up to `IN_USE_MAX` (another program holding the webcam for
+/// a whole run would otherwise launch a helper every 15 s, 24,000 over 100 h).
+pub const IN_USE_FAST_TRIES: u32 = 10;
+pub const IN_USE_MAX: Duration = Duration::from_secs(120);
+
 /// After a grab error or a failed open, the next attempt on a fresh helper.
 pub const LOST_RETRY: Duration = Duration::from_secs(3);
 
@@ -123,6 +129,7 @@ pub(crate) struct Timings {
     pub open: Duration,
     pub live_interval: Duration,
     pub in_use_retry: Duration,
+    pub in_use_max: Duration,
     pub lost_retry: Duration,
     pub respawn_first: Duration,
     pub respawn_max: Duration,
@@ -137,6 +144,7 @@ impl Default for Timings {
             open: OPEN_TIMEOUT,
             live_interval: Duration::from_secs(1) / LIVE_FPS,
             in_use_retry: IN_USE_RETRY,
+            in_use_max: IN_USE_MAX,
             lost_retry: LOST_RETRY,
             respawn_first: RESPAWN_FIRST,
             respawn_max: RESPAWN_MAX,
@@ -233,6 +241,7 @@ impl Camera {
             next_grab: Instant::now(),
             seq: 0,
             lost_tries: 0,
+            in_use_tries: 0,
         };
         sup.set_want(want);
         let spawned = std::thread::Builder::new().name("camera-supervisor".into()).spawn(move || sup.run(rx));
@@ -419,6 +428,8 @@ struct Supervisor {
     seq: u64,
     /// Failed attempts since the last frame (or the last healthy minute).
     lost_tries: u32,
+    /// In-use attempts in a row, since the last frame or want.
+    in_use_tries: u32,
 }
 
 impl Supervisor {
@@ -480,6 +491,7 @@ impl Supervisor {
             if self.healthy_since.is_some_and(|t| t.elapsed() >= self.t.healthy_reset) {
                 self.backoff = self.t.respawn_first;
                 self.lost_tries = 0;
+                self.in_use_tries = 0;
             }
             if self.shared.viewers.load(Ordering::SeqCst) > 0 && Instant::now() >= self.next_grab {
                 self.grab();
@@ -496,6 +508,7 @@ impl Supervisor {
             if want.is_some() && self.helper.is_none() {
                 self.next_attempt = Instant::now();
                 self.backoff = self.t.respawn_first;
+                self.in_use_tries = 0;
             }
             return;
         }
@@ -508,6 +521,7 @@ impl Supervisor {
         self.next_attempt = Instant::now();
         self.backoff = self.t.respawn_first;
         self.lost_tries = 0;
+        self.in_use_tries = 0;
     }
 
     /// Quit the helper, killed if it does not exit in time.
@@ -542,6 +556,20 @@ impl Supervisor {
             self.next_attempt = Instant::now() + self.backoff.max(self.t.lost_retry);
             self.backoff = (self.backoff * 2).min(self.t.respawn_max);
         }
+    }
+
+    /// Another program holds the camera: `InUse`, and the next attempt
+    /// `IN_USE_RETRY` later for the first [`IN_USE_FAST_TRIES`] in a row, then
+    /// doubling up to `IN_USE_MAX`.
+    fn in_use(&mut self, device: &str, message: &str) {
+        if !matches!(self.shared.state(), CameraState::InUse { .. }) {
+            tracing::info!(device, "camera in use by another program: {message}");
+        }
+        self.shared.set_state(CameraState::InUse { device: device.to_string() });
+        self.in_use_tries += 1;
+        let over = self.in_use_tries.saturating_sub(IN_USE_FAST_TRIES).min(16);
+        let delay = self.t.in_use_retry.saturating_mul(1 << over).min(self.t.in_use_max.max(self.t.in_use_retry));
+        self.next_attempt = Instant::now() + delay;
     }
 
     /// `Lost`, keeping the time of the first loss across retries.
@@ -598,11 +626,7 @@ impl Supervisor {
             }
             Ok(Reply::Error { code: ErrorCode::InUse, message }) => {
                 retire(helper, self.t.quit_wait);
-                if !matches!(self.shared.state(), CameraState::InUse { .. }) {
-                    tracing::info!(device = %want.device, "camera in use by another program: {message}");
-                }
-                self.shared.set_state(CameraState::InUse { device: want.device });
-                self.next_attempt = Instant::now() + self.t.in_use_retry;
+                self.in_use(&want.device, &message);
             }
             Ok(Reply::Error { message, .. }) => {
                 retire(helper, self.t.quit_wait);
@@ -638,12 +662,20 @@ impl Supervisor {
             self.shared.fresh.notify_all();
             self.next_grab = started + self.t.live_interval;
             self.lost_tries = 0;
+            self.in_use_tries = 0;
             return;
         }
         // Any other answer ends this helper; the next attempt is a fresh one.
         let device = self.device();
         let Some(h) = self.helper.take() else { return };
         match reply {
+            // Another program took the webcam mid-stream (its HRESULT comes
+            // at a frame): in use, retried at the in-use pace, never lost.
+            Ok(Reply::Error { code: ErrorCode::InUse, message }) => {
+                retire(h, self.t.quit_wait);
+                self.healthy_since = None;
+                self.in_use(&device, &message);
+            }
             Ok(Reply::Error { message, .. }) => {
                 retire(h, self.t.quit_wait);
                 self.healthy_since = None;
@@ -1248,6 +1280,61 @@ mod tests {
     }
 
     #[test]
+    fn in_use_at_a_grab_is_in_use_not_lost() {
+        let t = quick();
+        // Opens, gives two frames, then another program takes the webcam.
+        let (launch, log) =
+            FakeLaunch::new(|_| Script { grab_ok: 2, grab_then: Act::Fail(ErrorCode::InUse), ..Script::healthy() });
+        let cam = Camera::spawn_with(launch, Some(want(640, 480)), t);
+        assert!(wait_for(Duration::from_secs(2), || connected(&cam)));
+        let _viewer = cam.viewer();
+        assert!(wait_for(Duration::from_secs(3), || matches!(cam.state(), CameraState::InUse { .. })), "{:?}", cam.state());
+        let in_use_at = Instant::now();
+        // Retried at the in-use pace, not the lost one.
+        std::thread::sleep(t.lost_retry * 2);
+        assert_eq!(log.seen(is_open).len(), 1, "retried at the lost pace");
+        assert!(matches!(cam.state(), CameraState::InUse { .. }));
+        assert!(wait_for(t.in_use_retry + Duration::from_secs(1), || log.seen(is_open).len() >= 2));
+        assert!(in_use_at.elapsed() >= t.in_use_retry - Duration::from_millis(100));
+        cam.shutdown();
+    }
+
+    #[test]
+    fn a_long_in_use_slows_its_retries_down() {
+        // Bounds below allow for a busy PC (tests run at low priority beside
+        // a live run): a gap is never shorter than asked, often longer.
+        let t = Timings {
+            in_use_retry: Duration::from_millis(60),
+            in_use_max: Duration::from_millis(960),
+            ..quick()
+        };
+        let (launch, log) = FakeLaunch::new(|_| Script { open: Act::Fail(ErrorCode::InUse), ..Script::healthy() });
+        let cam = Camera::spawn_with(launch, Some(want(640, 480)), t);
+        let fast = IN_USE_FAST_TRIES as usize;
+        assert!(wait_for(Duration::from_secs(12), || log.seen(is_open).len() >= fast + 6));
+        let at: Vec<Instant> = log.seen(is_open).iter().map(|(_, at)| *at).collect();
+        let gaps: Vec<Duration> = at.windows(2).map(|w| w[1].duration_since(w[0])).collect();
+        // The first tries come every in_use_retry, well under the max.
+        for g in &gaps[..fast] {
+            assert!(*g >= t.in_use_retry && *g < t.in_use_max / 2, "{gaps:?}");
+        }
+        // Then doubling, up to in_use_max, and no further.
+        assert!(gaps[fast] >= t.in_use_retry * 2, "{gaps:?}");
+        assert!(gaps[fast + 1] >= t.in_use_retry * 4, "{gaps:?}");
+        assert!(gaps[fast + 2] >= t.in_use_retry * 8, "{gaps:?}");
+        assert!(gaps[fast + 3] >= t.in_use_max, "{gaps:?}");
+        assert!(gaps[fast + 4] >= t.in_use_max && gaps[fast + 4] < t.in_use_max * 2, "{gaps:?}");
+        // A new want starts the fast pace again.
+        let before = log.seen(is_open).len();
+        cam.set_want(Some(want(1280, 720)));
+        assert!(wait_for(Duration::from_secs(3), || log.seen(is_open).len() >= before + 3));
+        let at: Vec<Instant> = log.seen(is_open).iter().map(|(_, at)| *at).collect();
+        let g = at[before + 2].duration_since(at[before + 1]);
+        assert!(g < t.in_use_max / 2, "not reset by a new want: {g:?}");
+        cam.shutdown();
+    }
+
+    #[test]
     fn set_want_none_closes() {
         let (launch, log) = FakeLaunch::healthy();
         let cam = Camera::spawn_with(launch, Some(want(640, 480)), quick());
@@ -1283,17 +1370,19 @@ mod tests {
 
     #[test]
     fn a_long_loss_slows_its_retries_down() {
+        // Wide margins: on a busy PC (tests at low priority beside a run) a
+        // 50 ms retry came 220 ms late.
         let t = Timings {
             lost_retry: Duration::from_millis(50),
-            respawn_first: Duration::from_millis(200),
-            respawn_max: Duration::from_millis(800),
+            respawn_first: Duration::from_millis(500),
+            respawn_max: Duration::from_millis(2000),
             ..quick()
         };
         let (unplugged, log) =
             FakeLaunch::new(|_| Script { open: Act::Fail(ErrorCode::NotFound), ..Script::healthy() });
         let cam = Camera::spawn_with(unplugged, Some(want(640, 480)), t);
         let fast = LOST_FAST_TRIES as usize;
-        assert!(wait_for(Duration::from_secs(5), || log.seen(is_open).len() >= fast + 3));
+        assert!(wait_for(Duration::from_secs(8), || log.seen(is_open).len() >= fast + 3));
         let at: Vec<Instant> = log.seen(is_open).iter().map(|(_, at)| *at).collect();
         let gaps: Vec<Duration> = at.windows(2).map(|w| w[1].duration_since(w[0])).collect();
         // The first tries come every LOST_RETRY: a replug is caught quickly.
