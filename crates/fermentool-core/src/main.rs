@@ -189,6 +189,37 @@ fn build_scale(cfg: &config::ScaleConfig) -> Option<scale::PolledScale> {
     scale
 }
 
+/// The camera supervisor. Always created, so the routes answer: without the
+/// helper exe it reports `no_helper`. Connects now only when `[camera]` exists
+/// and is `enabled`; nothing else ever calls `set_want` on a config save.
+fn build_camera(config: &config::Config) -> fermentool_core::camera::Camera {
+    use fermentool_core::camera::{helper_exe, Camera, CameraWant, ProcessLaunch};
+    let cam = config.camera.as_ref();
+    let test_pattern = cam.is_some_and(|c| c.test_pattern);
+    let want = cam.filter(|c| c.enabled && !c.device.trim().is_empty()).map(|c| CameraWant {
+        device: c.device.clone(),
+        index: c.device_index,
+        width: c.width,
+        height: c.height,
+    });
+    match helper_exe() {
+        Some(exe) => Camera::spawn(ProcessLaunch { exe, test_pattern }, want),
+        None => {
+            tracing::warn!("fermentool-camera.exe not found next to the daemon; the camera is unavailable");
+            Camera::spawn(NoHelperLaunch, want)
+        }
+    }
+}
+
+/// Stands in for the helper when its exe is missing: every launch fails.
+struct NoHelperLaunch;
+
+impl fermentool_core::camera::Launch for NoHelperLaunch {
+    fn launch(&mut self) -> std::io::Result<fermentool_core::camera::HelperIo> {
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "fermentool-camera.exe not found"))
+    }
+}
+
 async fn shutdown_signal(via_api: Arc<Notify>) {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => tracing::info!("ctrl-c received"),
@@ -268,7 +299,9 @@ async fn main() -> anyhow::Result<()> {
     // Opened after the engine's, which has already migrated the file.
     let db = Arc::new(api::ApiDb::new(Store::open(&paths.db).context("open journal for the API")?));
 
+    let camera = build_camera(&config);
     let state = AppState {
+        camera: camera.clone(),
         control: Arc::clone(&control),
         config: Arc::new(RwLock::new(config.clone())),
         config_path: Arc::new(paths.config.clone()),
@@ -312,6 +345,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("http server")?;
 
+    // Off the async worker: it waits for the helper to exit.
+    let _ = tokio::task::spawn_blocking(move || camera.shutdown()).await;
     control.shutdown();
     tracing::info!("stopped cleanly");
     Ok(())

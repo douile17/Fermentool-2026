@@ -1391,4 +1391,41 @@ mod tests {
         assert_eq!(log.end_of(0).unwrap().0, End::Quit);
         assert_eq!(cam.state(), CameraState::Off);
     }
+
+    /// Pids of the running `fermentool-camera.exe` processes (Windows).
+    fn helper_pids() -> Vec<u32> {
+        let out = std::process::Command::new("tasklist")
+            .args(["/fi", "imagename eq fermentool-camera.exe", "/fo", "csv", "/nh"])
+            .output()
+            .expect("tasklist");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split("\",\"").nth(1)?.parse().ok())
+            .collect()
+    }
+
+    /// The real helper process on its test pattern (never the webcam): needs
+    /// `cargo build -p fermentool-camera --features capture` first.
+    /// `cargo test -p fermentool-core real_helper_end_to_end -- --ignored`
+    #[test]
+    #[ignore = "needs target/debug/fermentool-camera.exe built with --features capture"]
+    fn real_helper_end_to_end() {
+        let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/fermentool-camera.exe");
+        assert!(exe.is_file(), "build the helper first: {}", exe.display());
+        let before = helper_pids();
+        let cam = Camera::spawn(ProcessLaunch { exe, test_pattern: true }, Some(want(640, 480)));
+        assert!(wait_for(Duration::from_secs(10), || connected(&cam)), "{:?}", cam.state());
+        let ours: Vec<u32> = helper_pids().into_iter().filter(|p| !before.contains(p)).collect();
+        assert_eq!(ours.len(), 1, "one new helper process: {ours:?}");
+        let _viewer = cam.viewer();
+        let frame = cam.wait_frame_after(0, Duration::from_secs(5)).expect("a frame");
+        assert_eq!(&frame.jpeg[..2], &[0xFF, 0xD8], "a JPEG");
+        eprintln!("frame {} bytes, helper pid {}", frame.jpeg.len(), ours[0]);
+        cam.shutdown();
+        assert!(
+            wait_for(Duration::from_secs(2), || !helper_pids().contains(&ours[0])),
+            "helper {} still running after shutdown",
+            ours[0]
+        );
+    }
 }

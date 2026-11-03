@@ -55,6 +55,46 @@ pub struct Config {
     pub refill: RefillConfig,
     pub notify: NotifyConfig,
     pub display: DisplayConfig,
+    /// `[camera]`: absent until a camera is first connected from Settings.
+    pub camera: Option<CameraConfig>,
+}
+
+/// The picture sizes the camera offers (the helper's test pattern and the
+/// UI list the same three).
+pub const CAMERA_SIZES: [(u32, u32); 3] = [(640, 480), (1280, 720), (1920, 1080)];
+
+/// `[camera]`: which webcam to connect to, and whether the daemon connects
+/// it at start (Disconnect keeps the device and turns `enabled` off, like the
+/// balance's Disconnect keeps its port).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CameraConfig {
+    /// The device's name as the helper lists it.
+    pub device: String,
+    /// Which one of the devices of that name (two identical webcams).
+    pub device_index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub enabled: bool,
+    /// Start the helper with `--test-pattern` (a synthetic picture, no
+    /// webcam). Read at daemon start.
+    pub test_pattern: bool,
+}
+
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self { device: String::new(), device_index: 0, width: 1280, height: 720, enabled: true, test_pattern: false }
+    }
+}
+
+impl CameraConfig {
+    pub fn problem(&self) -> Option<String> {
+        if CAMERA_SIZES.contains(&(self.width, self.height)) {
+            None
+        } else {
+            Some("camera picture size must be 640x480, 1280x720 or 1920x1080".into())
+        }
+    }
 }
 
 /// How the UI shows things, the same for everyone on this PC (the browser
@@ -394,6 +434,7 @@ impl Default for Config {
             refill: RefillConfig::default(),
             notify: NotifyConfig::default(),
             display: DisplayConfig::default(),
+            camera: None,
         }
     }
 }
@@ -626,6 +667,9 @@ impl Config {
         if let Some(p) = self.refill.problem() {
             return Err(p);
         }
+        if let Some(p) = self.camera.as_ref().and_then(CameraConfig::problem) {
+            return Err(p);
+        }
         self.notify.validate()
     }
 
@@ -695,6 +739,11 @@ impl Config {
                 "config.toml: refill.speed_rpm out of range, the refill pump's max ({max} rpm) used"
             ));
         }
+        if let Some(c) = self.camera.as_mut().filter(|c| c.problem().is_some()) {
+            c.width = 1280;
+            c.height = 720;
+            fixed.push("config.toml: camera size out of range, 1280x720 used".to_string());
+        }
         fixed
     }
 
@@ -711,6 +760,36 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_section_absent_is_none() {
+        let c = Config::from_toml("").unwrap();
+        assert!(c.camera.is_none());
+        // And a default config writes no [camera] section back.
+        assert!(!c.to_toml().unwrap().contains("[camera]"));
+    }
+
+    #[test]
+    fn camera_defaults_are_1280x720_enabled() {
+        let c = Config::from_toml("[camera]\ndevice = \"Integrated Webcam\"\n").unwrap();
+        let cam = c.camera.unwrap();
+        assert_eq!(cam.device, "Integrated Webcam");
+        assert_eq!((cam.device_index, cam.width, cam.height), (0, 1280, 720));
+        assert!(cam.enabled);
+        assert!(!cam.test_pattern);
+    }
+
+    #[test]
+    fn camera_odd_size_is_refused() {
+        let mut c = Config::from_toml("[camera]\ndevice = \"X\"\nwidth = 800\nheight = 600\n").unwrap();
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "camera picture size must be 640x480, 1280x720 or 1920x1080"
+        );
+        c.camera.as_mut().unwrap().width = 640;
+        c.camera.as_mut().unwrap().height = 480;
+        assert!(c.validate().is_ok());
+    }
 
     #[test]
     fn default_round_trips_through_toml() {

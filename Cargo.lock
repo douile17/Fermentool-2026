@@ -1281,9 +1281,12 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "fermentool-camera",
  "fermentool-curves",
  "fermentool-modbus",
+ "futures-core",
+ "http-body-util",
  "jiff",
  "rusqlite",
  "rust-embed",

@@ -25,6 +25,9 @@ serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "time"] }
 axum = { version = "0.8", features = ["ws"] }
+# The live view's body: a channel of parts as a stream.
+futures-core = "0.3"
+bytes = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 rust-embed = "8"
 tracing = "0.1"
@@ -43,3 +46,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

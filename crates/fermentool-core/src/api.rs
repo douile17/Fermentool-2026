@@ -57,6 +57,8 @@ pub struct AppState {
     pub config_rev: Arc<AtomicU64>,
     /// Where this daemon keeps its files and when it started, for Settings > About.
     pub about: Arc<About>,
+    /// The camera supervisor. Its handlers never touch the control thread.
+    pub camera: crate::camera::Camera,
 }
 
 /// What `GET /api/about` reports besides the build's own constants.
@@ -144,6 +146,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/calibrations/{id}/archive", post(archive_calibration))
         .route("/api/calibrations/{id}/restore", post(restore_calibration))
+        .route("/api/camera", get(camera_status))
+        .route("/api/camera/devices", get(camera_devices))
+        .route("/api/camera/connect", post(camera_connect))
+        .route("/api/camera/disconnect", post(camera_disconnect))
+        .route("/api/camera/frame.jpg", get(camera_frame))
+        .route("/api/camera/live", get(camera_live))
         .route("/api/notify/test", post(notify_test))
         .route("/api/notify/pages", get(notify_pages))
         .route("/api/notify/ack", post(notify_ack))
@@ -977,6 +985,10 @@ async fn discard(State(s): State<AppState>, Json(req): Json<DiscardReq>) -> ApiR
 
 async fn shutdown(State(s): State<AppState>) -> Response {
     tracing::info!("shutdown requested via API");
+    // The webcam helper goes first, off the async workers (`shutdown` waits
+    // up to ~1.5 s for it); the daemon's exit path does it again, harmlessly.
+    let camera = s.camera.clone();
+    let _ = tokio::task::spawn_blocking(move || camera.shutdown()).await;
     s.shutdown.notify_one();
     Json(json!({ "stopping": true })).into_response()
 }
@@ -1242,6 +1254,205 @@ async fn scale_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
     Ok(Json(json!({ "disconnected": saved.path })).into_response())
 }
 
+// ---------------------------------------------------------------------------
+// camera
+// ---------------------------------------------------------------------------
+
+/// `GET /api/camera`: the supervisor's state, and whether a camera is saved.
+async fn camera_status(State(s): State<AppState>) -> ApiResult<Response> {
+    let mut v = serde_json::to_value(s.camera.state()).map_err(|e| ApiError::Conflict(e.to_string()))?;
+    let configured = s.config.read().await.camera.as_ref().is_some_and(|c| !c.device.trim().is_empty());
+    v["configured"] = json!(configured);
+    Ok(Json(v).into_response())
+}
+
+#[derive(Deserialize)]
+struct DevicesQuery {
+    #[serde(default)]
+    refresh: Option<String>,
+}
+
+/// `GET /api/camera/devices?refresh=1`: the PC's cameras, listed by a helper
+/// of their own, on the blocking pool.
+async fn camera_devices(State(s): State<AppState>, Query(q): Query<DevicesQuery>) -> ApiResult<Response> {
+    let refresh = q.refresh.as_deref().is_some_and(|r| !matches!(r, "" | "0" | "false"));
+    let camera = s.camera.clone();
+    let list = tokio::task::spawn_blocking(move || camera.devices(refresh))
+        .await
+        .map_err(|e| ApiError::Conflict(format!("camera listing failed: {e}")))?
+        .map_err(ApiError::Conflict)?;
+    let list: Vec<_> = list
+        .into_iter()
+        .map(|d| {
+            let sizes: Vec<[u32; 2]> = d.sizes.iter().map(|&(w, h)| [w, h]).collect();
+            json!({ "name": d.name, "index": d.index, "sizes": sizes })
+        })
+        .collect();
+    Ok(Json(list).into_response())
+}
+
+#[derive(Deserialize)]
+struct CameraConnectReq {
+    device: String,
+    #[serde(default)]
+    index: u32,
+    width: u32,
+    height: u32,
+    #[serde(rename = "_rev", default)]
+    rev: Option<u64>,
+}
+
+/// `POST /api/camera/connect`: saves `[camera]` (same revision check and
+/// atomic write as `PUT /api/config`), then asks the supervisor to connect.
+/// `set_want` runs only here and in Disconnect, never on a config save.
+async fn camera_connect(State(s): State<AppState>, Json(req): Json<CameraConnectReq>) -> ApiResult<Response> {
+    if req.device.trim().is_empty() {
+        return Err(ApiError::Bad("pick a camera".into()));
+    }
+    let mut current = s.config.write().await;
+    let test_pattern = current.camera.as_ref().is_some_and(|c| c.test_pattern);
+    let cam = crate::config::CameraConfig {
+        device: req.device.clone(),
+        device_index: req.index,
+        width: req.width,
+        height: req.height,
+        enabled: true,
+        test_pattern,
+    };
+    if let Some(p) = cam.problem() {
+        return Err(ApiError::Bad(p));
+    }
+    if req.rev.is_some_and(|r| r != s.config_rev.load(Ordering::SeqCst)) {
+        return Err(ApiError::Conflict(
+            "the settings were changed meanwhile (another page): reload them and connect again".into(),
+        ));
+    }
+    let mut new = current.clone();
+    new.camera = Some(cam);
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    drop(current);
+    s.camera.set_want(Some(crate::camera::CameraWant {
+        device: req.device,
+        index: req.index,
+        width: req.width,
+        height: req.height,
+    }));
+    Ok(Json(json!({ "connecting": true })).into_response())
+}
+
+/// `POST /api/camera/disconnect`: frees the camera and keeps the device in
+/// `config.toml` with `enabled = false`, so the daemon does not connect it at
+/// the next start.
+async fn camera_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
+    s.camera.set_want(None);
+    let mut current = s.config.write().await;
+    if current.camera.as_ref().is_some_and(|c| c.enabled) {
+        let mut new = current.clone();
+        if let Some(c) = new.camera.as_mut() {
+            c.enabled = false;
+        }
+        new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+        *current = new;
+        s.config_rev.fetch_add(1, Ordering::SeqCst);
+    }
+    Ok(Json(json!({ "disconnected": true })).into_response())
+}
+
+/// `GET /api/camera/frame.jpg`: the latest picture.
+async fn camera_frame(State(s): State<AppState>) -> Response {
+    match s.camera.latest() {
+        Some(f) => (
+            [(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "no-store")],
+            f.jpeg.as_ref().clone(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "no picture yet" }))).into_response(),
+    }
+}
+
+/// How long the live view waits for a new picture before it repeats the last
+/// one (keeps the connection and the browser's image alive).
+const LIVE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A channel of body parts as a stream.
+struct PartStream(tokio::sync::mpsc::Receiver<bytes::Bytes>);
+
+impl futures_core::Stream for PartStream {
+    type Item = Result<bytes::Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx).map(|o| o.map(Ok))
+    }
+}
+
+fn mjpeg_part(jpeg: &[u8]) -> bytes::Bytes {
+    let mut part = Vec::with_capacity(jpeg.len() + 80);
+    part.extend_from_slice(
+        format!("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpeg.len()).as_bytes(),
+    );
+    part.extend_from_slice(jpeg);
+    part.extend_from_slice(b"\r\n");
+    part.into()
+}
+
+/// `GET /api/camera/live`: `multipart/x-mixed-replace`, one part per new
+/// picture. A task feeds the body: each wait for a picture is a
+/// `spawn_blocking` (never an async worker), and the task, which owns the
+/// `ViewerGuard`, ends the moment the body is dropped, so the viewer count
+/// (and the supervisor's grabbing) stops with the browser tab.
+async fn camera_live(State(s): State<AppState>) -> Response {
+    let camera = s.camera.clone();
+    let guard = camera.viewer();
+    let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(1);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let mut last: Option<crate::camera::Frame> = None;
+        let mut seq = 0u64;
+        loop {
+            let cam = camera.clone();
+            let wait = tokio::task::spawn_blocking(move || cam.wait_frame_after(seq, LIVE_KEEPALIVE));
+            let frame = tokio::select! {
+                _ = tx.closed() => break,
+                r = wait => match r {
+                    Ok(f) => f,
+                    Err(_) => break,
+                },
+            };
+            let part = match frame {
+                Some(f) => {
+                    seq = f.seq;
+                    let p = mjpeg_part(&f.jpeg);
+                    last = Some(f);
+                    p
+                }
+                // Nothing new within the bound: repeat the last picture, or
+                // keep waiting if there has been none yet.
+                None => match &last {
+                    Some(f) => mjpeg_part(&f.jpeg),
+                    None => continue,
+                },
+            };
+            tokio::select! {
+                _ = tx.closed() => break,
+                sent = tx.send(part) => if sent.is_err() { break },
+            }
+        }
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        axum::body::Body::from_stream(PartStream(rx)),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1328,6 +1539,7 @@ mod tests {
             db: Arc::new(ApiDb::new(Store::open(db).unwrap())),
             config_rev: Default::default(),
             about: Default::default(),
+            camera: crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, None),
         }
     }
 
@@ -2390,5 +2602,94 @@ mod tests {
         let app = router(test_state());
         let res = app.oneshot(get("/api/runs/1/tracking")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ----- camera -----
+
+    fn camera_want() -> crate::camera::CameraWant {
+        crate::camera::CameraWant { device: "Test pattern".into(), index: 0, width: 640, height: 480 }
+    }
+
+    fn wait_for(max: Duration, mut f: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + max;
+        loop {
+            if f() {
+                return true;
+            }
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[tokio::test]
+    async fn camera_off_reports_off_and_not_configured() {
+        let app = router(test_state());
+        let res = app.oneshot(get("/api/camera")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert_eq!(v["state"], "off");
+        assert_eq!(v["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn frame_404_before_any_picture() {
+        let app = router(test_state());
+        let res = app.oneshot(get("/api/camera/frame.jpg")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(res).await["error"], "no picture yet");
+    }
+
+    #[tokio::test]
+    async fn closing_the_stream_releases_the_viewer() {
+        use http_body_util::BodyExt;
+        let mut st = test_state();
+        st.camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, Some(camera_want()));
+        let cam = st.camera.clone();
+        let app = router(st);
+        let res = app.oneshot(get("/api/camera/live")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "multipart/x-mixed-replace; boundary=frame");
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(cam.viewers(), 1);
+        let mut body = res.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame()).await.unwrap().unwrap().unwrap();
+        let part = frame.into_data().unwrap();
+        assert!(part.starts_with(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "), "{part:?}");
+        assert!(part.ends_with(b"\r\n"));
+        drop(body);
+        // Async polling: the feeding task shares this test's single thread.
+        let end = std::time::Instant::now() + Duration::from_secs(1);
+        while cam.viewers() != 0 && std::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(cam.viewers(), 0, "viewer not released");
+        cam.shutdown();
+    }
+
+    #[tokio::test]
+    async fn connect_saves_the_section_and_refuses_an_odd_size() {
+        let mut st = test_state();
+        st.config_path = Arc::new(std::env::temp_dir().join(format!("ft-cam-{}.toml", std::process::id())));
+        let cfg = Arc::clone(&st.config);
+        let cam = st.camera.clone();
+        let app = router(st);
+        let bad = json!({ "device": "Test pattern", "index": 0, "width": 800, "height": 600 });
+        let res = app.clone().oneshot(post_json("/api/camera/connect", bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(cfg.read().await.camera.is_none());
+        let ok = json!({ "device": "Test pattern", "index": 0, "width": 640, "height": 480 });
+        let res = app.clone().oneshot(post_json("/api/camera/connect", ok)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(cfg.read().await.camera.as_ref().is_some_and(|c| c.enabled && c.width == 640));
+        assert!(wait_for(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { .. })));
+        let res = app.clone().oneshot(post_json("/api/camera/disconnect", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let c = cfg.read().await.camera.clone().unwrap();
+        assert!(!c.enabled);
+        assert_eq!(c.device, "Test pattern", "the device stays in config.toml");
+        assert!(wait_for(Duration::from_secs(5), || cam.state() == crate::camera::CameraState::Off));
+        cam.shutdown();
     }
 }
