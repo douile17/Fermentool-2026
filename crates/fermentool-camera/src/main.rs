@@ -1,11 +1,16 @@
 //! `fermentool-camera.exe`: the daemon's camera helper. Requests on stdin,
 //! replies on stdout (the protocol and nothing else), diagnostics on stderr.
 
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
+use std::time::Duration;
 
 use fermentool_camera::backend::{Backend, Combined};
 use fermentool_camera::nokhwa_backend::NokhwaBackend;
-use fermentool_camera::serve::serve;
+use fermentool_camera::serve::{forward_input, serve};
+
+/// After stdin closes, how long a `Quit` sent just before has to end the
+/// helper the normal way before it exits regardless.
+const EOF_GRACE: Duration = Duration::from_millis(300);
 
 fn main() {
     let test_pattern = std::env::args().any(|a| a == "--test-pattern");
@@ -14,11 +19,13 @@ fn main() {
     } else {
         Box::new(NokhwaBackend::default())
     };
-    let stdin = std::io::stdin().lock();
+    // The daemon closing our stdin (it quit, crashed or was killed) ends
+    // this process within EOF_GRACE, even with a grab stuck in the driver.
+    let input = forward_input(std::io::stdin(), EOF_GRACE, || std::process::exit(0));
     let stdout = std::io::stdout().lock();
     let mut output = BufWriter::new(stdout);
     // serve flushes after every reply (write_reply) and has closed the device.
-    let result = serve(BufReader::new(stdin), &mut output, backend.as_mut());
+    let result = serve(input, &mut output, backend.as_mut());
     let _ = output.flush();
     if let Err(e) = &result {
         eprintln!("fermentool-camera: {e}");

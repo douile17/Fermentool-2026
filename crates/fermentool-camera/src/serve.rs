@@ -1,6 +1,8 @@
 //! The helper's request loop: one request, one reply, in order.
 
 use std::io::{self, Read, Write};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::protocol::{read_request, write_reply, Reply, Request};
@@ -34,6 +36,67 @@ pub fn serve(mut input: impl Read, mut output: impl Write, backend: &mut dyn Bac
     };
     backend.close();
     result
+}
+
+/// Bytes read on another thread, handed over by a channel. EOF once that
+/// thread stops sending.
+pub struct ChannelReader {
+    rx: mpsc::Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        while self.pos >= self.buf.len() {
+            match self.rx.recv() {
+                Ok(b) => {
+                    self.buf = b;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// Reads `input` (the helper's stdin) on a thread of its own and returns a
+/// reader of its bytes for [`serve`]. At EOF or a read error the reader sees
+/// EOF too, then `on_eof` runs after `grace`, whatever `serve` is doing: the
+/// helper exits even when a grab never returns (nokhwa after an unplug), so
+/// a daemon that died never leaves the webcam held. The grace lets a `Quit`
+/// just before the EOF end the helper the normal way.
+pub fn forward_input(
+    mut input: impl Read + Send + 'static,
+    grace: Duration,
+    on_eof: impl FnOnce() + Send + 'static,
+) -> ChannelReader {
+    let (tx, rx) = mpsc::channel();
+    // Should the thread not start, its sender is dropped with it: serve
+    // reads EOF at once and the helper ends.
+    let _ = std::thread::Builder::new().name("stdin".into()).spawn(move || {
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            match input.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(chunk[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        drop(tx);
+        std::thread::sleep(grace);
+        on_eof();
+    });
+    ChannelReader { rx, buf: Vec::new(), pos: 0 }
 }
 
 #[cfg(test)]
@@ -97,6 +160,61 @@ mod tests {
         let (_, replies) = run(&[open("Nope")]);
         assert!(matches!(&replies[0], Reply::Error { code: ErrorCode::NotFound, .. }));
     }
+
+    /// A device whose grab never returns, like nokhwa after an unplug.
+    struct Stuck;
+
+    impl Backend for Stuck {
+        fn list(&mut self) -> Result<Vec<crate::protocol::DeviceInfo>, crate::backend::BackendError> {
+            Ok(Vec::new())
+        }
+        fn open(&mut self, _: &str, _: u32, w: u32, h: u32) -> Result<(u32, u32), crate::backend::BackendError> {
+            Ok((w, h))
+        }
+        fn grab(&mut self) -> Result<Vec<u8>, crate::backend::BackendError> {
+            loop {
+                std::thread::park();
+            }
+        }
+        fn close(&mut self) {}
+    }
+
+    fn requests(all: &[Request]) -> Vec<u8> {
+        let mut input = Vec::new();
+        for r in all {
+            write_request(&mut input, r).unwrap();
+        }
+        input
+    }
+
+    #[test]
+    fn forwarded_input_serves_like_the_pipe_and_reports_eof() {
+        let (eof_tx, eof_rx) = std::sync::mpsc::channel();
+        let input = forward_input(Cursor::new(requests(&[open("Test pattern"), Request::Grab])), GRACE, move || {
+            let _ = eof_tx.send(());
+        });
+        let mut output = Vec::new();
+        assert!(serve(input, &mut output, &mut TestPattern::default()).is_ok());
+        let mut cur = Cursor::new(output);
+        assert_eq!(read_reply(&mut cur).unwrap(), Reply::Opened { width: 640, height: 480 });
+        assert!(matches!(read_reply(&mut cur).unwrap(), Reply::Frame(_)));
+        assert!(eof_rx.recv_timeout(GRACE + Duration::from_secs(2)).is_ok());
+    }
+
+    #[test]
+    fn eof_ends_even_a_stuck_grab() {
+        let (eof_tx, eof_rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        let input = forward_input(Cursor::new(requests(&[open("Cam"), Request::Grab])), GRACE, move || {
+            let _ = eof_tx.send(());
+        });
+        // serve stays stuck in the grab forever; the EOF action still runs.
+        std::thread::spawn(move || serve(input, io::sink(), &mut Stuck));
+        assert!(eof_rx.recv_timeout(GRACE + Duration::from_secs(2)).is_ok());
+        assert!(started.elapsed() >= GRACE);
+    }
+
+    const GRACE: Duration = Duration::from_millis(100);
 
     #[test]
     fn the_bar_moves_between_frames() {

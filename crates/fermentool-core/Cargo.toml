@@ -36,5 +36,10 @@ anyhow = "1"
 # free of system TLS libraries.
 ureq = { version = "2", features = ["json"] }
 
+# The camera helpers join a kill-on-close job object: the OS ends them
+# whenever the daemon process ends, however it ends.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

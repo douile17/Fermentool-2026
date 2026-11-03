@@ -19,7 +19,9 @@
 //! `Close` does not free the camera, only the helper's exit does. So a want
 //! that goes away, a want that changes, a failed `Open`, a grab error and a
 //! timeout all end the helper (`Quit`, then a kill after 1 s; a timeout is
-//! killed at once), and the next attempt runs on a fresh one.
+//! killed at once), and the next attempt runs on a fresh one. Should the
+//! daemon itself die, every helper is in a kill-on-close job (`job`, on
+//! Windows) and also exits on its stdin closing, even mid-grab.
 //!
 //! [`Camera::state`], [`Camera::latest`] and the viewer count read shared
 //! state behind short locks and never wait on the helper.
@@ -51,6 +53,12 @@ pub const IN_USE_RETRY: Duration = Duration::from_secs(15);
 
 /// After a grab error or a failed open, the next attempt on a fresh helper.
 pub const LOST_RETRY: Duration = Duration::from_secs(3);
+
+/// Failed attempts in a row retried every `LOST_RETRY`, so a replug is
+/// caught quickly; past them the respawn backoff takes over (an unplug for
+/// the length of a run would otherwise launch a helper every 3 s, 120,000
+/// over 100 h).
+pub const LOST_FAST_TRIES: u32 = 10;
 
 /// Respawn backoff after a launch failure, a crash or a timeout: doubles from
 /// the first to the max, back to the first after `RESPAWN_HEALTHY` connected.
@@ -224,6 +232,7 @@ impl Camera {
             healthy_since: None,
             next_grab: Instant::now(),
             seq: 0,
+            lost_tries: 0,
         };
         sup.set_want(want);
         let spawned = std::thread::Builder::new().name("camera-supervisor".into()).spawn(move || sup.run(rx));
@@ -251,9 +260,11 @@ impl Camera {
 
     /// The PC's cameras, listed by a short-lived helper of its own (never the
     /// live one: a listing leaves the devices it looked at activated until
-    /// its process exits). Cached until `refresh`. Blocking, at most
-    /// [`REQUEST_TIMEOUT`] for the answer plus 1 s to end the helper: call it
-    /// off the async runtime.
+    /// its process exits). Cached until `refresh`. Blocking: at most
+    /// [`REQUEST_TIMEOUT`] for the answer plus the 1 s quit wait, and a second
+    /// caller waits for the first (the cache's lock is held throughout).
+    /// Call it on a blocking thread (`spawn_blocking`), never on the async
+    /// runtime nor on the control thread.
     pub fn devices(&self, refresh: bool) -> Result<Vec<DeviceInfo>, String> {
         let mut cache = lock(&self.inner.devices);
         if let (Some(list), false) = (&*cache, refresh) {
@@ -406,6 +417,8 @@ struct Supervisor {
     healthy_since: Option<Instant>,
     next_grab: Instant,
     seq: u64,
+    /// Failed attempts since the last frame (or the last healthy minute).
+    lost_tries: u32,
 }
 
 impl Supervisor {
@@ -466,6 +479,7 @@ impl Supervisor {
         if self.helper.is_some() {
             if self.healthy_since.is_some_and(|t| t.elapsed() >= self.t.healthy_reset) {
                 self.backoff = self.t.respawn_first;
+                self.lost_tries = 0;
             }
             if self.shared.viewers.load(Ordering::SeqCst) > 0 && Instant::now() >= self.next_grab {
                 self.grab();
@@ -493,6 +507,7 @@ impl Supervisor {
         self.want = want;
         self.next_attempt = Instant::now();
         self.backoff = self.t.respawn_first;
+        self.lost_tries = 0;
     }
 
     /// Quit the helper, killed if it does not exit in time.
@@ -515,6 +530,18 @@ impl Supervisor {
     fn backoff_attempt(&mut self) {
         self.next_attempt = Instant::now() + self.backoff;
         self.backoff = (self.backoff * 2).min(self.t.respawn_max);
+    }
+
+    /// The camera answered but failed: `LOST_RETRY` for the first
+    /// [`LOST_FAST_TRIES`] in a row, then the backoff (never under `LOST_RETRY`).
+    fn lost_attempt(&mut self) {
+        self.lost_tries += 1;
+        if self.lost_tries <= LOST_FAST_TRIES {
+            self.next_attempt = Instant::now() + self.t.lost_retry;
+        } else {
+            self.next_attempt = Instant::now() + self.backoff.max(self.t.lost_retry);
+            self.backoff = (self.backoff * 2).min(self.t.respawn_max);
+        }
     }
 
     /// `Lost`, keeping the time of the first loss across retries.
@@ -580,7 +607,7 @@ impl Supervisor {
             Ok(Reply::Error { message, .. }) => {
                 retire(helper, self.t.quit_wait);
                 self.lost(&want.device, &message);
-                self.next_attempt = Instant::now() + self.t.lost_retry;
+                self.lost_attempt();
             }
             Ok(other) => {
                 self.kill_helper(helper, &format!("unexpected answer to Open: {other:?}"));
@@ -610,6 +637,7 @@ impl Supervisor {
             *lock(&self.shared.latest) = Some(frame);
             self.shared.fresh.notify_all();
             self.next_grab = started + self.t.live_interval;
+            self.lost_tries = 0;
             return;
         }
         // Any other answer ends this helper; the next attempt is a fresh one.
@@ -620,7 +648,7 @@ impl Supervisor {
                 retire(h, self.t.quit_wait);
                 self.healthy_since = None;
                 self.lost(&device, &message);
-                self.next_attempt = Instant::now() + self.t.lost_retry;
+                self.lost_attempt();
             }
             Err(Fail::Timeout) => {
                 self.kill_helper(h, &format!("no frame within {} s", self.t.request.as_secs()));
@@ -651,8 +679,8 @@ pub fn helper_exe() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// The real helper: a child process with piped stdin/stdout, no console
-/// window, below normal priority (the pump and the balance come first).
+/// The real helper: a child process with piped stdin, stdout and stderr (the
+/// last into the log), started by [`spawn_hidden`].
 pub struct ProcessLaunch {
     pub exe: PathBuf,
     pub test_pattern: bool,
@@ -665,21 +693,15 @@ impl Launch for ProcessLaunch {
         if self.test_pattern {
             cmd.arg("--test-pattern");
         }
-        // stderr to null: nobody would read a pipe, and a full one would
-        // block the helper.
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
-            cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
-        }
-        let mut child = cmd.spawn()?;
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = spawn_hidden(&mut cmd)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
             return Err(io::Error::other("the camera helper's pipes did not open"));
         };
+        if let Some(stderr) = child.stderr.take() {
+            forward_stderr(stderr);
+        }
         let mut child = Some(child);
         Ok(HelperIo {
             to_helper: Box::new(stdin),
@@ -695,6 +717,142 @@ impl Launch for ProcessLaunch {
             }),
         })
     }
+}
+
+/// Spawns `cmd` without a console window, below normal priority (the pump
+/// and the balance come first), inside the daemon's kill-on-close job.
+pub(crate) fn spawn_hidden(cmd: &mut std::process::Command) -> io::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    }
+    let child = cmd.spawn()?;
+    #[cfg(windows)]
+    job::assign(&child);
+    Ok(child)
+}
+
+/// One job object for the daemon's life, set to kill its processes when its
+/// last handle closes. The daemon never closes it, so the OS does at the
+/// daemon's exit, however it exits (Task Manager, a crash, a shutdown that
+/// gave up waiting): no helper outlives the daemon holding the webcam, even
+/// one stuck in a driver call.
+#[cfg(windows)]
+pub(crate) mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    #[cfg(test)]
+    use windows_sys::Win32::System::JobObjects::{IsProcessInJob, QueryInformationJobObject};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    struct Job(HANDLE);
+
+    // A job handle is a kernel handle, usable from any thread.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    static JOB: OnceLock<Option<Job>> = OnceLock::new();
+
+    fn job() -> Option<HANDLE> {
+        JOB.get_or_init(|| {
+            // SAFETY: plain Win32 calls on a handle created here; `info` is a
+            // zeroed plain-data struct of the size passed.
+            unsafe {
+                let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if h.is_null() {
+                    tracing::warn!("no job object for the camera helper: {}", io_err());
+                    return None;
+                }
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let ok = SetInformationJobObject(
+                    h,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                if ok == 0 {
+                    tracing::warn!("cannot set the camera job to kill on close: {}", io_err());
+                    CloseHandle(h);
+                    return None;
+                }
+                Some(Job(h))
+            }
+        })
+        .as_ref()
+        .map(|j| j.0)
+    }
+
+    fn io_err() -> std::io::Error {
+        std::io::Error::last_os_error()
+    }
+
+    /// Puts `child` in the job. A failure is logged, never fatal: the helper
+    /// still ends on its stdin closing, unless stuck in a driver call.
+    pub(crate) fn assign(child: &std::process::Child) {
+        let Some(job) = job() else { return };
+        // SAFETY: both handles are valid for the call (the child is borrowed).
+        if unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) } == 0 {
+            tracing::warn!("camera helper not in the job: {}", io_err());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn holds(child: &std::process::Child) -> bool {
+        let Some(job) = job() else { return false };
+        let mut inside = 0;
+        // SAFETY: valid handles, `inside` outlives the call.
+        let ok = unsafe { IsProcessInJob(child.as_raw_handle() as HANDLE, job, &mut inside) };
+        ok != 0 && inside != 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kills_on_close() -> bool {
+        let Some(job) = job() else { return false };
+        // SAFETY: `info` is a zeroed plain-data struct of the size passed.
+        unsafe {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            let ok = QueryInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            );
+            ok != 0 && info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0
+        }
+    }
+}
+
+/// Whether a line of the helper's stderr reports a problem (logged as a
+/// warning) or is mere chatter (debug).
+pub(crate) fn looks_like_error(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    ["error", "fail", "panic"].iter().any(|w| l.contains(w))
+}
+
+/// The helper's stderr, line by line, into the daemon's log, on a thread of
+/// its own that ends at EOF (the helper's exit). Never joined.
+fn forward_stderr(stderr: impl Read + Send + 'static) {
+    use std::io::BufRead;
+    let _ = std::thread::Builder::new().name("camera-stderr".into()).spawn(move || {
+        for line in io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if looks_like_error(&line) {
+                tracing::warn!("camera helper: {line}");
+            } else {
+                tracing::debug!("camera helper: {line}");
+            }
+        }
+    });
 }
 
 /// A helper for tests: an in-process thread that speaks the protocol over
@@ -1121,6 +1279,55 @@ mod tests {
         }
         assert_eq!(cam.state(), CameraState::NoHelper);
         cam.shutdown();
+    }
+
+    #[test]
+    fn a_long_loss_slows_its_retries_down() {
+        let t = Timings {
+            lost_retry: Duration::from_millis(50),
+            respawn_first: Duration::from_millis(200),
+            respawn_max: Duration::from_millis(800),
+            ..quick()
+        };
+        let (unplugged, log) =
+            FakeLaunch::new(|_| Script { open: Act::Fail(ErrorCode::NotFound), ..Script::healthy() });
+        let cam = Camera::spawn_with(unplugged, Some(want(640, 480)), t);
+        let fast = LOST_FAST_TRIES as usize;
+        assert!(wait_for(Duration::from_secs(5), || log.seen(is_open).len() >= fast + 3));
+        let at: Vec<Instant> = log.seen(is_open).iter().map(|(_, at)| *at).collect();
+        let gaps: Vec<Duration> = at.windows(2).map(|w| w[1].duration_since(w[0])).collect();
+        // The first tries come every LOST_RETRY: a replug is caught quickly.
+        for g in &gaps[..fast] {
+            assert!(*g >= t.lost_retry && *g < t.respawn_first, "{gaps:?}");
+        }
+        // Then the backoff, doubling.
+        assert!(gaps[fast] >= t.respawn_first, "{gaps:?}");
+        assert!(gaps[fast + 1] >= t.respawn_first * 2, "{gaps:?}");
+        assert!(matches!(cam.state(), CameraState::Lost { .. }));
+        cam.shutdown();
+    }
+
+    #[test]
+    fn helper_errors_are_told_apart_from_chatter() {
+        assert!(looks_like_error("camera list failed: no media foundation"));
+        assert!(looks_like_error("fermentool-camera: Error reading frame"));
+        assert!(looks_like_error("thread 'main' panicked at src/main.rs"));
+        assert!(!looks_like_error("opened Integrated Webcam at 1280 x 720"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helpers_join_a_job_that_dies_with_the_daemon() {
+        use std::process::{Command, Stdio};
+        let mut cmd = Command::new("ping");
+        cmd.args(["-n", "30", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut child = spawn_hidden(&mut cmd).unwrap();
+        let inside = job::holds(&child);
+        let kills = job::kills_on_close();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(inside, "the child is not in the daemon's job");
+        assert!(kills, "the job does not kill its processes on close");
     }
 
     #[test]
