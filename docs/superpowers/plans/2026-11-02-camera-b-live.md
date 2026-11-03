@@ -48,6 +48,12 @@ Throwaway: decides the capture backend for Task 3.
 - [ ] **Step 3:** Open the camera in the Windows Camera app, then try Step 2 again; note the exact error (type and HRESULT, if any).
 - [ ] **Step 4: Decide.** Works: Task 3 uses `nokhwa`. Fails to build or capture: Task 3 uses Media Foundation directly through the `windows` crate (`MFEnumDeviceSources`, `IMFSourceReader`, MJPG or NV12 output). Write the decision and the "in use" error from Step 3 into this plan under this task, and tell the user.
 
+**Spike result (2026-11-03):** `nokhwa` works. Resolved `nokhwa` 0.10.11, `jpeg-encoder` 0.6.1; builds with `+crt-static`, no `VCRUNTIME140.dll` import. "Integrated Webcam" (the only device) at 1280 × 720: ~30 ms a frame, the first 243 ms; a JPEG is ~105 kB.
+- In use (Windows Camera app holding it): `open` and `open_stream` succeed; the first `frame()` fails with `ReadFrameError("Hardware MFT failed to start streaming due to lack of hardware resources. (0xC00D3704)")`, later ones `GetPropertyError` with the same HRESULT. So `InUse` is detected at the first grab (`0xC00D3704`), not at open: the helper's `open` grabs one frame to confirm.
+- Not found: `OpenDeviceError("No Such Camera", "Not Found")`.
+- The spike segfaulted at process exit after its work (exit 139): the helper closes the camera, flushes stdout and ends with `std::process::exit(0)`; check its exit code.
+- Spike source and full notes: `.superpowers/sdd/2026-11-02-camera-b-live/task-1-report.md` (not committed).
+
 ### Task 2: The pipe protocol (`fermentool-camera` library)
 
 **Files:**
