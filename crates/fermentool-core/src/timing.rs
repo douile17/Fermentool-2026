@@ -110,17 +110,12 @@ fn global() -> &'static Mutex<Timing> {
 
 /// Record one sample (ms) from any thread.
 pub fn record(m: Metric, ms: f64) {
-    if let Ok(mut t) = global().lock() {
-        t.record(m, ms);
-    }
+    global().lock().unwrap_or_else(|p| p.into_inner()).record(m, ms);
 }
 
 /// Log the minute's summaries if it is over. Cheap when it is not.
 pub fn flush_if_due(now: Instant) {
-    let due = match global().lock() {
-        Ok(mut t) => t.take_if_due(now),
-        Err(_) => None,
-    };
+    let due = global().lock().unwrap_or_else(|p| p.into_inner()).take_if_due(now);
     let round = |x: f64| (x * 10.0).round() / 10.0;
     for (m, s) in due.unwrap_or_default() {
         tracing::info!(
@@ -137,7 +132,7 @@ pub fn flush_if_due(now: Instant) {
 /// The samples waiting in the current window (tests only).
 #[cfg(test)]
 pub fn peek(m: Metric) -> Vec<f64> {
-    global().lock().map(|t| t.samples[m.index()].clone()).unwrap_or_default()
+    global().lock().unwrap_or_else(|p| p.into_inner()).samples[m.index()].clone()
 }
 
 #[cfg(test)]
