@@ -61,7 +61,9 @@
       .catch((e) => (err = e.message))
       .finally(() => (looking = false));
   }
-  $effect(() => lookAgain(false));
+  // asked again at each opening: a webcam plugged in since the last list
+  // stayed out of a cached one until "Look again" (2026-11-03)
+  $effect(() => lookAgain(true));
 
   // the form, and what config.toml has (Save waits for a change)
   let devKey = $state('');

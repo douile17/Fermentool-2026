@@ -310,6 +310,11 @@ try {
   check('#settings/camera opens the Camera section', (await js(`document.querySelector('.side button.on')?.textContent.trim()`)) === 'Camera');
   check('it says the camera state in a word, with its Connect or Disconnect', await js(`/^(Connected|Connecting…|Camera in use|Camera not answering|Not connected|Camera helper missing)$/.test(document.querySelector('.settings-pane .head .word')?.textContent.trim() ?? '') && document.querySelectorAll('.settings-pane .head button').length === 1`));
   check('it has the camera select and the picture sizes', await js(`!!document.querySelector('.settings-pane select[aria-label="Camera"]') && document.querySelectorAll('.settings-pane .seg[aria-label="Picture size"] button').length >= 1`));
+  // a webcam plugged in after a first list stayed out of the select until
+  // "Look again": the section asks Windows again at each opening (2026-11-03)
+  const plugged = (await (await fetch(`${URL}/api/camera/devices?refresh=1`)).json()).length;
+  const offered = await js(`document.querySelectorAll('.settings-pane select[aria-label="Camera"] option[value]:not([value=""])').length`);
+  check('the camera select lists every camera plugged in now', offered >= plugged, `${offered} offered, ${plugged} plugged`);
   check('Camera keeps Save off until a change', await js(`[...document.querySelectorAll('.settings-pane button.save')].every((b) => b.disabled)`));
   if (await js(`(() => { const b = [...document.querySelectorAll('.settings-pane .seg[aria-label="Picture size"] button')].find((x) => !x.classList.contains('on')); if (!b) return false; b.click(); return true; })()`)) {
     const placed = await answers(`(() => { const s = document.querySelector('.settings-pane .seg[aria-label="Picture size"]'); return !!s && s.classList.contains('thumbed') && parseFloat(s.style.getPropertyValue('--thumb-w')) > 0; })()`);
