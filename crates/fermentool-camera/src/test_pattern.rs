@@ -23,6 +23,9 @@ impl Backend for TestPattern {
         if device != TEST_PATTERN_NAME || index != 0 {
             return Err((ErrorCode::NotFound, format!("no camera named {device}")));
         }
+        if !GLOBAL_SIZES.contains(&(width, height)) {
+            return Err((ErrorCode::Failed, format!("no {width} x {height} picture on this device")));
+        }
         self.size = Some((width, height));
         self.frame = 0;
         Ok((width, height))
@@ -49,5 +52,19 @@ impl Backend for TestPattern {
 
     fn close(&mut self) {
         self.size = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_outside_the_global_list_are_refused() {
+        let mut p = TestPattern::default();
+        for (w, h) in [(0, 0), (0, 480), (100_000, 100_000)] {
+            assert_eq!(p.open(TEST_PATTERN_NAME, 0, w, h).unwrap_err().0, ErrorCode::Failed);
+        }
+        assert!(p.grab().is_err());
     }
 }

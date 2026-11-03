@@ -31,7 +31,13 @@ fn failed(e: impl std::fmt::Display) -> BackendError {
 /// nokhwa fail inside its constructor, and that failure crashed the process.
 fn new_camera(id: &CameraIndex, width: u32, height: u32) -> Result<Camera, BackendError> {
     let mut camera = Camera::new(id.clone(), RequestedFormat::new::<RgbFormat>(RequestedFormatType::None)).map_err(failed)?;
-    let formats = camera.compatible_camera_formats().map_err(failed)?;
+    let formats = match camera.compatible_camera_formats() {
+        Ok(f) => f,
+        Err(e) => {
+            leak(camera);
+            return Err(failed(e));
+        }
+    };
     let size = Resolution::new(width, height);
     let best = formats.into_iter().filter(|f| f.resolution() == size).max_by_key(|f| f.frame_rate());
     let Some(format) = best else {
@@ -101,7 +107,10 @@ impl Backend for NokhwaBackend {
         self.close();
         let id = find_device(device, index)?;
         let mut camera = new_camera(&id, width, height)?;
-        camera.open_stream().map_err(failed)?;
+        if let Err(e) = camera.open_stream() {
+            leak(camera);
+            return Err(failed(e));
+        }
         // A camera held by another app opens fine and fails at the first frame.
         if let Err(e) = grab_rgb(&mut camera) {
             let _ = camera.stop_stream();
@@ -121,6 +130,9 @@ impl Backend for NokhwaBackend {
     fn close(&mut self) {
         if let Some(mut camera) = self.camera.take() {
             let _ = camera.stop_stream();
+            // stop_stream does not release the IMFSourceReader: the webcam stays
+            // held until the helper process exits, so the daemon restarts the
+            // helper (Quit + respawn) when it needs the device freed.
             leak(camera);
         }
     }

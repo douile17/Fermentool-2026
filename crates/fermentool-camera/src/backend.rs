@@ -18,7 +18,8 @@ pub trait Backend {
     /// size it really delivers.
     fn open(&mut self, device: &str, index: u32, width: u32, height: u32) -> Result<(u32, u32), BackendError>;
     fn grab(&mut self) -> Result<Vec<u8>, BackendError>;
-    /// Releases the device; harmless when none is open.
+    /// Stops streaming; harmless when none is open. The nokhwa backend cannot
+    /// release the device itself: that happens when the helper process exits.
     fn close(&mut self);
 }
 
@@ -29,7 +30,7 @@ pub fn classify_error(message: &str) -> ErrorCode {
     let m = message.to_ascii_lowercase();
     if m.contains("0xc00d3704") {
         ErrorCode::InUse
-    } else if m.contains("not found") || m.contains("no such camera") {
+    } else if m.contains("no such camera") {
         ErrorCode::NotFound
     } else {
         ErrorCode::Failed
@@ -52,7 +53,10 @@ impl Combined {
 impl Backend for Combined {
     fn list(&mut self) -> Result<Vec<DeviceInfo>, BackendError> {
         // A failing camera API must not hide the test pattern.
-        let mut devices = self.real.list().unwrap_or_default();
+        let mut devices = self.real.list().unwrap_or_else(|(_, message)| {
+            eprintln!("camera list failed: {message}");
+            Vec::new()
+        });
         devices.extend(self.pattern.list()?);
         Ok(devices)
     }
@@ -92,6 +96,7 @@ mod tests {
     #[test]
     fn missing_camera_is_not_found() {
         assert_eq!(classify_error("Could not open device No Such Camera: Not Found"), ErrorCode::NotFound);
+        assert_eq!(classify_error("Element not found. (0x80070490)"), ErrorCode::Failed);
     }
 
     #[test]
