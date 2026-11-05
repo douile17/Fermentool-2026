@@ -593,6 +593,24 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   Live only from the daemon's side (`liveState`, from `viewers` and
   `frame_at` of `GET /api/camera`), says "Not live" otherwise and asks the
   stream again once the daemon answers.
+- **Picture controls** (2026-11-05): `IAMCameraControl` (exposure, focus)
+  and `IAMVideoProcAmp` (brightness, contrast, saturation, sharpness, white
+  balance, gain, power line 13) cast from the media source (`Knobs`,
+  `mf_backend.rs`); protocol `Controls` / `SetControl`, `Open { controls }`.
+  Only what the camera reports is listed: the HUE has no exposure nor white
+  balance, the Integrated Webcam has both with auto. **In auto, `Get`
+  returns the last fixed value, not the camera's choice**: the UI says only
+  "Auto" there. The driver keeps a value across processes; the daemon still
+  sets the saved ones at each open (`[camera.controls."<device>"]`, by
+  control name; `CameraWant::controls`, kept for a reopen by
+  `remember`). New controls for the same camera never respawn the helper
+  (`same_camera`). Routes `GET /api/camera/controls`, `POST
+  /api/camera/control` (set on the camera first, then saved; `save: false`
+  while a slider moves), `POST /api/camera/controls/reset`, `POST
+  /api/camera/fps` (`[camera] live_fps`, 1 to 15).
+- Settings > Camera has no Save: every click connects or sets the camera
+  and saves at once, the line under the card says it with Undo (an undo
+  per change, `restorePlan`). The controls sit beside the live picture.
 - Another program holding the webcam (at Open or at a grab) is `in_use`,
   retried every 15 s, then doubling to 120 s after 10 in a row.
 - The Tauri window's CSP lists the daemon's origin in `img-src` (the live

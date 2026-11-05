@@ -201,14 +201,19 @@ fn build_camera(config: &config::Config) -> (fermentool_core::camera::Camera, bo
         index: c.device_index,
         width: c.width,
         height: c.height,
+        controls: c.controls_for(&c.device),
     });
-    match helper_exe() {
+    let (camera, missing) = match helper_exe() {
         Some(exe) => (Camera::spawn(ProcessLaunch { exe, test_pattern }, want), false),
         None => {
             tracing::warn!("fermentool-camera.exe not found next to the daemon; the camera is unavailable");
             (Camera::spawn(NoHelperLaunch, want), true)
         }
+    };
+    if let Some(c) = cam {
+        camera.set_live_fps(c.live_fps);
     }
+    (camera, missing)
 }
 
 /// Stands in for the helper when its exe is missing: every launch fails.

@@ -120,3 +120,126 @@ export function runClock(seconds) {
   const ss = String(s).padStart(2, '0');
   return h ? `+${h} h ${String(m).padStart(2, '0')} m ${ss} s` : `+${m} m ${ss} s`;
 }
+
+// --- Picture controls (Settings > Camera, 2026-11-05) ----------------------
+// What GET /api/camera/controls returns, one entry per control the camera
+// has: `{ control, min, max, step, default, value, can_auto, auto }`, in the
+// camera's own units. Every change is set on the camera and saved at once.
+
+/** Live view pictures a second offered (the daemon takes 1 to 15). */
+export const FPS_CHOICES = [5, 10, 15];
+
+const CONTROL_LABEL = {
+  exposure: 'Exposure',
+  white_balance: 'White balance',
+  focus: 'Focus',
+  brightness: 'Brightness',
+  contrast: 'Contrast',
+  saturation: 'Saturation',
+  sharpness: 'Sharpness',
+  gain: 'Gain',
+  power_line: 'Anti-flicker',
+};
+
+export function controlLabel(name) {
+  return CONTROL_LABEL[name] ?? name;
+}
+
+const POWER_LINE = [
+  { value: 0, label: 'Off' },
+  { value: 1, label: '50 Hz' },
+  { value: 2, label: '60 Hz' },
+  { value: 3, label: 'Auto' },
+];
+
+/** Anti-flicker is a choice, not a slider: the camera's values among off,
+ *  50 Hz, 60 Hz and auto. */
+export function powerLineOptions(c) {
+  return POWER_LINE.filter((o) => o.value >= c.min && o.value <= c.max);
+}
+
+/** A value in words: exposure as a shutter time (Windows gives log2 of
+ *  seconds, -6 is 1/64 s), white balance in kelvin. */
+export function valueText(name, value) {
+  if (name === 'exposure') return value < 0 ? `1/${2 ** -value} s` : `${2 ** value} s`;
+  if (name === 'white_balance') return `${value} K`;
+  if (name === 'power_line') return POWER_LINE.find((o) => o.value === value)?.label ?? String(value);
+  return String(value);
+}
+
+/** What the row shows on the right. In auto only "Auto": the camera
+ *  reports its last fixed value there, not the one it has chosen. */
+export function controlText(c) {
+  return c.auto ? 'Auto' : valueText(c.control, c.value);
+}
+
+/** Away from the camera's own default (the row's reset arrow shows). */
+export function controlChanged(c) {
+  return c.can_auto ? !c.auto : c.value !== c.default;
+}
+
+/** One change, said in the status line: "Exposure 1/32 s", "Exposure auto". */
+export function changeText(v) {
+  const label = controlLabel(v.control);
+  return v.auto ? `${label} auto` : `${label} ${valueText(v.control, v.value)}`;
+}
+
+/** Every control with an auto mode is fixed (and there is one). */
+export function pictureLocked(controls) {
+  const auto = (controls ?? []).filter((c) => c.can_auto);
+  return auto.length > 0 && auto.every((c) => !c.auto);
+}
+
+/** "Lock the picture": what to send. Locking fixes each automatic control at
+ *  its value; unlocking hands each fixed one back to the camera. */
+export function lockPlan(controls) {
+  const auto = (controls ?? []).filter((c) => c.can_auto);
+  const lock = !pictureLocked(controls);
+  return auto
+    .filter((c) => c.auto === lock)
+    .map((c) => ({ control: c.control, value: c.value, auto: !lock }));
+}
+
+/** Undo: what to send to bring the controls of `after` back to `before`. */
+export function restorePlan(before, after) {
+  const now = new Map((after ?? []).map((c) => [c.control, c]));
+  return (before ?? [])
+    .filter((b) => {
+      const a = now.get(b.control);
+      return a && (a.auto !== b.auto || (!b.auto && a.value !== b.value));
+    })
+    .map((b) => ({ control: b.control, value: b.value, auto: b.auto }));
+}
+
+/** At most one call of `send` per `ms` while a slider moves, the latest
+ *  value always sent: `push(v)` keeps it, `flush()` sends it now, `cancel()`
+ *  drops it. */
+export function throttle(send, ms) {
+  let last = 0;
+  let timer = null;
+  let pending;
+  const fire = () => {
+    timer = null;
+    last = Date.now();
+    const v = pending;
+    pending = undefined;
+    send(v);
+  };
+  return {
+    push(v) {
+      pending = v;
+      if (timer) return;
+      timer = setTimeout(fire, Math.max(0, last + ms - Date.now()));
+    },
+    flush() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (pending !== undefined) fire();
+    },
+    cancel() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      pending = undefined;
+    },
+  };
+}

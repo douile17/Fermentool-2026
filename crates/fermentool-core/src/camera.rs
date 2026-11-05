@@ -33,7 +33,9 @@ use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use fermentool_camera::protocol::{read_reply, write_request, DeviceInfo, ErrorCode, Reply, Request};
+use fermentool_camera::protocol::{
+    read_reply, write_request, ControlInfo, ControlValue, DeviceInfo, ErrorCode, Reply, Request,
+};
 use jiff::Timestamp;
 use serde::Serialize;
 
@@ -112,13 +114,31 @@ pub struct Frame {
     pub seq: u64,
 }
 
-/// The camera to connect to: the `index`-th device named `device`.
+/// The camera to connect to: the `index`-th device named `device`, and the
+/// picture controls set on it at each open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraWant {
     pub device: String,
     pub index: u32,
     pub width: u32,
     pub height: u32,
+    pub controls: Vec<ControlValue>,
+}
+
+impl CameraWant {
+    /// The same camera at the same size: only its controls may differ, which
+    /// never needs a new helper.
+    fn same_camera(&self, other: &CameraWant) -> bool {
+        (&self.device, self.index, self.width, self.height) == (&other.device, other.index, other.width, other.height)
+    }
+
+    /// `v` replaces the control's earlier value, or is added.
+    fn remember(&mut self, v: ControlValue) {
+        match self.controls.iter_mut().find(|c| c.control == v.control) {
+            Some(c) => *c = v,
+            None => self.controls.push(v),
+        }
+    }
 }
 
 /// The supervisor's bounds and delays: the constants above in the daemon,
@@ -165,6 +185,8 @@ struct Shared {
     latest: Mutex<Option<Frame>>,
     fresh: Condvar,
     viewers: AtomicUsize,
+    /// Between two live grabs: `Timings::live_interval`, then the setting.
+    live_interval: Mutex<Duration>,
 }
 
 impl Shared {
@@ -177,8 +199,16 @@ impl Shared {
     }
 }
 
+/// What a control request answers: the controls after it, or why not.
+type ControlsAnswer = Result<Vec<ControlInfo>, String>;
+
 enum Cmd {
     Want(Option<CameraWant>),
+    /// The connected camera's controls, asked of its helper.
+    Controls(mpsc::Sender<ControlsAnswer>),
+    /// Sets one control on the connected camera, and keeps it for the next
+    /// opens of this want.
+    SetControl(ControlValue, mpsc::Sender<ControlsAnswer>),
     /// A viewer arrived: grab now rather than at the next idle poll.
     Wake,
     Shutdown(mpsc::Sender<()>),
@@ -226,6 +256,7 @@ impl Camera {
             latest: Mutex::new(None),
             fresh: Condvar::new(),
             viewers: AtomicUsize::new(0),
+            live_interval: Mutex::new(t.live_interval),
         });
         let launch: SharedLaunch = Arc::new(Mutex::new(Box::new(launch)));
         let (cmd, rx) = mpsc::channel();
@@ -306,6 +337,33 @@ impl Camera {
                 Err(format!("the camera helper ended: {why}"))
             }
         }
+    }
+
+    /// Live view pictures a second (at least 1), from the next grab on.
+    pub fn set_live_fps(&self, fps: u32) {
+        *lock(&self.inner.shared.live_interval) = Duration::from_secs(1) / fps.max(1);
+    }
+
+    /// The connected camera's picture controls. Blocking, a few seconds at
+    /// most: call it on a blocking thread, like [`devices`](Self::devices).
+    pub fn controls(&self) -> ControlsAnswer {
+        self.ask(Cmd::Controls)
+    }
+
+    /// Sets one control on the connected camera (refused when none is) and
+    /// answers the controls after it. The value is also set at every later
+    /// open of the same camera, until the want changes. Blocking.
+    pub fn set_control(&self, v: ControlValue) -> ControlsAnswer {
+        self.ask(|tx| Cmd::SetControl(v, tx))
+    }
+
+    /// One request through the supervisor, its answer waited for at most a
+    /// request's bound plus an open's (it may be opening when asked).
+    fn ask(&self, cmd: impl FnOnce(mpsc::Sender<ControlsAnswer>) -> Cmd) -> ControlsAnswer {
+        let (tx, rx) = mpsc::channel();
+        self.inner.cmd.send(cmd(tx)).map_err(|_| "the camera supervisor has stopped".to_string())?;
+        rx.recv_timeout(self.inner.t.request + self.inner.t.open)
+            .unwrap_or_else(|_| Err("the camera did not answer in time".to_string()))
     }
 
     pub fn viewer(&self) -> ViewerGuard {
@@ -448,6 +506,18 @@ impl Supervisor {
             let wait = self.next_due().saturating_duration_since(Instant::now());
             match rx.recv_timeout(wait) {
                 Ok(Cmd::Want(w)) => self.set_want(w),
+                Ok(Cmd::Controls(tx)) => {
+                    let _ = tx.send(self.control_request(&Request::Controls));
+                }
+                Ok(Cmd::SetControl(v, tx)) => {
+                    let answer = self.control_request(&Request::SetControl(v));
+                    if answer.is_ok() {
+                        if let Some(w) = self.want.as_mut() {
+                            w.remember(v);
+                        }
+                    }
+                    let _ = tx.send(answer);
+                }
                 Ok(Cmd::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Cmd::Shutdown(done)) => {
                     self.end_helper();
@@ -504,7 +574,14 @@ impl Supervisor {
     }
 
     fn set_want(&mut self, want: Option<CameraWant>) {
-        if want == self.want {
+        let same = match (&want, &self.want) {
+            (Some(a), Some(b)) => a.same_camera(b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            // new controls for the same camera: kept for the next open
+            self.want = want.clone();
             if want.is_some() && self.helper.is_none() {
                 self.next_attempt = Instant::now();
                 self.backoff = self.t.respawn_first;
@@ -610,6 +687,7 @@ impl Supervisor {
             index: want.index,
             width: want.width,
             height: want.height,
+            controls: want.controls.clone(),
         };
         match helper.request(&open, self.t.open) {
             Ok(Reply::Opened { width, height }) => {
@@ -651,6 +729,32 @@ impl Supervisor {
         }
     }
 
+    /// `Controls` or `SetControl` to the connected helper. A refusal keeps
+    /// the helper; a hung or dead one ends like at a grab.
+    fn control_request(&mut self, request: &Request) -> ControlsAnswer {
+        let Some(helper) = self.helper.as_mut() else {
+            return Err("the camera is not connected".to_string());
+        };
+        let reply = helper.request(request, self.t.request);
+        match reply {
+            Ok(Reply::Controls(c)) => return Ok(c),
+            Ok(Reply::Error { message, .. }) => return Err(message),
+            _ => {}
+        }
+        let device = self.device();
+        if let Some(h) = self.helper.take() {
+            let why = match reply {
+                Err(Fail::Timeout) => format!("no answer about the controls within {} s", self.t.request.as_secs()),
+                Err(Fail::Dead(why)) => why,
+                Ok(other) => format!("unexpected answer about the controls: {other:?}"),
+            };
+            self.kill_helper(h, &why);
+            self.lost(&device, &why);
+            self.backoff_attempt();
+        }
+        Err("the camera stopped answering".to_string())
+    }
+
     fn grab(&mut self) {
         let Some(helper) = self.helper.as_mut() else { return };
         let started = Instant::now();
@@ -660,7 +764,7 @@ impl Supervisor {
             let frame = Frame { jpeg: Arc::new(jpeg), at: Timestamp::now(), seq: self.seq };
             *lock(&self.shared.latest) = Some(frame);
             self.shared.fresh.notify_all();
-            self.next_grab = started + self.t.live_interval;
+            self.next_grab = started + *lock(&self.shared.live_interval);
             self.lost_tries = 0;
             self.in_use_tries = 0;
             return;
@@ -896,7 +1000,9 @@ pub(crate) mod fake {
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Instant;
 
-    use fermentool_camera::protocol::{read_request, write_reply, DeviceInfo, ErrorCode, Reply, Request};
+    use fermentool_camera::protocol::{
+        read_request, write_reply, Control, ControlInfo, DeviceInfo, ErrorCode, Reply, Request,
+    };
 
     use super::{HelperIo, Launch};
 
@@ -918,11 +1024,20 @@ pub(crate) mod fake {
         /// Grabs answered with a frame before `grab_then` applies.
         pub grab_ok: usize,
         pub grab_then: Act,
+        /// `Controls` and `SetControl`: one brightness control, -64 to 64.
+        pub controls: Act,
     }
 
     impl Script {
         pub(crate) fn healthy() -> Self {
-            Self { launch_fails: None, list: Act::Answer, open: Act::Answer, grab_ok: usize::MAX, grab_then: Act::Answer }
+            Self {
+                launch_fails: None,
+                list: Act::Answer,
+                open: Act::Answer,
+                grab_ok: usize::MAX,
+                grab_then: Act::Answer,
+                controls: Act::Answer,
+            }
         }
     }
 
@@ -1053,6 +1168,16 @@ pub(crate) mod fake {
         log: Arc<Log>,
     ) {
         let mut grabs = 0usize;
+        let mut brightness = ControlInfo {
+            control: Control::Brightness,
+            min: -64,
+            max: 64,
+            step: 1,
+            default: 0,
+            value: 0,
+            can_auto: false,
+            auto: false,
+        };
         let act = |a: &Act, ok: Reply| match a {
             Act::Answer => Some(ok),
             Act::Fail(code) => Some(Reply::Error { code: code.clone(), message: "scripted failure".into() }),
@@ -1077,7 +1202,21 @@ pub(crate) mod fake {
                         sizes: vec![(640, 480), (1280, 720), (1920, 1080)],
                     }]),
                 ),
-                Request::Open { width, height, .. } => act(&script.open, Reply::Opened { width, height }),
+                Request::Open { width, height, controls, .. } => {
+                    if let Some(v) = controls.iter().find(|v| v.control == Control::Brightness) {
+                        brightness.value = v.value;
+                    }
+                    act(&script.open, Reply::Opened { width, height })
+                }
+                Request::Controls => act(&script.controls, Reply::Controls(vec![brightness])),
+                Request::SetControl(v) => {
+                    if v.control != Control::Brightness || !(brightness.min..=brightness.max).contains(&v.value) {
+                        Some(Reply::Error { code: ErrorCode::Failed, message: "out of range".into() })
+                    } else {
+                        brightness.value = v.value;
+                        act(&script.controls, Reply::Controls(vec![brightness]))
+                    }
+                }
                 Request::Grab => {
                     grabs += 1;
                     let frame = Reply::Frame(vec![0xFF, 0xD8, grabs as u8]);
@@ -1118,7 +1257,99 @@ mod tests {
     }
 
     fn want(width: u32, height: u32) -> CameraWant {
-        CameraWant { device: "Test pattern".into(), index: 0, width, height }
+        CameraWant { device: "Test pattern".into(), index: 0, width, height, controls: Vec::new() }
+    }
+
+    fn brightness(value: i32) -> ControlValue {
+        ControlValue { control: fermentool_camera::protocol::Control::Brightness, value, auto: false }
+    }
+
+    fn opened_with(log: &super::fake::Log) -> Vec<Vec<ControlValue>> {
+        log.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(_, r, _)| match r {
+                Request::Open { controls, .. } => Some(controls.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn controls_are_asked_set_and_kept_for_the_next_open() {
+        // the first helper fails its first grab: a replug, reopened on a second
+        let (launch, log) = FakeLaunch::new(|n| Script {
+            grab_ok: if n == 0 { 0 } else { usize::MAX },
+            grab_then: Act::Fail(ErrorCode::Failed),
+            ..Script::healthy()
+        });
+        let mut w = want(640, 480);
+        w.controls = vec![brightness(10)];
+        let cam = Camera::spawn_with(launch, Some(w), quick());
+        assert!(wait_for(Duration::from_secs(3), || connected(&cam)));
+        assert_eq!(cam.controls().unwrap()[0].value, 10, "set at the open");
+        assert_eq!(cam.set_control(brightness(-20)).unwrap()[0].value, -20);
+        assert!(cam.set_control(brightness(500)).is_err(), "refused by the camera");
+        assert!(connected(&cam), "a refusal keeps the helper");
+        let _viewer = cam.viewer();
+        assert!(wait_for(Duration::from_secs(5), || log.launch_count() >= 2 && connected(&cam)), "{:?}", cam.state());
+        assert_eq!(opened_with(&log), vec![vec![brightness(10)], vec![brightness(-20)]]);
+        cam.shutdown();
+    }
+
+    #[test]
+    fn new_controls_for_the_same_camera_keep_its_helper() {
+        let (launch, log) = FakeLaunch::healthy();
+        let cam = Camera::spawn_with(launch, Some(want(640, 480)), quick());
+        assert!(wait_for(Duration::from_secs(3), || connected(&cam)));
+        let mut w = want(640, 480);
+        w.controls = vec![brightness(5)];
+        cam.set_want(Some(w));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(log.launch_count(), 1);
+        assert!(connected(&cam));
+        cam.shutdown();
+    }
+
+    #[test]
+    fn controls_without_a_camera_are_refused_at_once() {
+        let (launch, _log) = FakeLaunch::healthy();
+        let cam = Camera::spawn_with(launch, None, quick());
+        let started = Instant::now();
+        assert_eq!(cam.controls().unwrap_err(), "the camera is not connected");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        cam.shutdown();
+    }
+
+    #[test]
+    fn a_hung_controls_request_ends_the_helper() {
+        let (launch, log) = FakeLaunch::new(|n| Script {
+            controls: if n == 0 { Act::Hang } else { Act::Answer },
+            ..Script::healthy()
+        });
+        let cam = Camera::spawn_with(launch, Some(want(640, 480)), quick());
+        assert!(wait_for(Duration::from_secs(3), || connected(&cam)));
+        assert!(cam.controls().is_err());
+        assert!(log.kills() >= 1);
+        assert!(wait_for(Duration::from_secs(5), || connected(&cam)), "{:?}", cam.state());
+        assert!(cam.controls().is_ok());
+        cam.shutdown();
+    }
+
+    #[test]
+    fn live_fps_sets_the_grab_pace() {
+        let (launch, log) = FakeLaunch::healthy();
+        let cam = Camera::spawn_with(launch, Some(want(640, 480)), quick());
+        assert!(wait_for(Duration::from_secs(3), || connected(&cam)));
+        cam.set_live_fps(5);
+        let _viewer = cam.viewer();
+        std::thread::sleep(Duration::from_millis(300));
+        let before = log.seen(is_grab).len();
+        std::thread::sleep(Duration::from_secs(1));
+        let grabs = log.seen(is_grab).len() - before;
+        assert!((4..=6).contains(&grabs), "{grabs} grabs in 1 s at 5 a second");
+        cam.shutdown();
     }
 
     fn wait_for(max: Duration, mut f: impl FnMut() -> bool) -> bool {

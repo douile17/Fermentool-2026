@@ -1,7 +1,7 @@
 //! What the helper needs from a camera source, so the request loop can be
 //! tested without a webcam.
 
-use crate::protocol::{DeviceInfo, ErrorCode};
+use crate::protocol::{ControlInfo, ControlValue, DeviceInfo, ErrorCode};
 use crate::test_pattern::{TestPattern, TEST_PATTERN_NAME};
 
 /// Picture sizes the app offers, whatever a device reports beyond them.
@@ -18,6 +18,13 @@ pub trait Backend {
     /// size it really delivers.
     fn open(&mut self, device: &str, index: u32, width: u32, height: u32) -> Result<(u32, u32), BackendError>;
     fn grab(&mut self) -> Result<Vec<u8>, BackendError>;
+    /// The open camera's picture controls; none on a camera without any.
+    fn controls(&mut self) -> Result<Vec<ControlInfo>, BackendError> {
+        Ok(Vec::new())
+    }
+    fn set_control(&mut self, v: &ControlValue) -> Result<(), BackendError> {
+        Err((ErrorCode::Failed, format!("this camera has no {} control", v.control.name())))
+    }
     /// Stops streaming; harmless when none is open. The daemon still counts
     /// on the helper process exiting to free the device.
     fn close(&mut self);
@@ -74,6 +81,14 @@ impl Backend for Combined {
 
     fn grab(&mut self) -> Result<Vec<u8>, BackendError> {
         if self.pattern_open { self.pattern.grab() } else { self.real.grab() }
+    }
+
+    fn controls(&mut self) -> Result<Vec<ControlInfo>, BackendError> {
+        if self.pattern_open { self.pattern.controls() } else { self.real.controls() }
+    }
+
+    fn set_control(&mut self, v: &ControlValue) -> Result<(), BackendError> {
+        if self.pattern_open { self.pattern.set_control(v) } else { self.real.set_control(v) }
     }
 
     fn close(&mut self) {

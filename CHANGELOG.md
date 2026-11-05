@@ -16,6 +16,14 @@
   ouverture, d'où une image qui se déconnectait et revenait sans arrêt,
   alors que l'application Caméra de Windows la montrait bien. Il lit
   maintenant la webcam par Media Foundation directement.
+- Réglages de l'image dans Settings, Caméra (5 novembre) : exposition,
+  balance des blancs, luminosité, contraste, saturation, netteté, gain et
+  anti-scintillement (50/60 Hz), seulement ceux que la caméra possède, avec
+  « Auto » quand elle en a un. « Lock the picture » fige d'un clic
+  l'exposition et la couleur (utile avant une timelapse). Chaque réglage
+  s'applique sur l'image en direct et s'enregistre au clic, sans bouton
+  Save, avec Undo ; les réglages sont remis à chaque connexion de la
+  caméra. La vue en direct se règle à 5, 10 ou 15 images par seconde.
 
 ### Correction après un refill (2 novembre)
 

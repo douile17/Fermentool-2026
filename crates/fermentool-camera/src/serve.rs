@@ -18,11 +18,20 @@ pub fn serve(mut input: impl Read, mut output: impl Write, backend: &mut dyn Bac
         };
         let reply = match request {
             Request::List => backend.list().map(Reply::Devices),
-            Request::Open { device, index, width, height } => {
+            Request::Open { device, index, width, height, controls } => {
                 backend.close();
-                backend.open(&device, index, width, height).map(|(width, height)| Reply::Opened { width, height })
+                backend.open(&device, index, width, height).map(|(width, height)| {
+                    for v in &controls {
+                        if let Err((_, e)) = backend.set_control(v) {
+                            eprintln!("camera {device}: {} not set: {e}", v.control.name());
+                        }
+                    }
+                    Reply::Opened { width, height }
+                })
             }
             Request::Grab => backend.grab().map(Reply::Frame),
+            Request::Controls => backend.controls().map(Reply::Controls),
+            Request::SetControl(v) => backend.set_control(&v).and_then(|()| backend.controls()).map(Reply::Controls),
             Request::Close => {
                 backend.close();
                 Ok(Reply::Closed)
@@ -102,7 +111,7 @@ pub fn forward_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{read_reply, write_request, ErrorCode};
+    use crate::protocol::{read_reply, write_request, Control, ControlInfo, ControlValue, ErrorCode};
     use crate::test_pattern::TestPattern;
     use std::io::Cursor;
 
@@ -122,7 +131,36 @@ mod tests {
     }
 
     fn open(device: &str) -> Request {
-        Request::Open { device: device.into(), index: 0, width: 640, height: 480 }
+        Request::Open { device: device.into(), index: 0, width: 640, height: 480, controls: Vec::new() }
+    }
+
+    fn brightness(r: &Reply) -> Option<ControlInfo> {
+        match r {
+            Reply::Controls(c) => c.iter().find(|c| c.control == Control::Brightness).copied(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn open_applies_its_controls_and_set_control_answers_them() {
+        let set = |value| ControlValue { control: Control::Brightness, value, auto: false };
+        let (_, replies) = run(&[
+            Request::Open {
+                device: "Test pattern".into(),
+                index: 0,
+                width: 640,
+                height: 480,
+                // the refused one (focus) leaves brightness applied
+                controls: vec![ControlValue { control: Control::Focus, value: 1, auto: false }, set(20)],
+            },
+            Request::Controls,
+            Request::SetControl(set(-10)),
+            Request::SetControl(set(999)),
+        ]);
+        assert_eq!(replies[0], Reply::Opened { width: 640, height: 480 });
+        assert_eq!(brightness(&replies[1]).unwrap().value, 20);
+        assert_eq!(brightness(&replies[2]).unwrap().value, -10);
+        assert!(matches!(&replies[3], Reply::Error { code: ErrorCode::Failed, .. }));
     }
 
     #[test]

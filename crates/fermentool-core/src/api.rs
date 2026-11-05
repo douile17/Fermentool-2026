@@ -155,6 +155,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/camera/devices", get(camera_devices))
         .route("/api/camera/connect", post(camera_connect))
         .route("/api/camera/disconnect", post(camera_disconnect))
+        .route("/api/camera/controls", get(camera_controls))
+        .route("/api/camera/control", post(camera_control))
+        .route("/api/camera/controls/reset", post(camera_controls_reset))
+        .route("/api/camera/fps", post(camera_fps))
         .route("/api/camera/frame.jpg", get(camera_frame))
         .route("/api/camera/live", get(camera_live))
         .route("/api/notify/test", post(notify_test))
@@ -1324,14 +1328,14 @@ async fn camera_connect(State(s): State<AppState>, Json(req): Json<CameraConnect
         return Err(ApiError::Bad("pick a camera".into()));
     }
     let mut current = s.config.write().await;
-    let test_pattern = current.camera.as_ref().is_some_and(|c| c.test_pattern);
+    // the rest of `[camera]` (test pattern, live view, saved controls) stays
     let cam = crate::config::CameraConfig {
         device: req.device.clone(),
         device_index: req.index,
         width: req.width,
         height: req.height,
         enabled: true,
-        test_pattern,
+        ..current.camera.clone().unwrap_or_default()
     };
     if let Some(p) = cam.problem() {
         return Err(ApiError::Bad(p));
@@ -1341,6 +1345,7 @@ async fn camera_connect(State(s): State<AppState>, Json(req): Json<CameraConnect
             "the settings were changed meanwhile (another page): reload them and connect again".into(),
         ));
     }
+    let controls = cam.controls_for(&cam.device);
     let mut new = current.clone();
     new.camera = Some(cam);
     new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
@@ -1353,6 +1358,7 @@ async fn camera_connect(State(s): State<AppState>, Json(req): Json<CameraConnect
         index: req.index,
         width: req.width,
         height: req.height,
+        controls,
     }));
     drop(current);
     Ok(Json(json!({ "connecting": true })).into_response())
@@ -1377,6 +1383,122 @@ async fn camera_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
     s.camera.set_want(None);
     drop(current);
     Ok(Json(json!({ "disconnected": true })).into_response())
+}
+
+/// A camera request on the blocking pool (it waits on the supervisor), its
+/// refusal a 409 with the camera's own words.
+async fn camera_blocking<T: Send + 'static>(
+    s: &AppState,
+    f: impl FnOnce(crate::camera::Camera) -> Result<T, String> + Send + 'static,
+) -> ApiResult<T> {
+    let camera = s.camera.clone();
+    tokio::task::spawn_blocking(move || f(camera))
+        .await
+        .map_err(|e| ApiError::Conflict(format!("camera request failed: {e}")))?
+        .map_err(ApiError::Conflict)
+}
+
+/// `GET /api/camera/controls`: the connected camera's picture controls, as
+/// it has them now (only those it has).
+async fn camera_controls(State(s): State<AppState>) -> ApiResult<Response> {
+    let controls = camera_blocking(&s, |c| c.controls()).await?;
+    Ok(Json(json!({ "controls": controls })).into_response())
+}
+
+#[derive(Deserialize)]
+struct CameraControlReq {
+    #[serde(flatten)]
+    value: fermentool_camera::protocol::ControlValue,
+    /// false while a slider moves: set on the camera, saved at its release
+    #[serde(default = "yes")]
+    save: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `POST /api/camera/control {control, value, auto, save}`: set on the
+/// camera first, then (with `save`) kept in `[camera.controls]` for this
+/// camera: a value the camera refuses is never saved.
+async fn camera_control(State(s): State<AppState>, Json(req): Json<CameraControlReq>) -> ApiResult<Response> {
+    let v = req.value;
+    let controls = camera_blocking(&s, move |c| c.set_control(v)).await?;
+    if req.save {
+        save_camera_controls(&s, |saved| {
+            saved.insert(
+                v.control.name().to_string(),
+                crate::config::SavedControl { value: v.value, auto: v.auto },
+            );
+        })
+        .await?;
+    }
+    Ok(Json(json!({ "controls": controls })).into_response())
+}
+
+/// `POST /api/camera/controls/reset`: every control back to the camera's
+/// default (auto where it has one), and none saved for this camera.
+async fn camera_controls_reset(State(s): State<AppState>) -> ApiResult<Response> {
+    let controls = camera_blocking(&s, |c| {
+        let mut now = c.controls()?;
+        for i in now.clone() {
+            let v = fermentool_camera::protocol::ControlValue { control: i.control, value: i.default, auto: i.can_auto };
+            // a refused one leaves the others reset
+            match c.set_control(v) {
+                Ok(after) => now = after,
+                Err(e) => tracing::warn!(control = i.control.name(), "camera control not reset: {e}"),
+            }
+        }
+        Ok(now)
+    })
+    .await?;
+    save_camera_controls(&s, |saved| saved.clear()).await?;
+    Ok(Json(json!({ "controls": controls })).into_response())
+}
+
+/// Changes the saved controls of the camera in `[camera]` and writes the
+/// file (same atomic write as `PUT /api/config`).
+async fn save_camera_controls(
+    s: &AppState,
+    change: impl FnOnce(&mut std::collections::BTreeMap<String, crate::config::SavedControl>),
+) -> ApiResult<()> {
+    let mut current = s.config.write().await;
+    let mut new = current.clone();
+    let Some(cam) = new.camera.as_mut() else {
+        return Err(ApiError::Conflict("no camera is saved".into()));
+    };
+    let device = cam.device.clone();
+    let saved = cam.controls.entry(device.clone()).or_default();
+    change(saved);
+    if saved.is_empty() {
+        cam.controls.remove(&device);
+    }
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct CameraFpsReq {
+    fps: u32,
+}
+
+/// `POST /api/camera/fps {fps}`: live view pictures a second, saved and
+/// used from the next picture.
+async fn camera_fps(State(s): State<AppState>, Json(req): Json<CameraFpsReq>) -> ApiResult<Response> {
+    if !crate::config::CAMERA_FPS.contains(&req.fps) {
+        let (lo, hi) = (crate::config::CAMERA_FPS.start(), crate::config::CAMERA_FPS.end());
+        return Err(ApiError::Bad(format!("live view must be {lo} to {hi} pictures a second")));
+    }
+    let mut current = s.config.write().await;
+    let mut new = current.clone();
+    new.camera.get_or_insert_with(Default::default).live_fps = req.fps;
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    s.camera.set_live_fps(req.fps);
+    Ok(Json(json!({ "fps": req.fps })).into_response())
 }
 
 /// `GET /api/camera/frame.jpg`: the latest picture.
@@ -2631,7 +2753,7 @@ mod tests {
     // ----- camera -----
 
     fn camera_want() -> crate::camera::CameraWant {
-        crate::camera::CameraWant { device: "Test pattern".into(), index: 0, width: 640, height: 480 }
+        crate::camera::CameraWant { device: "Test pattern".into(), index: 0, width: 640, height: 480, controls: Vec::new() }
     }
 
     fn wait_for(max: Duration, mut f: impl FnMut() -> bool) -> bool {
@@ -2754,6 +2876,65 @@ mod tests {
         }
         assert_eq!(cam.viewers(), 0, "viewer not released");
         cam.shutdown();
+    }
+
+    #[tokio::test]
+    async fn controls_are_set_then_saved_per_camera_and_reset() {
+        let mut st = test_state();
+        let path = std::env::temp_dir().join(format!("ft-camctl-{}.toml", std::process::id()));
+        st.config_path = Arc::new(path.clone());
+        let cfg = Arc::clone(&st.config);
+        let cam = st.camera.clone();
+        let app = router(st);
+        let res = app.clone().oneshot(get("/api/camera/controls")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT, "no camera connected");
+        let ok = json!({ "device": "Test pattern", "index": 0, "width": 640, "height": 480 });
+        app.clone().oneshot(post_json("/api/camera/connect", ok.clone())).await.unwrap();
+        assert!(
+            wait_async(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { .. })).await
+        );
+        let saved = |c: &crate::config::Config| {
+            c.camera.as_ref().unwrap().controls.get("Test pattern").and_then(|m| m.get("brightness")).copied()
+        };
+
+        // dragging: on the camera, not in the file
+        let drag = json!({ "control": "brightness", "value": 7, "auto": false, "save": false });
+        let res = app.clone().oneshot(post_json("/api/camera/control", drag)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["controls"][0]["value"], 7);
+        assert_eq!(saved(&*cfg.read().await), None);
+
+        let set = json!({ "control": "brightness", "value": 12, "auto": false });
+        let res = app.clone().oneshot(post_json("/api/camera/control", set)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(saved(&*cfg.read().await), Some(crate::config::SavedControl { value: 12, auto: false }));
+
+        // refused by the camera: never saved
+        let bad = json!({ "control": "brightness", "value": 999, "auto": false });
+        let res = app.clone().oneshot(post_json("/api/camera/control", bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(saved(&*cfg.read().await).unwrap().value, 12);
+
+        // a new Connect (another size) keeps them
+        let big = json!({ "device": "Test pattern", "index": 0, "width": 1280, "height": 720 });
+        app.clone().oneshot(post_json("/api/camera/connect", big)).await.unwrap();
+        assert_eq!(saved(&*cfg.read().await).unwrap().value, 12);
+
+        assert!(
+            wait_async(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { width: 1280, .. })).await
+        );
+        let res = app.clone().oneshot(post_json("/api/camera/controls/reset", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["controls"][0]["value"], 0);
+        assert!(cfg.read().await.camera.as_ref().unwrap().controls.is_empty());
+
+        let res = app.clone().oneshot(post_json("/api/camera/fps", json!({ "fps": 60 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = app.clone().oneshot(post_json("/api/camera/fps", json!({ "fps": 5 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(cfg.read().await.camera.as_ref().unwrap().live_fps, 5);
+        cam.shutdown();
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

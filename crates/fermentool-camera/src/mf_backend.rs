@@ -9,13 +9,14 @@
 use std::ptr;
 
 use jpeg_encoder::{ColorType, Encoder};
-use windows::core::{Error, PWSTR};
+use windows::core::{Error, Interface, PWSTR};
+use windows::Win32::Media::DirectShow::{IAMCameraControl, IAMVideoProcAmp};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 
 use crate::backend::{classify_error, Backend, BackendError, GLOBAL_SIZES, JPEG_QUALITY};
 use crate::pixels::bgrx_to_rgb;
-use crate::protocol::{DeviceInfo, ErrorCode};
+use crate::protocol::{Control, ControlInfo, ControlValue, DeviceInfo, ErrorCode};
 
 const VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
@@ -29,10 +30,103 @@ fn failed(e: Error) -> BackendError {
     (classify_error(&message), message)
 }
 
+/// Where Windows keeps a control: `IAMCameraControl` or `IAMVideoProcAmp`,
+/// and its property number there (`CameraControl_*`, `VideoProcAmp_*`;
+/// 13 is the KS power line frequency, reached through the same call).
+enum Knob {
+    Camera(i32),
+    Amp(i32),
+}
+
+fn knob(c: Control) -> Knob {
+    match c {
+        Control::Exposure => Knob::Camera(4),
+        Control::Focus => Knob::Camera(6),
+        Control::Brightness => Knob::Amp(0),
+        Control::Contrast => Knob::Amp(1),
+        Control::Saturation => Knob::Amp(3),
+        Control::Sharpness => Knob::Amp(4),
+        Control::WhiteBalance => Knob::Amp(7),
+        Control::Gain => Knob::Amp(9),
+        Control::PowerLine => Knob::Amp(13),
+    }
+}
+
+/// `CameraControl_Flags_*` and `VideoProcAmp_Flags_*` have the same values.
+const FLAG_AUTO: i32 = 1;
+const FLAG_MANUAL: i32 = 2;
+
+/// The device source's two control interfaces, where it has them.
+struct Knobs {
+    camera: Option<IAMCameraControl>,
+    amp: Option<IAMVideoProcAmp>,
+}
+
+impl Knobs {
+    fn of(source: &IMFMediaSource) -> Knobs {
+        Knobs { camera: source.cast().ok(), amp: source.cast().ok() }
+    }
+
+    fn info(&self, control: Control) -> Option<ControlInfo> {
+        let (mut min, mut max, mut step, mut default, mut caps) = (0, 0, 0, 0, 0);
+        let (mut value, mut flags) = (0, 0);
+        unsafe {
+            match knob(control) {
+                Knob::Camera(p) => {
+                    let c = self.camera.as_ref()?;
+                    c.GetRange(p, &mut min, &mut max, &mut step, &mut default, &mut caps).ok()?;
+                    c.Get(p, &mut value, &mut flags).ok()?;
+                }
+                Knob::Amp(p) => {
+                    let a = self.amp.as_ref()?;
+                    a.GetRange(p, &mut min, &mut max, &mut step, &mut default, &mut caps).ok()?;
+                    a.Get(p, &mut value, &mut flags).ok()?;
+                }
+            }
+        }
+        // a range of one value is nothing to set
+        (max > min).then_some(ControlInfo {
+            control,
+            min,
+            max,
+            step: step.max(1),
+            default,
+            value,
+            can_auto: caps & FLAG_AUTO != 0,
+            auto: flags & FLAG_AUTO != 0,
+        })
+    }
+
+    fn set(&self, v: &ControlValue) -> Result<(), BackendError> {
+        let info = self
+            .info(v.control)
+            .ok_or((ErrorCode::Failed, format!("this camera has no {} control", v.control.name())))?;
+        if v.auto && !info.can_auto {
+            return Err((ErrorCode::Failed, format!("this camera has no automatic {}", v.control.name())));
+        }
+        if !(info.min..=info.max).contains(&v.value) {
+            return Err((
+                ErrorCode::Failed,
+                format!("{} {} is outside this camera's {} to {}", v.control.name(), v.value, info.min, info.max),
+            ));
+        }
+        let flags = if v.auto { FLAG_AUTO } else { FLAG_MANUAL };
+        unsafe {
+            match knob(v.control) {
+                Knob::Camera(p) => self.camera.as_ref().map(|c| c.Set(p, v.value, flags)),
+                Knob::Amp(p) => self.amp.as_ref().map(|a| a.Set(p, v.value, flags)),
+            }
+        }
+        .unwrap_or_else(|| Err(Error::empty()))
+        .map_err(failed)
+    }
+}
+
 struct Open {
     activate: IMFActivate,
     source: IMFMediaSource,
     reader: IMFSourceReader,
+    knobs: Knobs,
     width: u32,
     height: u32,
     stride: i32,
@@ -160,7 +254,10 @@ fn open_device(activate: IMFActivate, width: u32, height: u32) -> Result<Open, B
         Ok((w, h, stride))
     })();
     match result {
-        Ok((width, height, stride)) => Ok(Open { activate, source, reader, width, height, stride }),
+        Ok((width, height, stride)) => {
+            let knobs = Knobs::of(&source);
+            Ok(Open { activate, source, reader, knobs, width, height, stride })
+        }
         Err(e) => {
             drop(reader);
             release(&source, &activate);
@@ -259,6 +356,16 @@ impl Backend for MfBackend {
         grab_jpeg(open)
     }
 
+    fn controls(&mut self) -> Result<Vec<ControlInfo>, BackendError> {
+        let open = self.open.as_ref().ok_or((ErrorCode::Failed, "no camera is open".to_string()))?;
+        Ok(Control::ALL.into_iter().filter_map(|c| open.knobs.info(c)).collect())
+    }
+
+    fn set_control(&mut self, v: &ControlValue) -> Result<(), BackendError> {
+        let open = self.open.as_ref().ok_or((ErrorCode::Failed, "no camera is open".to_string()))?;
+        open.knobs.set(v)
+    }
+
     fn close(&mut self) {
         if let Some(open) = self.open.take() {
             close_device(open);
@@ -267,7 +374,8 @@ impl Backend for MfBackend {
 }
 
 fn close_device(open: Open) {
-    let Open { activate, source, reader, .. } = open;
+    let Open { activate, source, reader, knobs, .. } = open;
+    drop(knobs);
     drop(reader);
     release(&source, &activate);
 }

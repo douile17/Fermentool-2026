@@ -3,8 +3,10 @@
 //! Every field has a default, so a missing or partial file still loads. On first
 //! run the file is written out with the defaults.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use fermentool_camera::protocol::{Control, ControlValue};
 use fermentool_modbus::{PumpKind, PumpModel, PumpTarget};
 use serde::{Deserialize, Serialize};
 
@@ -79,21 +81,69 @@ pub struct CameraConfig {
     /// Start the helper with `--test-pattern` (a synthetic picture, no
     /// webcam). Read at daemon start.
     pub test_pattern: bool,
+    /// Pictures a second while someone watches the live view.
+    pub live_fps: u32,
+    /// The picture controls set from Settings, per camera name, then per
+    /// control name (`exposure`, `white_balance`...): set again at each
+    /// connect, since a webcam unplugged or a PC restarted may go back to its
+    /// own. A control left alone is not listed.
+    pub controls: BTreeMap<String, BTreeMap<String, SavedControl>>,
 }
+
+/// A picture control as saved: its value, or auto (then `value` is the one
+/// it goes back to without).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedControl {
+    pub value: i32,
+    #[serde(default)]
+    pub auto: bool,
+}
+
+/// Live view pictures a second: the lowest and the highest accepted.
+pub const CAMERA_FPS: std::ops::RangeInclusive<u32> = 1..=15;
 
 impl Default for CameraConfig {
     fn default() -> Self {
-        Self { device: String::new(), device_index: 0, width: 1280, height: 720, enabled: true, test_pattern: false }
+        Self {
+            device: String::new(),
+            device_index: 0,
+            width: 1280,
+            height: 720,
+            enabled: true,
+            test_pattern: false,
+            live_fps: 15,
+            controls: BTreeMap::new(),
+        }
     }
 }
 
 impl CameraConfig {
     pub fn problem(&self) -> Option<String> {
-        if CAMERA_SIZES.contains(&(self.width, self.height)) {
-            None
-        } else {
-            Some("camera picture size must be 640x480, 1280x720 or 1920x1080".into())
-        }
+        self.size_problem().or_else(|| self.fps_problem())
+    }
+
+    fn size_problem(&self) -> Option<String> {
+        (!CAMERA_SIZES.contains(&(self.width, self.height)))
+            .then(|| "camera picture size must be 640x480, 1280x720 or 1920x1080".into())
+    }
+
+    fn fps_problem(&self) -> Option<String> {
+        (!CAMERA_FPS.contains(&self.live_fps)).then(|| {
+            format!("camera live view must be {} to {} pictures a second", CAMERA_FPS.start(), CAMERA_FPS.end())
+        })
+    }
+
+    /// The controls saved for `device`, as the helper takes them; an unknown
+    /// name (a newer or older daemon's) is left out.
+    pub fn controls_for(&self, device: &str) -> Vec<ControlValue> {
+        self.controls
+            .get(device)
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, c)| {
+                Control::from_name(name).map(|control| ControlValue { control, value: c.value, auto: c.auto })
+            })
+            .collect()
     }
 }
 
@@ -739,10 +789,14 @@ impl Config {
                 "config.toml: refill.speed_rpm out of range, the refill pump's max ({max} rpm) used"
             ));
         }
-        if let Some(c) = self.camera.as_mut().filter(|c| c.problem().is_some()) {
+        if let Some(c) = self.camera.as_mut().filter(|c| c.size_problem().is_some()) {
             c.width = 1280;
             c.height = 720;
             fixed.push("config.toml: camera size out of range, 1280x720 used".to_string());
+        }
+        if let Some(c) = self.camera.as_mut().filter(|c| c.fps_problem().is_some()) {
+            c.live_fps = 15;
+            fixed.push("config.toml: camera.live_fps out of range, 15 used".to_string());
         }
         fixed
     }
@@ -789,6 +843,46 @@ mod tests {
         c.camera.as_mut().unwrap().width = 640;
         c.camera.as_mut().unwrap().height = 480;
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn camera_controls_round_trip_per_device() {
+        let mut c = Config::from_toml("[camera]
+device = \"Cam\"
+").unwrap();
+        let cam = c.camera.as_mut().unwrap();
+        assert_eq!(cam.live_fps, 15);
+        let mut hue = BTreeMap::new();
+        hue.insert("exposure".to_string(), SavedControl { value: -6, auto: false });
+        hue.insert("white_balance".to_string(), SavedControl { value: 4600, auto: true });
+        hue.insert("zoom".to_string(), SavedControl { value: 1, auto: false });
+        cam.controls.insert("HUE HD Camera".to_string(), hue);
+        let text = c.to_toml().unwrap();
+        let back = Config::from_toml(&text).unwrap().camera.unwrap();
+        assert_eq!(back.controls, c.camera.as_ref().unwrap().controls);
+        assert_eq!(
+            back.controls_for("HUE HD Camera"),
+            vec![
+                ControlValue { control: Control::Exposure, value: -6, auto: false },
+                ControlValue { control: Control::WhiteBalance, value: 4600, auto: true },
+            ]
+        );
+        assert!(back.controls_for("Other").is_empty());
+    }
+
+    #[test]
+    fn camera_fps_out_of_range_is_refused_then_fixed_alone() {
+        let mut c = Config::from_toml("[camera]
+device = \"X\"
+width = 640
+height = 480
+live_fps = 60
+").unwrap();
+        assert_eq!(c.validate().unwrap_err(), "camera live view must be 1 to 15 pictures a second");
+        let fixed = c.sanitize();
+        let cam = c.camera.as_ref().unwrap();
+        assert_eq!((cam.live_fps, cam.width, cam.height), (15, 640, 480));
+        assert_eq!(fixed, vec!["config.toml: camera.live_fps out of range, 15 used".to_string()]);
     }
 
     #[test]

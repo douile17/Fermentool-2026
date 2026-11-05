@@ -1,7 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   cameraLine,
   camerasFound,
+  changeText,
+  controlChanged,
+  controlLabel,
+  controlText,
+  lockPlan,
+  pictureLocked,
+  powerLineOptions,
+  restorePlan,
+  throttle,
+  valueText,
   deviceKey,
   deviceLabel,
   LIVE_GRACE_MS,
@@ -199,5 +209,86 @@ describe('liveSrc', () => {
     const img = fakeImg();
     liveSrc(img, '/api/camera/live').destroy();
     expect(img.getAttribute('src')).toBeNull();
+  });
+});
+
+describe('picture controls', () => {
+  const exp = { control: 'exposure', min: -10, max: -4, step: 1, default: -6, value: -5, can_auto: true, auto: true };
+  const wb = { control: 'white_balance', min: 2800, max: 6500, step: 10, default: 4600, value: 4000, can_auto: true, auto: false };
+  const br = { control: 'brightness', min: -64, max: 64, step: 1, default: 0, value: 0, can_auto: false, auto: false };
+  const pl = { control: 'power_line', min: 0, max: 2, step: 1, default: 1, value: 2, can_auto: false, auto: false };
+
+  it('says values in the words people know', () => {
+    expect(valueText('exposure', -6)).toBe('1/64 s');
+    expect(valueText('exposure', 1)).toBe('2 s');
+    expect(valueText('white_balance', 4600)).toBe('4600 K');
+    expect(valueText('power_line', 1)).toBe('50 Hz');
+    expect(valueText('brightness', -3)).toBe('-3');
+  });
+  it('in auto says only Auto (the camera does not report its choice)', () => {
+    expect(controlText(exp)).toBe('Auto');
+    expect(controlText(wb)).toBe('4000 K');
+  });
+  it('anti-flicker offers only what the camera has', () => {
+    expect(powerLineOptions(pl).map((o) => o.label)).toEqual(['Off', '50 Hz', '60 Hz']);
+    expect(powerLineOptions({ ...pl, max: 3 }).map((o) => o.label)).toEqual(['Off', '50 Hz', '60 Hz', 'Auto']);
+  });
+  it('a control is changed off its default, or fixed where auto exists', () => {
+    expect(controlChanged(exp)).toBe(false);
+    expect(controlChanged(wb)).toBe(true);
+    expect(controlChanged(br)).toBe(false);
+    expect(controlChanged({ ...br, value: 4 })).toBe(true);
+  });
+  it('lock fixes the automatic ones, unlock hands them back', () => {
+    expect(pictureLocked([exp, wb, br])).toBe(false);
+    expect(lockPlan([exp, wb, br])).toEqual([{ control: 'exposure', value: -5, auto: false }]);
+    const locked = [{ ...exp, auto: false }, wb, br];
+    expect(pictureLocked(locked)).toBe(true);
+    expect(lockPlan(locked)).toEqual([
+      { control: 'exposure', value: -5, auto: true },
+      { control: 'white_balance', value: 4000, auto: true },
+    ]);
+    expect(pictureLocked([br])).toBe(false);
+    expect(lockPlan([br])).toEqual([]);
+  });
+  it('undo sends back only what changed', () => {
+    const after = [{ ...exp, auto: false, value: -8 }, wb, { ...br, value: 9 }];
+    expect(restorePlan([exp, wb, br], after)).toEqual([
+      { control: 'exposure', value: -5, auto: true },
+      { control: 'brightness', value: 0, auto: false },
+    ]);
+    // a value moved while in auto is no change
+    expect(restorePlan([exp], [{ ...exp, value: -9 }])).toEqual([]);
+  });
+  it('a change in words', () => {
+    expect(changeText({ control: 'exposure', value: -5, auto: false })).toBe('Exposure 1/32 s');
+    expect(changeText({ control: 'white_balance', value: 0, auto: true })).toBe('White balance auto');
+    expect(controlLabel('power_line')).toBe('Anti-flicker');
+  });
+});
+
+describe('throttle', () => {
+  it('sends at once, then at most once a period, always the latest value', () => {
+    vi.useFakeTimers();
+    const sent = [];
+    const t = throttle((v) => sent.push(v), 100);
+    t.push(1);
+    vi.advanceTimersByTime(0);
+    t.push(2);
+    t.push(3);
+    vi.advanceTimersByTime(50);
+    expect(sent).toEqual([1]);
+    vi.advanceTimersByTime(60);
+    expect(sent).toEqual([1, 3]);
+    t.push(4);
+    t.flush();
+    expect(sent).toEqual([1, 3, 4]);
+    t.flush();
+    expect(sent).toEqual([1, 3, 4]);
+    t.push(5);
+    t.cancel();
+    vi.advanceTimersByTime(500);
+    expect(sent).toEqual([1, 3, 4]);
+    vi.useRealTimers();
   });
 });
