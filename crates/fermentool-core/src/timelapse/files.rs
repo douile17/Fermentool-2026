@@ -58,13 +58,15 @@ pub fn ensure_writable(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Free bytes on the disk that holds `dir` (which must exist); `None`
+/// Free bytes on the disk that holds `dir`, read at its nearest folder that
+/// exists (Settings asks before the first timelapse made it); `None`
 /// elsewhere than Windows or when Windows will not say.
 #[cfg(windows)]
 pub fn free_bytes(dir: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let existing = dir.ancestors().find(|p| p.is_dir())?;
+    let wide: Vec<u16> = existing.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut free = 0u64;
     // SAFETY: `wide` is NUL-terminated and outlives the call; the two other
     // outputs may be null.
@@ -279,5 +281,14 @@ mod tests {
     fn free_bytes_of_the_temp_dir_is_some() {
         assert!(free_bytes(&std::env::temp_dir()).is_some_and(|b| b > 0));
         assert!(free_bytes(Path::new("Q:\\surely\\not\\here")).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn free_bytes_of_a_folder_not_made_yet_reads_its_disk() {
+        // Settings asks before the first timelapse made the captures folder
+        let missing = std::env::temp_dir().join("ft-not-made-yet").join("captures");
+        assert!(!missing.exists());
+        assert!(free_bytes(&missing).is_some_and(|b| b > 0));
     }
 }
