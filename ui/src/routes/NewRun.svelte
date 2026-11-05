@@ -16,6 +16,9 @@
   import { sizeParts, tubeLabel } from '../lib/tubesize.js';
   import { downloadSettings, readSettings } from '../lib/runfile.js';
   import { segThumb } from '../lib/segthumb.js';
+  import { estimate, estimateText } from '../lib/timelapse.js';
+  import { liveShown } from '../lib/camera.js';
+  import LiveImg from '../components/LiveImg.svelte';
 
   let f = $state({
     name: '',
@@ -53,6 +56,10 @@
     tubing_calibration_id: null,
     // who the run belongs to: its Teams alerts go to them only
     responsible: '',
+    // a timelapse with the run: null until touched (on once a camera is
+    // set up), every `timelapse_min` (null: Settings' default)
+    timelapse: null,
+    timelapse_min: null,
   });
 
   // The steps, in the order the bench is set up. Every step can be opened at
@@ -151,11 +158,55 @@
         scaleOnFeed = (c.scale?.position ?? 'feed') === 'feed';
         people = (c.notify?.people ?? []).map((p) => p.name);
         trimLimitPct = c.scale?.trim_limit_pct ?? 25;
+        cameraReady = !!c.camera?.device && c.camera.enabled !== false;
+        tlDefaultMin = c.camera?.interval_min ?? 5;
+        camSize = [c.camera?.width ?? 1280, c.camera?.height ?? 720];
         // A remembered name no longer in Settings is no choice at all.
         if (!people.some((n) => n.toLowerCase() === f.responsible.trim().toLowerCase())) f.responsible = '';
       })
       .catch(() => {});
   });
+  // The timelapse with the run (camera plan C): on by default once a camera
+  // is set up; the estimate from the duration and the picture size.
+  let cameraReady = $state(false);
+  let tlDefaultMin = $state(5);
+  let camSize = $state([1280, 720]);
+  const tlOn = $derived(cameraReady && (f.timelapse ?? true));
+  const tlMin = $derived(f.timelapse_min ?? tlDefaultMin);
+  function pickTlMin(input) {
+    const n = Math.round(Number(input.value));
+    if (n >= 1 && n <= 1440) f.timelapse_min = n;
+    else input.value = String(tlMin);
+  }
+  // On Check and start: the camera's picture to check the framing, and a
+  // timelapse recording on its own (the run's ends it).
+  let cam = $state(null);
+  let camOk = $state(true);
+  let standalone = $state(null);
+  $effect(() => {
+    if (step !== 4 || !cameraReady) return;
+    let live = true;
+    const load = () => {
+      get('/api/camera')
+        .then((c) => {
+          if (!live) return;
+          cam = c;
+          camOk = true;
+        })
+        .catch(() => live && (camOk = false));
+      get('/api/timelapses/current')
+        .then((r) => live && (standalone = r.timelapse?.kind === 'standalone' ? r.timelapse : null))
+        .catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 2000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  });
+  let camLive = $state('starting');
+
   // Required once anyone is set up for notifications (the daemon checks too).
   const needsResponsible = $derived(people.length > 0 && !f.responsible);
   // The trim only applies with a balance configured; a "Run again" of a
@@ -391,7 +442,7 @@
     starting = true;
     startErr = null;
     try {
-      await post('/api/runs', {
+      const res = await post('/api/runs', {
         name: f.name.trim(),
         control_var: f.control_var,
         direction: f.direction,
@@ -402,7 +453,10 @@
         refill_draw_g: autoRefill && f.refill_draw_kg > 0 ? f.refill_draw_kg * 1000 : null,
         tubing_calibration_id: trimOn || drivePerRpm != null ? f.tubing_calibration_id : null,
         responsible: f.responsible || null,
+        timelapse: tlOn ? { interval_min: tlMin } : null,
       });
+      // the run started; a timelapse that could not is said on the Overview
+      app.timelapseNote = res?.timelapse_error ?? null;
       try {
         if (f.responsible) localStorage.setItem(LAST_RESPONSIBLE, f.responsible);
       } catch {
@@ -422,6 +476,9 @@
 
   // What has to be right before Start comes on. Each item takes you to its
   // field, on its step. The direction is never set by default (see `f`).
+  // what the timelapse will make over the run
+  const tlEst = $derived(tlOn ? estimate(durationS, tlMin, camSize[0], camSize[1]) : null);
+
   const checklist = $derived([
     // A name to find the run again in History: "run" twenty times reads as nothing.
     { label: 'Run name', done: !!f.name.trim(), hint: 'To find it in History', target: 'nr-name', go: () => goTo(1) },
@@ -775,6 +832,22 @@
           </dd>
           <dd class="edit"><button class="linkish" onclick={() => goTo(3)}>Change</button></dd>
 
+          <dt>Timelapse</dt>
+          <dd class="tl">
+            {#if !cameraReady}
+              no camera, <a href="#settings/camera">Settings, Camera</a>
+            {:else}
+              <label class="tl-on"><input type="checkbox" checked={tlOn} onchange={(e) => (f.timelapse = e.currentTarget.checked)} />
+                {tlOn ? 'every' : 'off'}</label>
+              {#if tlOn}
+                <input class="tl-min" type="number" min="1" max="1440" step="1" value={tlMin}
+                  aria-label="Timelapse every (minutes)" onchange={(e) => pickTlMin(e.currentTarget)} /> min{#if tlEst}, {estimateText(tlEst)} over {dur(durationS)}{/if}
+                {#if standalone}<small class="tl-ends">Ends the timelapse {standalone.name}</small>{/if}
+              {/if}
+            {/if}
+          </dd>
+          <dd class="edit"></dd>
+
           <dt>Feed</dt>
           <dd>{feed && !feed.unknown ? vol(feed.ml) : '–'}</dd>
           <dd class="edit"></dd>
@@ -790,6 +863,12 @@
                 <span><b>{dur(durationS)}</b></span>
               </div>
             </div>
+          {/if}
+          {#if tlOn && liveShown(cam, true)}
+            <!-- the framing, checked before Start -->
+            <figure class="framing">
+              <LiveImg {cam} pollOk={camOk} alt="What the camera sees now" bind:live={camLive} />
+            </figure>
           {/if}
           {#if startErr}
             <ErrorText message={startErr.message} hint={startErr.hint} />
@@ -929,6 +1008,11 @@
   .recap .edit { font-size: 13px; }
   .todo { color: color-mix(in srgb, var(--measured) 80%, var(--ink)); }
   .go { display: flex; flex-direction: column; gap: var(--s-3); }
+  .tl { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2); }
+  .tl-on { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .tl-min { width: 72px; }
+  .tl-ends { flex-basis: 100%; color: var(--muted); }
+  .framing { margin: 0; aspect-ratio: 16 / 9; border-radius: var(--radius-ctl); overflow: hidden; background: var(--video-bg); }
   .start { padding: var(--s-3) var(--s-4); font-size: 15px; }
 
   .nav-row { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding-top: var(--s-4); border-top: 1px solid var(--line-soft); }

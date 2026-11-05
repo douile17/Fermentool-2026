@@ -34,6 +34,8 @@ const FIELDS = {
   refill_draw_kg: numOrNull,
   tubing_calibration_id: (v) => v == null || Number.isInteger(v),
   responsible: (v) => typeof v === 'string',
+  timelapse: (v) => v == null || typeof v === 'boolean',
+  timelapse_min: (v) => v == null || (Number.isInteger(v) && v >= 1 && v <= 1440),
 };
 
 function fileName(name) {

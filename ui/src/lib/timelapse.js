@@ -61,6 +61,13 @@ export function cardState(cur, cam) {
   return cur.kind === 'run' ? 'recording_run' : 'recording';
 }
 
+/** A past run's timelapse as New run fields (Run again, the settings file):
+ *  on with its interval in minutes, or off. */
+export function timelapseSeed(run) {
+  const t = run?.timelapse;
+  return { timelapse: !!t, timelapse_min: t ? Math.max(1, Math.round(t.interval_s / 60)) : null };
+}
+
 /** Why the disk or the folder matters now, or `null`. */
 export function freeWarning(cur, warnFree) {
   if (!cur) return null;

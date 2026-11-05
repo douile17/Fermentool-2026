@@ -8,7 +8,16 @@ import {
   freeWarning,
   nextInText,
   perDayText,
+  timelapseSeed,
 } from './timelapse.js';
+
+describe('timelapseSeed', () => {
+  it('Run again keeps the run\'s timelapse choice and interval', () => {
+    expect(timelapseSeed({ timelapse: { id: 3, interval_s: 600, images: 12 } })).toEqual({ timelapse: true, timelapse_min: 10 });
+    expect(timelapseSeed({ timelapse: null })).toEqual({ timelapse: false, timelapse_min: null });
+    expect(timelapseSeed({})).toEqual({ timelapse: false, timelapse_min: null });
+  });
+});
 
 describe('estimate', () => {
   it('100 h every 5 min at 1280 x 720: 1201 images, the first at the start', () => {

@@ -17,4 +17,7 @@ export const app = $state({
   /** A page holding work asks before it is left: { active(), title, lines,
    *  leave() } set by the page (TubingCalibration), read by App's navigation. */
   leaveGuard: null,
+  /** Why the run just started has no timelapse (POST /api/runs
+   *  `timelapse_error`), said once on the Overview. */
+  timelapseNote: null,
 });

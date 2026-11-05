@@ -165,6 +165,8 @@ try {
     await click('.step', 'Check and start');
     await sleep(600);
     check('Check and start shows the curve and a Start button', await js(`!!document.querySelector('.go .preview svg') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Start run'))`));
+    // the timelapse row: its switch and interval with a camera, the way to Settings without
+    check('Check and start has the timelapse row', await js(`(() => { const dt = [...document.querySelectorAll('.recap dt')].find((d) => d.textContent.trim() === 'Timelapse'); const dd = dt?.nextElementSibling; return !!dd && (!!dd.querySelector('input[type=checkbox]') || !!dd.querySelector('a[href="#settings/camera"]')); })()`));
 
     // --- History: Run again opens New run on its check (broke once)
     check('History opens', await click('.tab', 'History'));
