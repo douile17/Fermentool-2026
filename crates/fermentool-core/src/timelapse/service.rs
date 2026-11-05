@@ -273,6 +273,8 @@ struct Live {
     gone_since: Option<Instant>,
     /// The last still failed: waiting for the camera.
     camera_lost: bool,
+    /// Paused for the disk or the folder: when to look again.
+    recheck_at: Option<Instant>,
 }
 
 impl Live {
@@ -330,7 +332,7 @@ impl<S: StillSource> Svc<S> {
         match self.store.open_timelapse() {
             Ok(Some(row)) => {
                 tracing::info!(id = row.id, name = %row.name, "timelapse resumes after a restart");
-                self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false });
+                self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false, recheck_at: None });
             }
             Ok(None) => {}
             Err(e) => tracing::error!("cannot read the open timelapse: {e}"),
@@ -359,6 +361,7 @@ impl<S: StillSource> Svc<S> {
         }
         self.follow_run();
         self.check_stop_at();
+        self.recheck_trouble();
         self.take_due();
         self.publish();
     }
@@ -437,30 +440,105 @@ impl<S: StillSource> Svc<S> {
         if live.row.kind == TimelapseKind::Run && self.run_now(live.row.run_id).is_none() {
             return;
         }
-        let Some(live) = self.live.as_mut() else { return };
+        let Some(live) = self.live.as_ref() else { return };
         let sched = live.schedule();
         let next = sched.next_slot(live.row.last_slot, now);
         if sched.due_at(next) > now {
             return;
         }
+        // the disk or the folder first: a pause, the slot not missed
+        if let Some(reason) = self.trouble(&live.row.folder) {
+            self.pause_for(reason);
+            return;
+        }
+        let Some(live) = self.live.as_mut() else { return };
         live.row.missed += sched.missed_between(live.row.last_slot, next);
         live.row.last_slot = Some(next);
         let mut row = live.row.clone();
         let result = self.capture(&mut row, Some(next));
         let Some(live) = self.live.as_mut() else { return };
         live.row = row;
+        let (run_id, was_lost) = (live.row.run_id, live.camera_lost);
         match result {
-            Ok(_) => live.camera_lost = false,
-            Err(e) => {
-                live.row.missed += 1;
-                if !live.camera_lost {
-                    tracing::warn!(id = live.row.id, "timelapse image not taken: {}", e.message());
+            Ok(_) => {
+                live.camera_lost = false;
+                if was_lost {
+                    tracing::info!(id = live.row.id, "timelapse camera back");
+                    self.event(run_id, "camera_recovered", None);
                 }
+            }
+            Err(CaptureError::Camera(e)) => {
+                live.row.missed += 1;
                 live.camera_lost = true;
+                if !was_lost {
+                    tracing::warn!(id = live.row.id, "timelapse waits for the camera: {e}");
+                    self.event(run_id, "camera_lost", Some(e));
+                }
+            }
+            Err(CaptureError::Folder(e)) => {
+                tracing::warn!(id = live.row.id, "timelapse image not written: {e}");
+                self.pause_for("folder");
             }
         }
+        if let Some(l) = self.live.as_ref() {
+            let row = l.row.clone();
+            self.save(&row);
+        }
+    }
+
+    /// Why images cannot be written to `folder` now: `folder` (gone and not
+    /// creatable, a USB disk unplugged) or `disk` (under `PAUSE_FREE_BYTES`).
+    fn trouble(&self, folder: &str) -> Option<&'static str> {
+        let p = Path::new(folder);
+        if !p.is_dir() && files::ensure_writable(p).is_err() {
+            return Some("folder");
+        }
+        if (self.t.free_bytes)(p).is_some_and(|f| f < files::PAUSE_FREE_BYTES) {
+            return Some("disk");
+        }
+        None
+    }
+
+    /// Paused by the disk or the folder, looked at again every
+    /// `trouble_recheck`, resumed by itself.
+    fn pause_for(&mut self, reason: &'static str) {
+        let recheck = self.t.trouble_recheck;
+        let Some(live) = self.live.as_mut() else { return };
+        live.row.state = TimelapseState::Paused;
+        live.row.pause_reason = Some(reason.to_string());
+        live.recheck_at = Some(Instant::now() + recheck);
         let row = live.row.clone();
+        tracing::warn!(id = row.id, folder = %row.folder, "timelapse paused: {reason}");
         self.save(&row);
+        self.event(row.run_id, "timelapse_paused", Some(reason.to_string()));
+    }
+
+    fn recheck_trouble(&mut self) {
+        let Some(live) = self.live.as_ref() else { return };
+        let by_trouble = live.row.state == TimelapseState::Paused && live.row.pause_reason.as_deref() != Some("user");
+        if !by_trouble || live.recheck_at.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        let folder = live.row.folder.clone();
+        let still = self.trouble(&folder);
+        let recheck = self.t.trouble_recheck;
+        let Some(live) = self.live.as_mut() else { return };
+        match still {
+            Some(reason) => {
+                live.row.pause_reason = Some(reason.to_string());
+                live.recheck_at = Some(Instant::now() + recheck);
+            }
+            None => {
+                live.row.state = TimelapseState::Recording;
+                live.row.pause_reason = None;
+                live.recheck_at = None;
+                live.skip_to_now(Timestamp::now());
+                let row = live.row.clone();
+                tracing::info!(id = row.id, "timelapse resumed: folder and disk fine again");
+                self.save(&row);
+                self.event(row.run_id, "timelapse_resumed", None);
+            }
+        }
     }
 
     /// One still into `row`'s folder and the database; `row` counts it.
@@ -654,7 +732,7 @@ impl<S: StillSource> Svc<S> {
         })?;
         self.event(Some(run_id), "timelapse_start", Some(format!("every {interval_s} s, in {}", row.folder)));
         let id = row.id;
-        self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false });
+        self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false, recheck_at: None });
         Ok(id)
     }
 
@@ -682,7 +760,7 @@ impl<S: StillSource> Svc<S> {
             stop_at: stop_after_s.map(|s| now + SignedDuration::from_secs(s)),
         })?;
         let id = row.id;
-        self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false });
+        self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false, recheck_at: None });
         Ok(id)
     }
 

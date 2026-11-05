@@ -329,6 +329,90 @@ fn pause_is_not_missed_and_interval_change_keeps_the_next_image() {
     tl.shutdown();
 }
 
+fn event_kinds(fx: &Fixture, run: i64) -> Vec<String> {
+    fx.store().events(Some(run), 100).unwrap().into_iter().rev().map(|e| e.kind).collect()
+}
+
+#[test]
+fn camera_lost_counts_missed_and_recovers() {
+    let fx = Fixture::new("camlost");
+    let run = fx.store().insert_run(&crate::store::tests::sample_run()).unwrap();
+    let cam = FakeCam::on();
+    let tl = fx.spawn(cam.clone());
+    let feed = tl.status_sink();
+    let drive = |secs: u64| {
+        for i in 0..secs * 10 {
+            feed.send(driving(run, i as f64 * 0.1)).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    feed.send(driving(run, 0.0)).unwrap();
+    let id = tl.start_with_run(run, "Run".into(), 1).unwrap();
+    drive(2);
+    cam.set_connected(false);
+    drive(3);
+    assert_eq!(tl.current().unwrap().state, "waiting_camera");
+    let lost_images = tl.current().unwrap().images;
+    cam.set_connected(true);
+    drive(2);
+    let row = fx.store().timelapse(id).unwrap().unwrap();
+    assert!(row.images > lost_images);
+    assert!((2..=4).contains(&row.missed), "missed {}", row.missed);
+    assert_eq!(tl.current().unwrap().state, "recording");
+    let kinds = event_kinds(&fx, run);
+    assert_eq!(kinds.iter().filter(|k| *k == "camera_lost").count(), 1, "{kinds:?}");
+    assert_eq!(kinds.iter().filter(|k| *k == "camera_recovered").count(), 1, "{kinds:?}");
+    tl.shutdown();
+}
+
+#[test]
+fn folder_gone_pauses_then_resumes() {
+    let fx = Fixture::new("foldergone");
+    let tl = fx.spawn(FakeCam::on());
+    let id = tl.start_standalone("Night".into(), 1, None).unwrap();
+    assert!(wait_for(Duration::from_secs(3), || images(&tl) >= 1));
+    // the captures folder gone, a file in its place: it cannot come back
+    // (a USB disk unplugged)
+    std::fs::remove_dir_all(&fx.root).unwrap();
+    std::fs::write(&fx.root, b"not a folder").unwrap();
+    assert!(wait_for(Duration::from_secs(3), || tl.current().unwrap().pause_reason.as_deref() == Some("folder")));
+    assert_eq!(tl.current().unwrap().state, "paused");
+    let paused_at = images(&tl);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(images(&tl), paused_at);
+    // the disk is back
+    std::fs::remove_file(&fx.root).unwrap();
+    assert!(wait_for(Duration::from_secs(3), || images(&tl) > paused_at), "{:?}", tl.current());
+    let row = fx.store().timelapse(id).unwrap().unwrap();
+    assert_eq!((row.state, row.pause_reason), (TimelapseState::Recording, None));
+    assert_eq!(row.missed, 0, "a pause for the folder is not missed");
+    let left: Vec<_> = std::fs::read_dir(&row.folder).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+    assert!(left.is_empty());
+    tl.shutdown();
+}
+
+static FREE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+#[test]
+fn low_disk_pauses() {
+    use std::sync::atomic::Ordering;
+    let fx = Fixture::new("lowdisk");
+    let root = fx.root.clone();
+    let t = Timings { free_bytes: |_| Some(FREE.load(Ordering::SeqCst)), ..quick() };
+    let tl = Timelapses::spawn_with(fx.store(), FakeCam::on(), move || root.clone(), t);
+    tl.start_standalone("Night".into(), 1, None).unwrap();
+    assert!(wait_for(Duration::from_secs(3), || images(&tl) >= 1));
+    FREE.store(150_000_000, Ordering::SeqCst);
+    assert!(wait_for(Duration::from_secs(3), || tl.current().unwrap().pause_reason.as_deref() == Some("disk")));
+    let paused_at = images(&tl);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(images(&tl), paused_at);
+    FREE.store(5_000_000_000, Ordering::SeqCst);
+    assert!(wait_for(Duration::from_secs(3), || images(&tl) > paused_at));
+    assert_eq!(tl.current().unwrap().state, "recording");
+    tl.shutdown();
+}
+
 #[test]
 fn a_command_is_seen_in_current_as_soon_as_it_answers() {
     let fx = Fixture::new("atonce");
