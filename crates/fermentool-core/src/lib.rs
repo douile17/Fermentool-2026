@@ -13,6 +13,7 @@ pub mod engine;
 pub mod notify;
 pub mod scale;
 pub mod store;
+pub mod timelapse;
 pub mod timing;
 pub mod tracking;
 pub mod trim;
