@@ -346,6 +346,11 @@ try {
   check('#camera opens the Camera page', (await js(`document.querySelector('.nav-item.active')?.textContent.trim()`)) === 'Camera' && (await js(`document.querySelector('h1')?.textContent.trim()`)) === 'Camera');
   const shown = await answers(`!!document.querySelector('.camera .pic, .camera .empty')`);
   check('the Camera page answers, with its picture or its empty state', shown === true, String(shown));
+  if (await js(`!!document.querySelector('.camera .pic')`)) {
+    await sleep(1500);
+    check('the Timelapse card answers in one of its states', await js(`(() => { const c = document.querySelector('.camera section.tl'); return !!c && (!!c.querySelector('.rec .word') || [...c.querySelectorAll('button')].some((b) => b.textContent.includes('Start timelapse')) || /A run is going/.test(c.textContent)); })()`));
+    check('Take a picture is offered beside Full screen', await js(`[...document.querySelectorAll('.camera .under button')].some((b) => b.textContent.includes('Take a picture'))`));
+  }
   check('the Camera page never says burst', await js(`!/burst/i.test(document.querySelector('main')?.innerText ?? '')`));
 
   // --- Tubing calibration last: it is only looked at, its draft untouched

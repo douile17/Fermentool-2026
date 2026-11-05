@@ -1,13 +1,15 @@
 <script>
   import { app } from '../lib/state.svelte.js';
-  import { get } from '../lib/api.js';
+  import { BASE, get, post } from '../lib/api.js';
   import { cameraLine, liveShown, noPictureSince, runClock } from '../lib/camera.js';
   import Icon from '../components/Icon.svelte';
   import LiveImg from '../components/LiveImg.svelte';
+  import TimelapseCard from '../components/TimelapseCard.svelte';
 
-  // The camera's live view (mockup of 2026-11-02, its Live part; Take a
-  // picture and the Timelapses tab come with the timelapse). The run's state
-  // bar is App's, above every page but the Overview.
+  // The camera's live view, Take a picture, the latest images and the
+  // Timelapse card (mockup of 2026-11-02; the player and the Timelapses tab
+  // come with plan D). The run's state bar is App's, above every page but
+  // the Overview.
 
   // GET /api/camera every 2 s while the page is open: the status frame does
   // not carry the camera. A failed poll keeps the last answer but marks the
@@ -16,7 +18,7 @@
   let pollOk = $state(true);
   $effect(() => {
     let live = true;
-    const load = () =>
+    const load = () => {
       get('/api/camera')
         .then((c) => {
           if (!live) return;
@@ -24,6 +26,8 @@
           pollOk = true;
         })
         .catch(() => live && (pollOk = false));
+      loadTimelapse();
+    };
     load();
     const t = setInterval(load, 2000);
     return () => {
@@ -74,6 +78,58 @@
   }
 
   const size = $derived(cam?.width && cam?.height ? `${cam.width} × ${cam.height}` : null);
+
+  // The timelapse recording or paused, with the camera's poll.
+  let tl = $state(null);
+  let warnFree = $state(false);
+  let defaultMin = $state(5);
+  const loadTimelapse = () =>
+    get('/api/timelapses/current')
+      .then((r) => {
+        tl = r.timelapse;
+        warnFree = r.warn_free;
+      })
+      .catch(() => {});
+  $effect(() => {
+    get('/api/config')
+      .then((c) => (defaultMin = c.camera?.interval_min ?? 5))
+      .catch(() => {});
+  });
+
+  // The latest 8 images of the current timelapse, asked again when its
+  // count changes.
+  let latest = $state([]);
+  const tlKey = $derived(tl ? `${tl.id}:${tl.images}` : null);
+  $effect(() => {
+    if (!tlKey) {
+      latest = [];
+      return;
+    }
+    const id = tl.id;
+    get(`/api/timelapses/${id}/images?limit=8`)
+      .then((list) => (latest = list))
+      .catch(() => {});
+  });
+
+  // Take a picture: into the timelapse recording, or today's pictures.
+  let taking = $state(false);
+  let picMsg = $state(null);
+  let picErr = $state(null);
+  let flashId = $state(null);
+  async function takePicture() {
+    taking = true;
+    picErr = null;
+    picMsg = null;
+    try {
+      const r = await post('/api/camera/picture');
+      flashId = r.image_id;
+      if (!tl) picMsg = "Saved in today's pictures.";
+      loadTimelapse();
+    } catch (e) {
+      picErr = e.message;
+    }
+    taking = false;
+  }
 </script>
 
 <div class="camera">
@@ -94,6 +150,8 @@
       </div>
     {/if}
 
+    <div class="cols">
+    <div class="main">
     <section class="card live">
       <div class="pic" bind:this={box} style:aspect-ratio={cam.width && cam.height ? `${cam.width} / ${cam.height}` : '16 / 9'}>
         {#if showLive}
@@ -119,18 +177,52 @@
           <span class="name"><span class="nw">{cam.device}</span>{#if size} · <span class="nw">{size}</span>{/if}</span>
         {/if}
         <span class="gap"></span>
+        <button class="btn-ghost" type="button" onclick={takePicture} disabled={taking || cam.state !== 'connected'}>
+          <Icon name="camera" size={16} />{taking ? 'Taking…' : 'Take a picture'}
+        </button>
         <button class="btn-ghost full" type="button" onclick={fullScreen} disabled={!showLive} aria-label="Full screen" title="Full screen">
           <Icon name="full-screen" size={18} />
         </button>
       </div>
+      {#if picErr}<p class="pic-err">{picErr}</p>{:else if picMsg}<p class="muted">{picMsg}</p>{/if}
     </section>
+
+    {#if latest.length}
+      <section class="card strip" aria-label="Latest images">
+        <h2>Latest images</h2>
+        <ul>
+          {#each latest as img (img.id)}
+            <li class:flash={img.id === flashId}>
+              <a href={`${BASE}/api/timelapses/images/${img.id}/full.jpg`} target="_blank" rel="noopener">
+                <img src={`${BASE}/api/timelapses/images/${img.id}/thumb.jpg`} alt={`Image at ${runClock(img.elapsed_s)}`} loading="lazy" />
+              </a>
+              <span>{runClock(img.elapsed_s)}{img.slot == null ? ', by hand' : ''}</span>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+    </div>
+    <aside class="side">
+      <TimelapseCard cur={tl} {warnFree} {cam} {defaultMin} onchanged={loadTimelapse} />
+    </aside>
+    </div>
   {:else}
     <p class="muted">Loading…</p>
   {/if}
 </div>
 
 <style>
+  .cols { display: flex; flex-wrap: wrap; gap: var(--s-4); align-items: flex-start; }
+  .main { flex: 999 1 480px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-4); }
+  .side { flex: 1 1 280px; min-width: 0; }
   .card.live { padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-4); }
+  .pic-err { color: var(--danger-ink); margin: 0; }
+  .strip h2 { margin: 0 0 var(--s-3); font-size: 16px; }
+  .strip ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--s-3); }
+  .strip li { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .strip img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--video-bg); display: block; }
+  .strip li.flash img { outline: 2px solid var(--green-500); outline-offset: 2px; }
   .pic {
     position: relative; overflow: hidden; border-radius: var(--radius-ctl);
     background: var(--video-bg); width: 100%;
