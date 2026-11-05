@@ -16,6 +16,7 @@ CREATE TABLE timelapses (
     pause_reason TEXT,             -- user | disk | folder
     anchor_at TEXT NOT NULL,       -- the schedule: slot k due anchor_at + (k - anchor_slot) * interval
     anchor_slot INTEGER NOT NULL,
+    last_slot INTEGER,             -- the last slot passed, taken or missed
     missed INTEGER NOT NULL DEFAULT 0,
     images INTEGER NOT NULL DEFAULT 0,
     bytes INTEGER NOT NULL DEFAULT 0

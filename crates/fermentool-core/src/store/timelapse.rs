@@ -74,6 +74,8 @@ pub struct TimelapseRow {
     /// The schedule: slot k is due `anchor_at + (k - anchor_slot) * interval_s`.
     pub anchor_at: Timestamp,
     pub anchor_slot: i64,
+    /// The last slot passed, taken or missed (`None` before the first).
+    pub last_slot: Option<i64>,
     pub missed: i64,
     pub images: i64,
     pub bytes: i64,
@@ -123,7 +125,7 @@ pub struct ImageRow {
 }
 
 const TL_COLS: &str = "id, run_id, kind, name, folder, interval_s, started_at, stop_at, ended_at, \
-     state, pause_reason, anchor_at, anchor_slot, missed, images, bytes";
+     state, pause_reason, anchor_at, anchor_slot, last_slot, missed, images, bytes";
 const IMG_COLS: &str = "id, timelapse_id, slot, taken_at, elapsed_s, file, thumb, bytes, width, height, \
      camera, controls, setpoint, unit, delivered_ml, weight_g, trim_c";
 
@@ -146,9 +148,10 @@ fn timelapse_row(r: &Row) -> rusqlite::Result<TimelapseRow> {
         pause_reason: r.get(10)?,
         anchor_at: parse_ts(r.get(11)?)?,
         anchor_slot: r.get(12)?,
-        missed: r.get(13)?,
-        images: r.get(14)?,
-        bytes: r.get(15)?,
+        last_slot: r.get(13)?,
+        missed: r.get(14)?,
+        images: r.get(15)?,
+        bytes: r.get(16)?,
     })
 }
 
@@ -247,11 +250,11 @@ impl Store {
     }
 
     /// Writes back what changes during a timelapse: name, folder, interval,
-    /// stop and end, state and reason, schedule anchor, missed.
+    /// stop and end, state and reason, schedule anchor, last slot, missed.
     pub fn update_timelapse(&self, t: &TimelapseRow) -> Result<()> {
         let n = self.conn.execute(
             "UPDATE timelapses SET name = ?2, folder = ?3, interval_s = ?4, stop_at = ?5, ended_at = ?6,
-                 state = ?7, pause_reason = ?8, anchor_at = ?9, anchor_slot = ?10, missed = ?11
+                 state = ?7, pause_reason = ?8, anchor_at = ?9, anchor_slot = ?10, missed = ?11, last_slot = ?12
              WHERE id = ?1",
             params![
                 t.id,
@@ -265,6 +268,7 @@ impl Store {
                 t.anchor_at.to_string(),
                 t.anchor_slot,
                 t.missed,
+                t.last_slot,
             ],
         )?;
         if n == 0 {
@@ -386,11 +390,12 @@ mod tests {
         assert_eq!(t.name, "Night");
         assert_eq!(t.kind, TimelapseKind::Standalone);
         assert_eq!(t.state, TimelapseState::Recording);
-        assert_eq!((t.anchor_at, t.anchor_slot, t.missed, t.images), (t.started_at, 0, 0, 0));
+        assert_eq!((t.anchor_at, t.anchor_slot, t.last_slot, t.missed, t.images), (t.started_at, 0, None, 0, 0));
         assert_eq!(t.stop_at, Some(ts("2026-11-06T10:00:00Z")));
         t.state = TimelapseState::Paused;
         t.pause_reason = Some("disk".into());
         t.missed = 3;
+        t.last_slot = Some(7);
         t.interval_s = 60;
         t.folder = "D:\\elsewhere".into();
         s.update_timelapse(&t).unwrap();

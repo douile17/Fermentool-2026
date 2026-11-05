@@ -22,9 +22,10 @@ impl Schedule {
     /// `now - LATE_S`, never one already past `after_slot` (a clock set back
     /// gives no burst) nor below the anchor.
     pub fn next_slot(&self, after_slot: Option<i64>, now: Timestamp) -> i64 {
-        let interval = self.interval_s.max(1);
-        let since = now.duration_since(self.anchor).as_secs() - LATE_S;
-        let by_clock = self.anchor_slot + if since <= 0 { 0 } else { (since + interval - 1) / interval };
+        let interval = self.interval_s.max(1) as f64;
+        // in fractions of a second: whole seconds stretched the grace to 3 s
+        let since = now.duration_since(self.anchor).as_secs_f64() - LATE_S as f64;
+        let by_clock = self.anchor_slot + if since <= 0.0 { 0 } else { (since / interval).ceil() as i64 };
         by_clock.max(after_slot.map_or(self.anchor_slot, |s| s + 1))
     }
 
@@ -83,6 +84,13 @@ mod tests {
         assert_eq!(s.missed_between(None, 0), 0);
         // no image yet and three slots gone
         assert_eq!(s.missed_between(None, 3), 3);
+    }
+
+    #[test]
+    fn the_grace_is_two_seconds_not_three() {
+        // 10:15:02.6: slot 3 (10:15) is 2.6 s gone, past the grace
+        let now: Timestamp = "2026-11-05T10:15:02.6Z".parse().unwrap();
+        assert_eq!(every_5_min().next_slot(Some(2), now), 4);
     }
 
     #[test]

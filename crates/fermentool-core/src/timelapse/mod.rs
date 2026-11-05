@@ -4,5 +4,9 @@
 
 pub mod files;
 pub mod schedule;
+mod service;
+#[cfg(test)]
+mod service_tests;
 
 pub use schedule::Schedule;
+pub use service::*;

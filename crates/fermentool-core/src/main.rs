@@ -307,10 +307,35 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(api::ApiDb::new(Store::open(&paths.db).context("open journal for the API")?));
 
     let (camera, helper_missing) = build_camera(&config);
+    // Timelapses: their own thread, connection and folder; the run reaches
+    // them through the status broadcast, never the control thread.
+    let timelapses = {
+        let store = Store::open(&paths.db)?;
+        let data_dir = paths.data_dir.clone();
+        fermentool_core::timelapse::Timelapses::spawn(store, camera.clone(), move || data_dir.join("captures"))
+    };
+    {
+        let mut rx = events.subscribe();
+        let sink = timelapses.status_sink();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(st) => {
+                        if sink.send(fermentool_core::timelapse::RunView::from(&st)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
     let (stopping, _) = tokio::sync::watch::channel(false);
     let stopping = Arc::new(stopping);
     let state = AppState {
         camera: camera.clone(),
+        timelapses: timelapses.clone(),
         helper_missing,
         stopping: Arc::clone(&stopping),
         control: Arc::clone(&control),

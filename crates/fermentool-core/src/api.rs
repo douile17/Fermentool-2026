@@ -59,6 +59,8 @@ pub struct AppState {
     pub about: Arc<About>,
     /// The camera supervisor. Its handlers never touch the control thread.
     pub camera: crate::camera::Camera,
+    /// The `timelapse` thread (its own connection and folder).
+    pub timelapses: crate::timelapse::Timelapses,
     /// `fermentool-camera.exe` was not found next to the daemon.
     pub helper_missing: bool,
     /// Set when the daemon stops: open live views end, or graceful shutdown
@@ -998,6 +1000,8 @@ async fn shutdown(State(s): State<AppState>) -> Response {
     // up to ~1.5 s for it); the daemon's exit path does it again, harmlessly.
     let camera = s.camera.clone();
     let _ = tokio::task::spawn_blocking(move || camera.shutdown()).await;
+    let timelapses = s.timelapses.clone();
+    let _ = tokio::task::spawn_blocking(move || timelapses.shutdown()).await;
     s.shutdown.notify_one();
     s.stopping.send_replace(true);
     Json(json!({ "stopping": true })).into_response()
@@ -1684,6 +1688,7 @@ mod tests {
             config_rev: Default::default(),
             about: Default::default(),
             camera: crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, None),
+            timelapses: test_timelapses(),
             helper_missing: false,
             stopping: Arc::new(tokio::sync::watch::channel(false).0),
         }
@@ -2751,6 +2756,19 @@ mod tests {
     }
 
     // ----- camera -----
+
+    /// A timelapse thread on a database and a folder of its own, its camera
+    /// never connected.
+    fn test_timelapses() -> crate::timelapse::Timelapses {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ft-api-tl-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::store::Store::open(&dir.join("db.sqlite")).unwrap();
+        let camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, None);
+        crate::timelapse::Timelapses::spawn(store, camera, move || dir.join("captures"))
+    }
 
     fn camera_want() -> crate::camera::CameraWant {
         crate::camera::CameraWant { device: "Test pattern".into(), index: 0, width: 640, height: 480, controls: Vec::new() }
