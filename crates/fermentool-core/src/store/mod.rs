@@ -13,6 +13,9 @@ use jiff::Timestamp;
 use rusqlite::types::Type as SqlType;
 use rusqlite::{params, Connection, OptionalExtension};
 
+mod timelapse;
+pub use timelapse::{ImageRow, NewImage, NewTimelapse, TimelapseKind, TimelapseRow, TimelapseState};
+
 struct Migration {
     version: i64,
     sql: &'static str,
@@ -78,6 +81,12 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 15,
         sql: include_str!("migrations/0015_pump_model.sql"),
+    },
+    // 16 is `feat/rate-change-reset`'s (the bench DB has it): this branch
+    // skips it, a merge adds it back below 17.
+    Migration {
+        version: 17,
+        sql: include_str!("migrations/0017_timelapses.sql"),
     },
 ];
 
@@ -1243,7 +1252,7 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
 
@@ -1251,7 +1260,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn sample_run() -> NewRun {
+    pub(crate) fn sample_run() -> NewRun {
         NewRun {
             name: "soak-A".into(),
             started_at: ts("2026-09-01T09:30:00Z"),
@@ -1291,7 +1300,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 15);
+        assert_eq!(v, 17);
     }
 
     #[test]
@@ -1303,7 +1312,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 15);
+        assert_eq!(v, 17);
     }
 
     #[test]

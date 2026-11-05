@@ -106,6 +106,18 @@ pub enum CameraState {
     NoHelper,
 }
 
+/// A picture to keep (a timelapse image) and its thumbnail, from the
+/// connected camera.
+#[derive(Debug, Clone)]
+pub struct Still {
+    pub jpeg: Vec<u8>,
+    pub thumb: Vec<u8>,
+    pub device: String,
+    pub width: u32,
+    pub height: u32,
+    pub at: Timestamp,
+}
+
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub jpeg: Arc<Vec<u8>>,
@@ -209,6 +221,8 @@ enum Cmd {
     /// Sets one control on the connected camera, and keeps it for the next
     /// opens of this want.
     SetControl(ControlValue, mpsc::Sender<ControlsAnswer>),
+    /// A picture to keep, at this JPEG quality.
+    Still(u8, mpsc::Sender<Result<Still, String>>),
     /// A viewer arrived: grab now rather than at the next idle poll.
     Wake,
     Shutdown(mpsc::Sender<()>),
@@ -357,9 +371,16 @@ impl Camera {
         self.ask(|tx| Cmd::SetControl(v, tx))
     }
 
+    /// A picture to keep from the connected camera (refused at once when
+    /// none is): a JPEG at `quality` and its thumbnail. It also becomes the
+    /// latest frame. Blocking, a few seconds at most.
+    pub fn still(&self, quality: u8) -> Result<Still, String> {
+        self.ask(|tx| Cmd::Still(quality, tx))
+    }
+
     /// One request through the supervisor, its answer waited for at most a
     /// request's bound plus an open's (it may be opening when asked).
-    fn ask(&self, cmd: impl FnOnce(mpsc::Sender<ControlsAnswer>) -> Cmd) -> ControlsAnswer {
+    fn ask<T>(&self, cmd: impl FnOnce(mpsc::Sender<Result<T, String>>) -> Cmd) -> Result<T, String> {
         let (tx, rx) = mpsc::channel();
         self.inner.cmd.send(cmd(tx)).map_err(|_| "the camera supervisor has stopped".to_string())?;
         rx.recv_timeout(self.inner.t.request + self.inner.t.open)
@@ -517,6 +538,9 @@ impl Supervisor {
                         }
                     }
                     let _ = tx.send(answer);
+                }
+                Ok(Cmd::Still(quality, tx)) => {
+                    let _ = tx.send(self.still(quality));
                 }
                 Ok(Cmd::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Cmd::Shutdown(done)) => {
@@ -729,30 +753,63 @@ impl Supervisor {
         }
     }
 
-    /// `Controls` or `SetControl` to the connected helper. A refusal keeps
-    /// the helper; a hung or dead one ends like at a grab.
-    fn control_request(&mut self, request: &Request) -> ControlsAnswer {
+    /// One request to the connected helper, `expect` picking the answer it
+    /// waits for. A refusal (`Error`) keeps the helper; a hung or dead one,
+    /// or an answer out of turn, ends like at a grab.
+    fn helper_request<T>(
+        &mut self,
+        request: &Request,
+        what: &str,
+        expect: impl FnOnce(Reply) -> Result<T, Reply>,
+    ) -> Result<T, String> {
         let Some(helper) = self.helper.as_mut() else {
             return Err("the camera is not connected".to_string());
         };
-        let reply = helper.request(request, self.t.request);
-        match reply {
-            Ok(Reply::Controls(c)) => return Ok(c),
+        let reply = match helper.request(request, self.t.request) {
             Ok(Reply::Error { message, .. }) => return Err(message),
-            _ => {}
-        }
+            Ok(r) => match expect(r) {
+                Ok(v) => return Ok(v),
+                Err(other) => Ok(other),
+            },
+            Err(f) => Err(f),
+        };
         let device = self.device();
         if let Some(h) = self.helper.take() {
             let why = match reply {
-                Err(Fail::Timeout) => format!("no answer about the controls within {} s", self.t.request.as_secs()),
+                Err(Fail::Timeout) => format!("no answer about {what} within {} s", self.t.request.as_secs()),
                 Err(Fail::Dead(why)) => why,
-                Ok(other) => format!("unexpected answer about the controls: {other:?}"),
+                Ok(other) => format!("unexpected answer about {what}: {other:?}"),
             };
             self.kill_helper(h, &why);
             self.lost(&device, &why);
             self.backoff_attempt();
         }
         Err("the camera stopped answering".to_string())
+    }
+
+    /// `Controls` or `SetControl` to the connected helper.
+    fn control_request(&mut self, request: &Request) -> ControlsAnswer {
+        self.helper_request(request, "the controls", |r| match r {
+            Reply::Controls(c) => Ok(c),
+            other => Err(other),
+        })
+    }
+
+    /// A still from the connected helper; it also becomes the latest frame.
+    fn still(&mut self, quality: u8) -> Result<Still, String> {
+        let (jpeg, thumb) = self.helper_request(&Request::Still { quality }, "a still", |r| match r {
+            Reply::Still { jpeg, thumb } => Ok((jpeg, thumb)),
+            other => Err(other),
+        })?;
+        let (device, width, height) = match self.shared.state() {
+            CameraState::Connected { device, width, height } => (device, width, height),
+            _ => (self.device(), 0, 0),
+        };
+        let at = Timestamp::now();
+        self.seq += 1;
+        *lock(&self.shared.latest) = Some(Frame { jpeg: Arc::new(jpeg.clone()), at, seq: self.seq });
+        self.shared.fresh.notify_all();
+        Ok(Still { jpeg, thumb, device, width, height, at })
     }
 
     fn grab(&mut self) {
@@ -1223,6 +1280,9 @@ pub(crate) mod fake {
                     if grabs <= script.grab_ok { Some(frame) } else { act(&script.grab_then, frame) }
                 }
                 Request::Close => Some(Reply::Closed),
+                Request::Still { quality } => {
+                    act(&script.grab_then, Reply::Still { jpeg: vec![0xFF, 0xD8, quality], thumb: vec![0xFF, 0xD8, 1] })
+                }
             };
             let Some(reply) = reply else {
                 // Hung: only a kill (or the daemon dropping it) ends this.
@@ -1309,6 +1369,30 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(log.launch_count(), 1);
         assert!(connected(&cam));
+        cam.shutdown();
+    }
+
+    #[test]
+    fn still_is_refused_without_a_camera() {
+        let (launch, _log) = FakeLaunch::healthy();
+        let cam = Camera::spawn_with(launch, None, quick());
+        let started = Instant::now();
+        assert_eq!(cam.still(95).unwrap_err(), "the camera is not connected");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        cam.shutdown();
+    }
+
+    #[test]
+    fn still_returns_both_pictures_and_becomes_the_latest() {
+        let (launch, log) = FakeLaunch::healthy();
+        let cam = Camera::spawn_with(launch, Some(want(640, 480)), quick());
+        assert!(wait_for(Duration::from_secs(3), || connected(&cam)));
+        let still = cam.still(95).unwrap();
+        assert_eq!(still.jpeg, vec![0xFF, 0xD8, 95]);
+        assert_eq!(still.thumb, vec![0xFF, 0xD8, 1]);
+        assert_eq!((still.device.as_str(), still.width, still.height), ("Test pattern", 640, 480));
+        assert_eq!(*cam.latest().unwrap().jpeg, still.jpeg);
+        assert_eq!(log.seen(|r| matches!(r, Request::Still { quality: 95 })).len(), 1);
         cam.shutdown();
     }
 
