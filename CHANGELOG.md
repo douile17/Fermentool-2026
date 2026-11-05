@@ -16,6 +16,22 @@
   ouverture, d'où une image qui se déconnectait et revenait sans arrêt,
   alors que l'application Caméra de Windows la montrait bien. Il lit
   maintenant la webcam par Media Foundation directement.
+- Timelapses (5 novembre) : une image toutes les N minutes, prise par le
+  daemon, même fenêtre fermée. Avec un run (« Timelapse » dans New run,
+  Check and start : elle démarre et s'arrête avec le run, Run again la
+  reprend) ou seule depuis la page Caméra (nom, intervalle, arrêt après N h).
+  La page Caméra montre la timelapse en cours (Pause, changer l'intervalle,
+  Stop), les 8 dernières images et « Take a picture ». Chaque image est un
+  JPEG de qualité 95 avec sa miniature, rangée dans un dossier par
+  timelapse (Settings, Caméra : « Images kept in », par défaut
+  `%APPDATA%\Fermentool\captures`), avec un `images.csv` qui note pour
+  chaque image la caméra et ses réglages, le temps de run, la consigne, le
+  volume livré, le poids de la balance et le facteur de correction, prêt
+  pour entraîner un modèle. Caméra débranchée : les images manquées sont
+  comptées, la timelapse reprend seule, le run n'est jamais touché. Disque
+  sous 200 Mo ou dossier introuvable : la timelapse se met en pause et
+  reprend seule. Supprimer un run supprime ses images. Le lecteur, les
+  exports .zip et .mp4 et l'onglet Timelapses viendront ensuite.
 - Réglages de l'image dans Settings, Caméra (5 novembre) : exposition,
   balance des blancs, luminosité, contraste, saturation, netteté, gain et
   anti-scintillement (50/60 Hz), seulement ceux que la caméra possède, avec

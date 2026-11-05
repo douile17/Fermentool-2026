@@ -5,6 +5,7 @@ import {
   cardState,
   estimate,
   estimateText,
+  everyWords,
   freeWarning,
   nextInText,
   perDayText,
@@ -52,6 +53,12 @@ describe('words', () => {
   });
   it('a day of images', () => {
     expect(perDayText(estimate(3600, 5, 1280, 720))).toBe('288 images, 73 MB a day');
+  });
+  it('an interval in minutes, not "1 m 0 s"', () => {
+    expect(everyWords(60)).toBe('1 min');
+    expect(everyWords(300)).toBe('5 min');
+    expect(everyWords(5400)).toBe('1 h 30 m');
+    expect(everyWords(45)).toBe('45 s');
   });
   it('the next image in a few words', () => {
     const now = Date.parse('2026-11-05T10:00:00Z');

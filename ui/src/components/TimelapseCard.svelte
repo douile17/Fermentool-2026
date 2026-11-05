@@ -1,8 +1,8 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { post } from '../lib/api.js';
-  import { dur, shortTime, stamp } from '../lib/fmt.js';
-  import { bytesText, cardState, estimate, freeWarning, nextInText, perDayText } from '../lib/timelapse.js';
+  import { shortTime, stamp } from '../lib/fmt.js';
+  import { bytesText, cardState, estimate, everyWords, freeWarning, nextInText, perDayText } from '../lib/timelapse.js';
 
   // The Camera page's Timelapse card (mockup of 2026-11-02, its four
   // states, and the pauses of plan C): `cur` and `warnFree` are GET
@@ -59,7 +59,7 @@
     if (n >= 1 && n <= 1440 && n * 60 !== cur.interval_s) act('/api/timelapses/current/interval', { interval_min: n });
   }
 
-  const everyText = $derived(cur ? dur(cur.interval_s) : '');
+  const everyText = $derived(cur ? everyWords(cur.interval_s) : '');
 </script>
 
 <section class="card tl" aria-label="Timelapse">

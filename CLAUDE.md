@@ -617,6 +617,32 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
 - Settings > Camera has no Save: every click connects or sets the camera
   and saves at once, the line under the card says it with Undo (an undo
   per change, `restorePlan`). The controls sit beside the live picture.
+- **Timelapses (plan C, 2026-11-05)**: `crates/fermentool-core/src/timelapse/`.
+  A `timelapse` thread owns its own `Store` connection and the captures
+  folder; it follows the run through `RunView`s fed from the status
+  broadcast (`follow_status`), **never the control thread**, and asks the
+  camera for stills (`Request::Still`, JPEG 95 + a 320 px thumbnail, 5
+  frames dropped first). Run-linked: started by `POST /api/runs`'s
+  `timelapse: {interval_min}` after the run starts (a failure never fails
+  the start, `timelapse_error`), images only while the run is driven, none
+  while it awaits Resume (not missed), ended once the run is neither for
+  `run_gone_grace` (3 s: a status queued from before the start must not end
+  it). Standalone: from the Camera page, resumed after a restart. Slot k due
+  `anchor + (k - anchor_slot) * interval` (`schedule.rs`, 2 s grace in
+  fractions of a second); `last_slot` is stored, so a restart counts the
+  slots it missed once. Camera lost: slots missed, `camera_lost` /
+  `camera_recovered`; disk under 200 MB or folder gone: paused `disk` /
+  `folder`, rechecked every 30 s, resumed alone (never missed). Never
+  notified. **Each image keeps, in `timelapse_images` and the folder's
+  `images.csv`, the camera, its controls (JSON), run elapsed, setpoint and
+  unit, delivered ml, weight and trim c**: the images are meant to train a
+  model later. Migration 0017 (`timelapses.run_id` has no REFERENCES: it
+  would block deleting a run). Files are served by image id only
+  (`/api/timelapses/images/{id}/full.jpg|thumb.jpg`). Deleting a run
+  deletes its images; Reset history all but the one recording.
+  `[camera] interval_min` (New run's default) and `captures_dir` (empty:
+  `%APPDATA%\Fermentool\captures`). Plan D: player, Timelapses tab,
+  History section, exports, rename/delete, Browse….
 - Another program holding the webcam (at Open or at a grab) is `in_use`,
   retried every 15 s, then doubling to 120 s after 10 in a row.
 - The Tauri window's CSP lists the daemon's origin in `img-src` (the live

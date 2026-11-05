@@ -42,6 +42,12 @@ export function perDayText(e) {
   return `${spaced(e.perDay.images)} images, ${bytesText(e.perDay.bytes)} a day`;
 }
 
+/** An interval: "5 min", "1 h 30 m" past an hour, "45 s" under a minute. */
+export function everyWords(seconds) {
+  if (seconds >= 60 && seconds < 3600 && seconds % 60 === 0) return `${seconds / 60} min`;
+  return dur(seconds);
+}
+
 /** "in 3 m 20 s", "now", "–" without a next image. */
 export function nextInText(nextAt, nowMs) {
   const at = nextAt ? Date.parse(nextAt) : NaN;
