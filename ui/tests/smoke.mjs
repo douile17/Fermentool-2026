@@ -330,6 +330,11 @@ try {
   } else {
     console.log('skip  the Picture rows: no camera connected');
   }
+  {
+    const saved = JSON.parse(camBefore) ?? {};
+    const shown = await js(`[document.querySelector('.settings-pane input[aria-label="Timelapse every (minutes)"]')?.value, document.querySelector('.settings-pane input[aria-label="Images kept in"]')?.value]`);
+    check('Timelapse shows its interval and folder as saved', shown?.[0] === String(saved.interval_min ?? 5) && shown?.[1] === (saved.captures_dir ?? ''), JSON.stringify(shown));
+  }
   check('nothing about the camera saved', (await camCfg()) === camBefore);
   await cmd('Page.navigate', { url: 'about:blank' });
   await sleep(300);

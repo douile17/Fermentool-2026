@@ -21,6 +21,7 @@
     throttle,
   } from '../../lib/camera.js';
   import { shortTime } from '../../lib/fmt.js';
+  import { bytesText } from '../../lib/timelapse.js';
   import { segThumb } from '../../lib/segthumb.js';
   import Icon from '../../components/Icon.svelte';
   import LiveImg from '../../components/LiveImg.svelte';
@@ -88,6 +89,9 @@
   let width = $state(1280);
   let height = $state(720);
   let fps = $state(15);
+  // the timelapse's: New run's default interval, the folder new ones go in
+  let intervalMin = $state(5);
+  let captures = $state('');
   let savedDevice = $state(null);
   let rev = $state(null);
 
@@ -98,6 +102,8 @@
       width = s?.width ?? 1280;
       height = s?.height ?? 720;
       fps = s?.live_fps ?? 15;
+      intervalMin = s?.interval_min ?? 5;
+      captures = s?.captures_dir ?? '';
       savedDevice = s?.device ? { name: s.device, index: s.device_index ?? 0 } : null;
       rev = c._rev ?? null;
       loaded = true;
@@ -198,6 +204,64 @@
       await sendFps(n);
       done(`Live view ${n} a second`, () => sendFps(before));
     });
+  }
+
+  // --- timelapse: New run's default interval, the captures folder ----------
+  // Applied on leaving the field (or Enter), like every other change here.
+  let capInfo = $state(null);
+  let folderErr = $state(null);
+  const loadCaptures = () =>
+    get('/api/camera/captures')
+      .then((c) => (capInfo = c))
+      .catch(() => {});
+  $effect(() => {
+    loadCaptures();
+  });
+
+  async function sendInterval(n) {
+    await post('/api/camera/interval', { interval_min: n });
+    intervalMin = n;
+    await refreshRev();
+  }
+  function pickInterval(input) {
+    const n = Math.round(Number(input.value));
+    const before = intervalMin;
+    if (!(n >= 1 && n <= 1440)) {
+      err = 'Timelapse every: 1 to 1440 minutes';
+      input.value = String(before);
+      return;
+    }
+    if (n === before) return;
+    act(async () => {
+      await sendInterval(n);
+      done(`Timelapse every ${n} min`, () => sendInterval(before));
+    });
+  }
+
+  async function sendFolder(folder) {
+    await post('/api/camera/captures', { folder });
+    captures = folder;
+    await refreshRev();
+    await loadCaptures();
+  }
+  // a folder refused stays in the field, orange, the reason under it
+  async function pickFolder(input) {
+    const folder = input.value.trim();
+    const before = captures;
+    if (folder === before) {
+      folderErr = null;
+      return;
+    }
+    busy = true;
+    err = null;
+    try {
+      await sendFolder(folder);
+      folderErr = null;
+      done(folder ? 'Images kept in the new folder' : 'Images kept in the default folder', () => sendFolder(before));
+    } catch (e) {
+      folderErr = e.message;
+    }
+    busy = false;
   }
 
   // --- picture controls ----------------------------------------------------
@@ -434,6 +498,26 @@
         <figcaption>What this camera sees now</figcaption>
       </figure>
     </div>
+
+    <div class="timelapse">
+      <h3>Timelapse</h3>
+      <div class="tl-fields">
+        <label class="field every"><span>Every (min)</span>
+          <input type="number" min="1" max="1440" step="1" value={intervalMin} disabled={busy}
+            aria-label="Timelapse every (minutes)" onchange={(e) => pickInterval(e.currentTarget)} />
+        </label>
+        <label class="field folder"><span>Images kept in</span>
+          <input type="text" value={captures} placeholder={capInfo?.folder ?? ''} disabled={busy} class:bad={folderErr}
+            aria-label="Images kept in" aria-invalid={folderErr ? 'true' : undefined}
+            onchange={(e) => pickFolder(e.currentTarget)} />
+        </label>
+      </div>
+      {#if folderErr}
+        <p class="field-note folder-err">{folderErr}</p>
+      {:else if capInfo}
+        <p class="field-note">{bytesText(capInfo.used_bytes)} used here{#if capInfo.free_bytes != null}, {bytesText(capInfo.free_bytes)} free on this disk{/if}</p>
+      {/if}
+    </div>
   </div>
 
   <p class="done" aria-live="polite">
@@ -506,6 +590,15 @@
   }
   .none { color: var(--video-muted); display: grid; }
   figcaption { font-size: 12px; color: var(--muted); }
+
+  .timelapse { display: flex; flex-direction: column; gap: var(--s-2); padding-top: var(--s-3); border-top: 1px solid var(--line); }
+  .timelapse h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); }
+  .tl-fields { display: flex; flex-wrap: wrap; gap: var(--s-3) var(--s-5); align-items: flex-end; }
+  .every input { width: 96px; }
+  .folder { flex: 1 1 320px; min-width: 0; }
+  .folder input { width: 100%; }
+  .folder input.bad { border-color: var(--measured); }
+  .folder-err { color: var(--warn-ink); }
 
   .done {
     margin: var(--s-4) 0 0; min-height: 22px;
