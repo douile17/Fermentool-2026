@@ -8,13 +8,14 @@
 
 use std::ptr;
 
-use jpeg_encoder::{ColorType, Encoder};
 use windows::core::{Error, Interface, PWSTR};
 use windows::Win32::Media::DirectShow::{IAMCameraControl, IAMVideoProcAmp};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 
-use crate::backend::{classify_error, Backend, BackendError, GLOBAL_SIZES, JPEG_QUALITY};
+use crate::backend::{
+    classify_error, encode_jpeg, still_of, Backend, BackendError, GLOBAL_SIZES, JPEG_QUALITY, STILL_DISCARD,
+};
 use crate::pixels::bgrx_to_rgb;
 use crate::protocol::{Control, ControlInfo, ControlValue, DeviceInfo, ErrorCode};
 
@@ -266,7 +267,8 @@ fn open_device(activate: IMFActivate, width: u32, height: u32) -> Result<Open, B
     }
 }
 
-fn grab_jpeg(open: &Open) -> Result<Vec<u8>, BackendError> {
+/// The next picture from the camera, RGB.
+fn read_rgb(open: &Open) -> Result<Vec<u8>, BackendError> {
     unsafe {
         let mut sample = None;
         for _ in 0..MAX_EMPTY_READS {
@@ -295,13 +297,12 @@ fn grab_jpeg(open: &Open) -> Result<Vec<u8>, BackendError> {
             bgrx_to_rgb(std::slice::from_raw_parts(data, len as usize), open.width, open.height, open.stride)
         };
         let _ = buffer.Unlock();
-        let rgb = rgb.ok_or((ErrorCode::Failed, format!("a picture of {len} bytes, too short")))?;
-        let mut jpeg = Vec::new();
-        Encoder::new(&mut jpeg, JPEG_QUALITY)
-            .encode(&rgb, open.width as u16, open.height as u16, ColorType::Rgb)
-            .map_err(|e| (ErrorCode::Failed, e.to_string()))?;
-        Ok(jpeg)
+        rgb.ok_or((ErrorCode::Failed, format!("a picture of {len} bytes, too short")))
     }
+}
+
+fn grab_jpeg(open: &Open) -> Result<Vec<u8>, BackendError> {
+    encode_jpeg(&read_rgb(open)?, open.width, open.height, JPEG_QUALITY)
 }
 
 impl Backend for MfBackend {
@@ -354,6 +355,14 @@ impl Backend for MfBackend {
     fn grab(&mut self) -> Result<Vec<u8>, BackendError> {
         let open = self.open.as_ref().ok_or((ErrorCode::Failed, "no camera is open".to_string()))?;
         grab_jpeg(open)
+    }
+
+    fn still(&mut self, quality: u8) -> Result<(Vec<u8>, Vec<u8>), BackendError> {
+        let open = self.open.as_ref().ok_or((ErrorCode::Failed, "no camera is open".to_string()))?;
+        for _ in 0..STILL_DISCARD {
+            read_rgb(open)?;
+        }
+        still_of(&read_rgb(open)?, open.width, open.height, quality)
     }
 
     fn controls(&mut self) -> Result<Vec<ControlInfo>, BackendError> {

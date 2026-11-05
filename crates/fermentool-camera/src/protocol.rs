@@ -13,6 +13,7 @@ pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
 const KIND_JSON: u8 = b'J';
 const KIND_FRAME: u8 = b'F';
+const KIND_STILL: u8 = b'S';
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
@@ -28,6 +29,8 @@ pub enum Request {
         controls: Vec<ControlValue>,
     },
     Grab,
+    /// One picture to keep: a JPEG at `quality` and its thumbnail.
+    Still { quality: u8 },
     /// The open camera's picture controls, as it has them now.
     Controls,
     /// Sets one control, answered by `Controls` as they are after it.
@@ -134,6 +137,9 @@ pub enum Reply {
     Opened { width: u32, height: u32 },
     /// A JPEG picture, sent as kind `F` with the bytes as payload.
     Frame(Vec<u8>),
+    /// A picture to keep and its thumbnail, sent as kind `S`: the JPEG's
+    /// length (4 bytes LE), the JPEG, then the thumbnail.
+    Still { jpeg: Vec<u8>, thumb: Vec<u8> },
     Controls(Vec<ControlInfo>),
     Closed,
     Error { code: ErrorCode, message: String },
@@ -196,6 +202,13 @@ pub fn read_request(r: &mut impl Read) -> io::Result<Option<Request>> {
 pub fn write_reply(w: &mut impl Write, r: &Reply) -> io::Result<()> {
     match r {
         Reply::Frame(jpeg) => write_message(w, KIND_FRAME, jpeg),
+        Reply::Still { jpeg, thumb } => {
+            let mut payload = Vec::with_capacity(4 + jpeg.len() + thumb.len());
+            payload.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
+            payload.extend_from_slice(jpeg);
+            payload.extend_from_slice(thumb);
+            write_message(w, KIND_STILL, &payload)
+        }
         other => write_message(w, KIND_JSON, &serde_json::to_vec(other).map_err(json_err)?),
     }
 }
@@ -204,6 +217,13 @@ pub fn read_reply(r: &mut impl Read) -> io::Result<Reply> {
     match read_message(r)? {
         None => Err(io::ErrorKind::UnexpectedEof.into()),
         Some((KIND_FRAME, p)) => Ok(Reply::Frame(p)),
+        Some((KIND_STILL, p)) => {
+            let bad = || io::Error::new(io::ErrorKind::InvalidData, "bad still");
+            let head: [u8; 4] = p.get(..4).ok_or_else(bad)?.try_into().map_err(|_| bad())?;
+            let len = u32::from_le_bytes(head) as usize;
+            let jpeg = p.get(4..4 + len).ok_or_else(bad)?.to_vec();
+            Ok(Reply::Still { jpeg, thumb: p[4 + len..].to_vec() })
+        }
         Some((KIND_JSON, p)) => serde_json::from_slice(&p).map_err(json_err),
         Some(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "unknown message kind")),
     }
@@ -278,6 +298,20 @@ mod tests {
             assert_eq!(Control::from_name(c.name()), Some(c));
         }
         assert_eq!(Control::from_name("zoom"), None);
+    }
+
+    #[test]
+    fn still_reply_round_trips() {
+        let jpeg: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let thumb: Vec<u8> = (0..5_000u32).map(|i| (i % 7) as u8).collect();
+        let still = Reply::Still { jpeg: jpeg.clone(), thumb: thumb.clone() };
+        let mut buf = Vec::new();
+        write_reply(&mut buf, &still).unwrap();
+        // length prefix, kind byte, jpeg length, both pictures
+        assert_eq!(buf.len(), 4 + 1 + 4 + 100_000 + 5_000);
+        assert_eq!(read_reply(&mut Cursor::new(buf)).unwrap(), still);
+        let r: Request = serde_json::from_str(r#"{"Still":{"quality":95}}"#).unwrap();
+        assert_eq!(r, Request::Still { quality: 95 });
     }
 
     #[test]

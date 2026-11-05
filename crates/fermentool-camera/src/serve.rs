@@ -30,6 +30,7 @@ pub fn serve(mut input: impl Read, mut output: impl Write, backend: &mut dyn Bac
                 })
             }
             Request::Grab => backend.grab().map(Reply::Frame),
+            Request::Still { quality } => backend.still(quality).map(|(jpeg, thumb)| Reply::Still { jpeg, thumb }),
             Request::Controls => backend.controls().map(Reply::Controls),
             Request::SetControl(v) => backend.set_control(&v).and_then(|()| backend.controls()).map(Reply::Controls),
             Request::Close => {
@@ -253,6 +254,25 @@ mod tests {
     }
 
     const GRACE: Duration = Duration::from_millis(100);
+
+    #[test]
+    fn still_returns_a_big_and_a_small_jpeg() {
+        let (_, replies) = run(&[open("Test pattern"), Request::Still { quality: 95 }]);
+        match &replies[1] {
+            Reply::Still { jpeg, thumb } => {
+                assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
+                assert_eq!(&thumb[..2], &[0xFF, 0xD8]);
+                assert!(thumb.len() < jpeg.len());
+            }
+            r => panic!("{r:?}"),
+        }
+    }
+
+    #[test]
+    fn still_before_open_is_an_error() {
+        let (_, replies) = run(&[Request::Still { quality: 95 }]);
+        assert!(matches!(&replies[0], Reply::Error { code: ErrorCode::Failed, .. }));
+    }
 
     #[test]
     fn the_bar_moves_between_frames() {

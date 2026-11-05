@@ -7,8 +7,34 @@ use crate::test_pattern::{TestPattern, TEST_PATTERN_NAME};
 /// Picture sizes the app offers, whatever a device reports beyond them.
 pub const GLOBAL_SIZES: [(u32, u32); 3] = [(640, 480), (1280, 720), (1920, 1080)];
 
-/// JPEG quality of every frame sent to the daemon.
+/// JPEG quality of every live frame sent to the daemon.
 pub const JPEG_QUALITY: u8 = 85;
+
+/// JPEG quality of a picture kept (a timelapse image): high, since the
+/// images may train a model, which would learn compression artefacts too.
+pub const STILL_QUALITY: u8 = 95;
+/// A kept picture's thumbnail: this wide, the height to the aspect.
+pub const THUMB_WIDTH: u32 = 320;
+pub const THUMB_QUALITY: u8 = 80;
+/// Frames read and dropped before a still: one queued while nobody grabbed
+/// may be old.
+pub const STILL_DISCARD: u32 = 5;
+
+/// A JPEG of `rgb` (`w` x `h`) at `quality`.
+pub fn encode_jpeg(rgb: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, BackendError> {
+    let mut jpeg = Vec::new();
+    jpeg_encoder::Encoder::new(&mut jpeg, quality)
+        .encode(rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+        .map_err(|e| (ErrorCode::Failed, e.to_string()))?;
+    Ok(jpeg)
+}
+
+/// A still from one RGB picture: the JPEG at `quality`, and its thumbnail.
+pub fn still_of(rgb: &[u8], w: u32, h: u32, quality: u8) -> Result<(Vec<u8>, Vec<u8>), BackendError> {
+    let jpeg = encode_jpeg(rgb, w, h, quality)?;
+    let (small, tw, th) = crate::pixels::downscale_rgb(rgb, w, h, THUMB_WIDTH);
+    Ok((jpeg, encode_jpeg(&small, tw, th, THUMB_QUALITY)?))
+}
 
 pub type BackendError = (ErrorCode, String);
 
@@ -18,6 +44,11 @@ pub trait Backend {
     /// size it really delivers.
     fn open(&mut self, device: &str, index: u32, width: u32, height: u32) -> Result<(u32, u32), BackendError>;
     fn grab(&mut self) -> Result<Vec<u8>, BackendError>;
+    /// A picture to keep ([`still_of`]): the JPEG at `quality`, its thumbnail.
+    fn still(&mut self, quality: u8) -> Result<(Vec<u8>, Vec<u8>), BackendError> {
+        let _ = quality;
+        Err((ErrorCode::Failed, "no camera is open".to_string()))
+    }
     /// The open camera's picture controls; none on a camera without any.
     fn controls(&mut self) -> Result<Vec<ControlInfo>, BackendError> {
         Ok(Vec::new())
@@ -81,6 +112,10 @@ impl Backend for Combined {
 
     fn grab(&mut self) -> Result<Vec<u8>, BackendError> {
         if self.pattern_open { self.pattern.grab() } else { self.real.grab() }
+    }
+
+    fn still(&mut self, quality: u8) -> Result<(Vec<u8>, Vec<u8>), BackendError> {
+        if self.pattern_open { self.pattern.still(quality) } else { self.real.still(quality) }
     }
 
     fn controls(&mut self) -> Result<Vec<ControlInfo>, BackendError> {

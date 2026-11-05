@@ -54,6 +54,8 @@
 - [ ] **Step 5: Bench check** (no run active, camera disconnected from the daemon first with `POST /api/camera/disconnect`, reconnected after): drive the debug helper on the Integrated Webcam (`Open`, `Still {95}` three times 10 s apart). Note the JPEG sizes at 1280 × 720 and the still's duration, and check that the second still shows the scene of its own moment (wave a hand). Write the figures under this task.
 - [ ] **Step 6: Commit** `feat(camera): helper stills, JPEG 95 with a thumbnail`.
 
+**Bench result (2026-11-05, Integrated Webcam, debug helper):** 1280 × 720 at 95: 254 to 256 kB, thumbnail 320 × 180 ~13.5 kB, 1.2 to 1.4 s a still (5 frames dropped first, debug build). 640 × 480: 98 kB, thumbnail 320 × 240 ~14 kB, 0.4 s. Task 8 takes 255 kB and 98 kB; 1920 × 1080 is not offered by these cameras, estimated at 2.25 × 255 kB.
+
 ### Task 2: The supervisor's still and the timelapse tables
 
 **Files:**
