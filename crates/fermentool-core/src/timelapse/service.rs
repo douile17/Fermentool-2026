@@ -84,6 +84,27 @@ impl From<&DaemonStatus> for RunView {
     }
 }
 
+/// Feeds `tl` a [`RunView`] of every status broadcast, on a tokio task (the
+/// daemon's and the API tests').
+pub fn follow_status(events: &tokio::sync::broadcast::Sender<DaemonStatus>, tl: &Timelapses) {
+    let mut rx = events.subscribe();
+    let sink = tl.status_sink();
+    tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match rx.recv().await {
+                Ok(st) => {
+                    if sink.send(RunView::from(&st)).is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// The thread's paces, shortened by tests.
 #[derive(Debug, Clone, Copy)]
 pub struct Timings {

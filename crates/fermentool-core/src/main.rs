@@ -309,28 +309,18 @@ async fn main() -> anyhow::Result<()> {
     let (camera, helper_missing) = build_camera(&config);
     // Timelapses: their own thread, connection and folder; the run reaches
     // them through the status broadcast, never the control thread.
+    let shared_config = Arc::new(RwLock::new(config.clone()));
     let timelapses = {
         let store = Store::open(&paths.db)?;
         let data_dir = paths.data_dir.clone();
-        fermentool_core::timelapse::Timelapses::spawn(store, camera.clone(), move || data_dir.join("captures"))
+        let cfg = Arc::clone(&shared_config);
+        // read at each new timelapse: Settings changes the folder of the next
+        fermentool_core::timelapse::Timelapses::spawn(store, camera.clone(), move || {
+            let dir = cfg.blocking_read().camera.as_ref().map(|c| c.captures_dir.clone()).unwrap_or_default();
+            fermentool_core::timelapse::files::captures_root(&dir, &data_dir)
+        })
     };
-    {
-        let mut rx = events.subscribe();
-        let sink = timelapses.status_sink();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(st) => {
-                        if sink.send(fermentool_core::timelapse::RunView::from(&st)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
+    fermentool_core::timelapse::follow_status(&events, &timelapses);
     let (stopping, _) = tokio::sync::watch::channel(false);
     let stopping = Arc::new(stopping);
     let state = AppState {
@@ -339,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
         helper_missing,
         stopping: Arc::clone(&stopping),
         control: Arc::clone(&control),
-        config: Arc::new(RwLock::new(config.clone())),
+        config: shared_config,
         config_path: Arc::new(paths.config.clone()),
         shutdown: Arc::clone(&shutdown),
         events,

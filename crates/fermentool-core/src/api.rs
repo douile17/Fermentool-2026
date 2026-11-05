@@ -161,6 +161,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/camera/control", post(camera_control))
         .route("/api/camera/controls/reset", post(camera_controls_reset))
         .route("/api/camera/fps", post(camera_fps))
+        .route("/api/camera/picture", post(camera_picture))
+        .route("/api/camera/captures", get(captures_info).post(captures_set))
+        .route("/api/camera/interval", post(camera_interval))
+        .route("/api/timelapses", post(timelapse_start))
+        .route("/api/timelapses/current", get(timelapse_current))
+        .route("/api/timelapses/current/stop", post(timelapse_stop))
+        .route("/api/timelapses/current/pause", post(timelapse_pause))
+        .route("/api/timelapses/current/resume", post(timelapse_resume))
+        .route("/api/timelapses/current/interval", post(timelapse_interval))
+        .route("/api/timelapses/{id}/images", get(timelapse_images))
+        .route("/api/timelapses/images/{id}/{which}", get(timelapse_image_file))
         .route("/api/camera/frame.jpg", get(camera_frame))
         .route("/api/camera/live", get(camera_live))
         .route("/api/notify/test", post(notify_test))
@@ -597,7 +608,44 @@ async fn notify_ack(State(s): State<AppState>, Json(a): Json<NotifyAck>) -> ApiR
     Ok(Json(json!({ "acknowledged": true })).into_response())
 }
 
-async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -> ApiResult<Response> {
+#[derive(Deserialize)]
+struct RunTimelapseReq {
+    interval_min: u32,
+}
+
+/// `POST /api/runs`: the run config, plus `timelapse: {interval_min}` to
+/// record one with it. A timelapse that cannot start never fails the run:
+/// the answer carries `timelapse_error`.
+async fn create_run(State(s): State<AppState>, Json(mut body): Json<serde_json::Value>) -> ApiResult<Response> {
+    let timelapse = body.as_object_mut().and_then(|o| o.remove("timelapse")).filter(|t| !t.is_null());
+    let timelapse: Option<RunTimelapseReq> = timelapse
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| ApiError::Bad(format!("timelapse: {e}")))?;
+    if let Some(t) = &timelapse {
+        if !crate::config::TIMELAPSE_MINUTES.contains(&t.interval_min) {
+            return Err(ApiError::Bad("timelapse interval must be 1 to 1440 minutes".into()));
+        }
+    }
+    let cfg: RunConfig = serde_json::from_value(body).map_err(|e| ApiError::Bad(e.to_string()))?;
+    let (kind, name) = (cfg.kind, cfg.name.clone());
+    let (status, mut answer) = start_run(&s, cfg).await?;
+    // calibration runs never have one
+    if let (Some(t), RunKind::Dosing) = (timelapse, kind) {
+        let id = answer["run_id"].as_i64().unwrap_or_default();
+        let tl = s.timelapses.clone();
+        let started = tokio::task::spawn_blocking(move || tl.start_with_run(id, name, i64::from(t.interval_min) * 60))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(e) = started {
+            tracing::warn!(run = id, "the run started without its timelapse: {e}");
+            answer["timelapse_error"] = json!(e);
+        }
+    }
+    Ok((status, Json(answer)).into_response())
+}
+
+async fn start_run(s: &AppState, mut cfg: RunConfig) -> ApiResult<(StatusCode, serde_json::Value)> {
     // A dosing run names who it belongs to, so its alerts reach them and no
     // one else: required once anyone is set up for notifications. The name
     // is stored as configured (its case), a calibration burst goes without.
@@ -625,7 +673,7 @@ async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Detail)?;
-    Ok((StatusCode::CREATED, Json(json!({ "run_id": id }))).into_response())
+    Ok((StatusCode::CREATED, json!({ "run_id": id })))
 }
 
 #[derive(serde::Deserialize)]
@@ -651,6 +699,11 @@ async fn clear_history(State(s): State<AppState>) -> ApiResult<Response> {
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
+    // the captures go with the history (the one recording stays)
+    let tl = s.timelapses.clone();
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || tl.delete_all()).await {
+        tracing::warn!("captures not all deleted: {e}");
+    }
     Ok(Json(json!({ "cleared": true })).into_response())
 }
 
@@ -663,6 +716,11 @@ async fn delete_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult
         .map_err(ApiError::Conflict)?;
     if !found {
         return Err(ApiError::NotFound);
+    }
+    // its timelapse's images go with it
+    let tl = s.timelapses.clone();
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || tl.delete_for_run(id)).await {
+        tracing::warn!(run = id, "the run's timelapse not deleted: {e}");
     }
     Ok(Json(json!({ "deleted": id })).into_response())
 }
@@ -691,6 +749,9 @@ async fn get_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Re
     let effective = run.effective_curve();
     let mut body = serde_json::to_value(&run).map_err(|e| ApiError::Conflict(e.to_string()))?;
     body["effective_curve"] = serde_json::to_value(effective).map_err(|e| ApiError::Conflict(e.to_string()))?;
+    // its timelapse, for Run again and the run detail
+    let tl = s.db.call(move |db| db.timelapse_of_run(id)).await?.map_err(|e| ApiError::Conflict(e.to_string()))?;
+    body["timelapse"] = json!(tl.map(|t| json!({ "id": t.id, "interval_s": t.interval_s, "images": t.images })));
     Ok(Json(body).into_response())
 }
 
@@ -1503,6 +1564,220 @@ async fn camera_fps(State(s): State<AppState>, Json(req): Json<CameraFpsReq>) ->
     s.config_rev.fetch_add(1, Ordering::SeqCst);
     s.camera.set_live_fps(req.fps);
     Ok(Json(json!({ "fps": req.fps })).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// timelapses
+// ---------------------------------------------------------------------------
+
+/// A timelapse request on the blocking pool, its refusal a 409.
+async fn timelapse_blocking<T: Send + 'static>(
+    s: &AppState,
+    f: impl FnOnce(crate::timelapse::Timelapses) -> Result<T, String> + Send + 'static,
+) -> ApiResult<T> {
+    let tl = s.timelapses.clone();
+    tokio::task::spawn_blocking(move || f(tl))
+        .await
+        .map_err(|e| ApiError::Conflict(format!("timelapse request failed: {e}")))?
+        .map_err(ApiError::Conflict)
+}
+
+fn interval_s(minutes: u32) -> ApiResult<i64> {
+    if crate::config::TIMELAPSE_MINUTES.contains(&minutes) {
+        Ok(i64::from(minutes) * 60)
+    } else {
+        Err(ApiError::Bad("timelapse interval must be 1 to 1440 minutes".into()))
+    }
+}
+
+/// `GET /api/timelapses/current`: `{timelapse, warn_free}`, the timelapse
+/// recording or paused (`null` without one) and whether its disk is under
+/// 1 GB free.
+async fn timelapse_current(State(s): State<AppState>) -> Response {
+    let cur = s.timelapses.current();
+    let warn_free = cur
+        .as_ref()
+        .and_then(|c| c.free_bytes)
+        .is_some_and(|f| f < crate::timelapse::files::WARN_FREE_BYTES);
+    Json(json!({ "timelapse": cur, "warn_free": warn_free })).into_response()
+}
+
+#[derive(Deserialize)]
+struct TimelapseStartReq {
+    name: String,
+    interval_min: u32,
+    #[serde(default)]
+    stop_after_h: Option<f64>,
+}
+
+/// `POST /api/timelapses {name, interval_min, stop_after_h?}`: one on its
+/// own (no run going).
+async fn timelapse_start(State(s): State<AppState>, Json(req): Json<TimelapseStartReq>) -> ApiResult<Response> {
+    let every = interval_s(req.interval_min)?;
+    if req.name.trim().is_empty() {
+        return Err(ApiError::Bad("give the timelapse a name".into()));
+    }
+    let stop_after_s = match req.stop_after_h {
+        None => None,
+        Some(h) if h.is_finite() && (0.1..=1000.0).contains(&h) => Some((h * 3600.0).round() as i64),
+        Some(_) => return Err(ApiError::Bad("stop after must be 0.1 to 1000 h".into())),
+    };
+    let name = req.name.trim().to_string();
+    let id = timelapse_blocking(&s, move |tl| tl.start_standalone(name, every, stop_after_s)).await?;
+    Ok(Json(json!({ "id": id })).into_response())
+}
+
+async fn timelapse_stop(State(s): State<AppState>) -> ApiResult<Response> {
+    timelapse_blocking(&s, |tl| tl.stop()).await?;
+    Ok(Json(json!({ "stopped": true })).into_response())
+}
+
+async fn timelapse_pause(State(s): State<AppState>) -> ApiResult<Response> {
+    timelapse_blocking(&s, |tl| tl.pause()).await?;
+    Ok(Json(json!({ "paused": true })).into_response())
+}
+
+async fn timelapse_resume(State(s): State<AppState>) -> ApiResult<Response> {
+    timelapse_blocking(&s, |tl| tl.resume()).await?;
+    Ok(Json(json!({ "resumed": true })).into_response())
+}
+
+#[derive(Deserialize)]
+struct IntervalReq {
+    interval_min: u32,
+}
+
+/// `POST /api/timelapses/current/interval {interval_min}`: from the next
+/// image on.
+async fn timelapse_interval(State(s): State<AppState>, Json(req): Json<IntervalReq>) -> ApiResult<Response> {
+    let every = interval_s(req.interval_min)?;
+    timelapse_blocking(&s, move |tl| tl.set_interval(every)).await?;
+    Ok(Json(json!({ "interval_s": every })).into_response())
+}
+
+/// `POST /api/camera/picture`: one image now, into the timelapse recording
+/// or today's pictures.
+async fn camera_picture(State(s): State<AppState>) -> ApiResult<Response> {
+    let id = timelapse_blocking(&s, |tl| tl.take_picture()).await?;
+    Ok(Json(json!({ "image_id": id })).into_response())
+}
+
+#[derive(Deserialize)]
+struct ImagesQuery {
+    #[serde(default)]
+    before: Option<i64>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `GET /api/timelapses/{id}/images?before=&limit=`: newest first, no file
+/// paths (images are fetched by id).
+async fn timelapse_images(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ImagesQuery>,
+) -> ApiResult<Response> {
+    let limit = q.limit.unwrap_or(8).clamp(1, 200);
+    let rows = s
+        .db
+        .call(move |db| db.images(id, q.before, limit))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    let list: Vec<_> = rows
+        .iter()
+        .map(|i| json!({ "id": i.id, "slot": i.slot, "taken_at": i.taken_at, "elapsed_s": i.elapsed_s, "bytes": i.bytes }))
+        .collect();
+    Ok(Json(list).into_response())
+}
+
+/// `GET /api/timelapses/images/{id}/full.jpg` or `/thumb.jpg`: the file,
+/// found from the image's row only.
+async fn timelapse_image_file(State(s): State<AppState>, Path((id, which)): Path<(i64, String)>) -> ApiResult<Response> {
+    let thumb = match which.as_str() {
+        "full.jpg" => false,
+        "thumb.jpg" => true,
+        _ => return Err(ApiError::NotFound),
+    };
+    let path = s
+        .db
+        .call(move |db| -> Result<Option<std::path::PathBuf>, crate::store::StoreError> {
+            let Some(img) = db.image(id)? else { return Ok(None) };
+            let Some(t) = db.timelapse(img.timelapse_id)? else { return Ok(None) };
+            let folder = std::path::PathBuf::from(t.folder);
+            Ok(Some(if thumb { folder.join("thumbs").join(img.thumb) } else { folder.join(img.file) }))
+        })
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .map_err(|_| ApiError::NotFound)?;
+    Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "max-age=31536000, immutable")], bytes)
+        .into_response())
+}
+
+/// The data dir new timelapses go under when `captures_dir` is empty.
+fn captures_root(s: &AppState, dir: &str) -> std::path::PathBuf {
+    crate::timelapse::files::captures_root(dir, &s.about.data_dir)
+}
+
+/// `GET /api/camera/captures`: `{folder, used_bytes, free_bytes}`, the
+/// folder new timelapses go in, what the timelapses kept there take, and the
+/// free space on its disk.
+async fn captures_info(State(s): State<AppState>) -> ApiResult<Response> {
+    let dir = s.config.read().await.camera.as_ref().map(|c| c.captures_dir.clone()).unwrap_or_default();
+    let root = captures_root(&s, &dir);
+    let under = root.clone();
+    let used: i64 = s
+        .db
+        .call(move |db| db.all_timelapses())
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .iter()
+        .filter(|t| std::path::Path::new(&t.folder).starts_with(&under))
+        .map(|t| t.bytes)
+        .sum();
+    let probe = root.clone();
+    let free = tokio::task::spawn_blocking(move || crate::timelapse::files::free_bytes(&probe)).await.ok().flatten();
+    Ok(Json(json!({ "folder": root.to_string_lossy(), "used_bytes": used, "free_bytes": free })).into_response())
+}
+
+#[derive(Deserialize)]
+struct CapturesReq {
+    folder: String,
+}
+
+/// `POST /api/camera/captures {folder}`: checked writable (created if
+/// missing), then saved as `[camera] captures_dir`; empty: the default.
+async fn captures_set(State(s): State<AppState>, Json(req): Json<CapturesReq>) -> ApiResult<Response> {
+    let folder = req.folder.trim().to_string();
+    let root = captures_root(&s, &folder);
+    tokio::task::spawn_blocking(move || crate::timelapse::files::ensure_writable(&root))
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .map_err(ApiError::Conflict)?;
+    let saved = folder.clone();
+    save_camera(&s, move |c| c.captures_dir = saved).await?;
+    Ok(Json(json!({ "folder": folder })).into_response())
+}
+
+/// `POST /api/camera/interval {interval_min}`: New run's default interval.
+async fn camera_interval(State(s): State<AppState>, Json(req): Json<IntervalReq>) -> ApiResult<Response> {
+    interval_s(req.interval_min)?;
+    save_camera(&s, move |c| c.interval_min = req.interval_min).await?;
+    Ok(Json(json!({ "interval_min": req.interval_min })).into_response())
+}
+
+/// Changes `[camera]` (created when absent) and writes the file.
+async fn save_camera(s: &AppState, change: impl FnOnce(&mut crate::config::CameraConfig)) -> ApiResult<()> {
+    let mut current = s.config.write().await;
+    let mut new = current.clone();
+    change(new.camera.get_or_insert_with(Default::default));
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    Ok(())
 }
 
 /// `GET /api/camera/frame.jpg`: the latest picture.
@@ -2894,6 +3169,156 @@ mod tests {
         }
         assert_eq!(cam.viewers(), 0, "viewer not released");
         cam.shutdown();
+    }
+
+    /// A state whose timelapses share its journal, follow its run statuses
+    /// and use a connected fake camera; its captures go under `root`.
+    async fn timelapse_state(root: std::path::PathBuf) -> AppState {
+        let db = test_db();
+        let mut st = test_state_at(&db);
+        st.camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, Some(camera_want()));
+        let cam = st.camera.clone();
+        assert!(
+            wait_async(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { .. })).await
+        );
+        st.timelapses =
+            crate::timelapse::Timelapses::spawn(crate::store::Store::open(&db).unwrap(), st.camera.clone(), move || root.clone());
+        crate::timelapse::follow_status(&st.events, &st.timelapses);
+        st
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ft-api-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timelapse_routes_start_stop_and_list_images() {
+        let root = scratch_dir("tlroutes");
+        let app = router(timelapse_state(root.join("captures")).await);
+        let res = app.clone().oneshot(get("/api/timelapses/current")).await.unwrap();
+        assert!(body_json(res).await["timelapse"].is_null());
+        let bad = json!({ "name": "Night", "interval_min": 0 });
+        assert_eq!(app.clone().oneshot(post_json("/api/timelapses", bad)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        let ok = json!({ "name": "Night", "interval_min": 5, "stop_after_h": 2 });
+        let res = app.clone().oneshot(post_json("/api/timelapses", ok)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let id = body_json(res).await["id"].as_i64().unwrap();
+        let mut cur = json!(null);
+        for _ in 0..50 {
+            cur = body_json(app.clone().oneshot(get("/api/timelapses/current")).await.unwrap()).await;
+            if cur["timelapse"]["images"].as_i64() == Some(1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(cur["timelapse"]["images"], 1, "{cur}");
+        assert_eq!(cur["timelapse"]["interval_s"], 300);
+        assert!(cur["timelapse"]["ends_at"].is_string());
+        assert!(cur["warn_free"].is_boolean());
+        let res = app.clone().oneshot(get(&format!("/api/timelapses/{id}/images"))).await.unwrap();
+        let list = body_json(res).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert!(list[0].get("file").is_none(), "no path leaves the daemon: {list}");
+        let image = list[0]["id"].as_i64().unwrap();
+        let full = app.clone().oneshot(get(&format!("/api/timelapses/images/{image}/full.jpg"))).await.unwrap();
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(full.headers()[header::CONTENT_TYPE], "image/jpeg");
+        use http_body_util::BodyExt;
+        assert_eq!(full.into_body().collect().await.unwrap().to_bytes().as_ref(), [0xFF, 0xD8, 95]);
+        let thumb = app.clone().oneshot(get(&format!("/api/timelapses/images/{image}/thumb.jpg"))).await.unwrap();
+        assert_eq!(thumb.into_body().collect().await.unwrap().to_bytes().as_ref(), [0xFF, 0xD8, 1]);
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/interval", json!({ "interval_min": 10 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/pause", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.clone().oneshot(post_json("/api/camera/picture", json!({}))).await.unwrap();
+        assert!(body_json(res).await["image_id"].is_i64());
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/stop", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cur = body_json(app.clone().oneshot(get("/api/timelapses/current")).await.unwrap()).await;
+        assert!(cur["timelapse"].is_null());
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/stop", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn image_files_are_served_by_id_only() {
+        let app = router(test_state());
+        for path in ["/api/timelapses/images/999/full.jpg", "/api/timelapses/images/1/other.jpg"] {
+            assert_eq!(app.clone().oneshot(get(path)).await.unwrap().status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        let res = app.oneshot(get("/api/timelapses/images/..%2F..%2Fconfig.toml/full.jpg")).await.unwrap();
+        assert!(matches!(res.status(), StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND), "{}", res.status());
+    }
+
+    fn timelapse_run(interval_min: u32) -> serde_json::Value {
+        json!({ "name": "with images", "control_var": "rpm", "direction": "cw", "pump_addr": 1,
+                "curve": linear_curve(), "timelapse": { "interval_min": interval_min } })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_start_with_a_timelapse_links_it_and_deleting_the_run_deletes_it() {
+        let root = scratch_dir("tlrun");
+        let st = timelapse_state(root.join("captures")).await;
+        let tl = st.timelapses.clone();
+        let app = router(st);
+        let res = app.clone().oneshot(post_json("/api/runs", timelapse_run(5))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_json(res).await;
+        assert!(body["timelapse_error"].is_null(), "{body}");
+        let id = body["run_id"].as_i64().unwrap();
+        let cur = tl.current().unwrap();
+        assert_eq!((cur.run_id, cur.interval_s), (Some(id), 300));
+        let folder = std::path::PathBuf::from(&cur.folder);
+        assert!(folder.is_dir());
+        let run = body_json(app.clone().oneshot(get(&format!("/api/runs/{id}"))).await.unwrap()).await;
+        assert_eq!(run["timelapse"]["interval_s"], 300, "{run}");
+        app.clone().oneshot(post_json(&format!("/api/runs/{id}/stop"), json!({}))).await.unwrap();
+        assert!(wait_async(Duration::from_secs(8), || tl.current().is_none()).await, "{:?}", tl.current());
+        let res = app.clone().oneshot(Request::delete(format!("/api/runs/{id}")).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!folder.exists(), "the run's images go with it");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_timelapse_failure_never_fails_the_run_start() {
+        let root = scratch_dir("tlfail");
+        // the captures folder is a file: the timelapse cannot start
+        std::fs::write(root.join("captures"), b"x").unwrap();
+        let app = router(timelapse_state(root.join("captures")).await);
+        let res = app.clone().oneshot(post_json("/api/runs", timelapse_run(5))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_json(res).await;
+        assert!(body["timelapse_error"].as_str().unwrap().contains("cannot be written"), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn captures_folder_refuses_an_unwritable_path() {
+        let dir = scratch_dir("tlcaptures");
+        let mut st = test_state();
+        st.config_path = Arc::new(dir.join("config.toml"));
+        let cfg = Arc::clone(&st.config);
+        let app = router(st);
+        std::fs::write(dir.join("afile"), b"x").unwrap();
+        let bad = json!({ "folder": dir.join("afile").to_string_lossy() });
+        let res = app.clone().oneshot(post_json("/api/camera/captures", bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert!(body_json(res).await["error"].as_str().unwrap().starts_with("This folder cannot be written to"));
+        let good = dir.join("imgs").to_string_lossy().into_owned();
+        let res = app.clone().oneshot(post_json("/api/camera/captures", json!({ "folder": good }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(cfg.read().await.camera.as_ref().unwrap().captures_dir, good);
+        let info = body_json(app.clone().oneshot(get("/api/camera/captures")).await.unwrap()).await;
+        assert_eq!(info["folder"], json!(good));
+        assert_eq!(info["used_bytes"], 0);
+        let res = app.clone().oneshot(post_json("/api/camera/interval", json!({ "interval_min": 2000 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = app.clone().oneshot(post_json("/api/camera/interval", json!({ "interval_min": 10 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(cfg.read().await.camera.as_ref().unwrap().interval_min, 10);
     }
 
     #[tokio::test]

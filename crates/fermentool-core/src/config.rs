@@ -83,6 +83,11 @@ pub struct CameraConfig {
     pub test_pattern: bool,
     /// Pictures a second while someone watches the live view.
     pub live_fps: u32,
+    /// A new run's timelapse: one image this often, minutes (New run's default).
+    pub interval_min: u32,
+    /// Where new timelapses go; empty: the data dir's `captures`. A
+    /// timelapse keeps the folder it started in.
+    pub captures_dir: String,
     /// The picture controls set from Settings, per camera name, then per
     /// control name (`exposure`, `white_balance`...): set again at each
     /// connect, since a webcam unplugged or a PC restarted may go back to its
@@ -102,6 +107,9 @@ pub struct SavedControl {
 /// Live view pictures a second: the lowest and the highest accepted.
 pub const CAMERA_FPS: std::ops::RangeInclusive<u32> = 1..=15;
 
+/// A timelapse's interval, minutes: the lowest and the highest accepted.
+pub const TIMELAPSE_MINUTES: std::ops::RangeInclusive<u32> = 1..=1440;
+
 impl Default for CameraConfig {
     fn default() -> Self {
         Self {
@@ -112,6 +120,8 @@ impl Default for CameraConfig {
             enabled: true,
             test_pattern: false,
             live_fps: 15,
+            interval_min: 5,
+            captures_dir: String::new(),
             controls: BTreeMap::new(),
         }
     }
@@ -119,7 +129,17 @@ impl Default for CameraConfig {
 
 impl CameraConfig {
     pub fn problem(&self) -> Option<String> {
-        self.size_problem().or_else(|| self.fps_problem())
+        self.size_problem().or_else(|| self.fps_problem()).or_else(|| self.interval_problem())
+    }
+
+    fn interval_problem(&self) -> Option<String> {
+        (!TIMELAPSE_MINUTES.contains(&self.interval_min)).then(|| {
+            format!(
+                "timelapse interval must be {} to {} minutes",
+                TIMELAPSE_MINUTES.start(),
+                TIMELAPSE_MINUTES.end()
+            )
+        })
     }
 
     fn size_problem(&self) -> Option<String> {
@@ -798,6 +818,10 @@ impl Config {
             c.live_fps = 15;
             fixed.push("config.toml: camera.live_fps out of range, 15 used".to_string());
         }
+        if let Some(c) = self.camera.as_mut().filter(|c| c.interval_problem().is_some()) {
+            c.interval_min = 5;
+            fixed.push("config.toml: camera.interval_min out of range, 5 used".to_string());
+        }
         fixed
     }
 
@@ -868,6 +892,24 @@ device = \"Cam\"
             ]
         );
         assert!(back.controls_for("Other").is_empty());
+    }
+
+    #[test]
+    fn camera_interval_and_captures_dir_round_trip() {
+        let c = Config::from_toml("[camera]\ndevice = \"X\"\n").unwrap();
+        let cam = c.camera.as_ref().unwrap();
+        assert_eq!((cam.interval_min, cam.captures_dir.as_str()), (5, ""));
+        let c = Config::from_toml("[camera]\ndevice = \"X\"\ninterval_min = 15\ncaptures_dir = 'D:\\captures'\n").unwrap();
+        let back = Config::from_toml(&c.to_toml().unwrap()).unwrap().camera.unwrap();
+        assert_eq!((back.interval_min, back.captures_dir.as_str()), (15, "D:\\captures"));
+    }
+
+    #[test]
+    fn interval_out_of_range_is_refused_then_fixed() {
+        let mut c = Config::from_toml("[camera]\ndevice = \"X\"\ninterval_min = 0\n").unwrap();
+        assert_eq!(c.validate().unwrap_err(), "timelapse interval must be 1 to 1440 minutes");
+        assert_eq!(c.sanitize(), vec!["config.toml: camera.interval_min out of range, 5 used".to_string()]);
+        assert_eq!(c.camera.unwrap().interval_min, 5);
     }
 
     #[test]
