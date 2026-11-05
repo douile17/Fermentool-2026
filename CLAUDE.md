@@ -598,7 +598,13 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   balance, gain, power line 13) cast from the media source (`Knobs`,
   `mf_backend.rs`); protocol `Controls` / `SetControl`, `Open { controls }`.
   Only what the camera reports is listed: the HUE has no exposure nor white
-  balance, the Integrated Webcam has both with auto. **In auto, `Get`
+  balance, the Integrated Webcam has both with auto. **The HUE accepts and
+  reads back every control but its picture never changes** (measured
+  2026-11-05: saturation 1 to 128, brightness -64 to 64, at once and after a
+  reopen, no effect beyond the scene's own drift), while the Integrated
+  Webcam reacts fully (saturation 0 grey, brightness 64 near white): a
+  control that "does nothing" is the camera's firmware, check it on another
+  camera before suspecting the code. **In auto, `Get`
   returns the last fixed value, not the camera's choice**: the UI says only
   "Auto" there. The driver keeps a value across processes; the daemon still
   sets the saved ones at each open (`[camera.controls."<device>"]`, by
