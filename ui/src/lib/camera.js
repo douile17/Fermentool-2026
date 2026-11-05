@@ -35,7 +35,7 @@ export function cameraLine(cam) {
 /** The live view is worth opening only while the camera is connected (lost,
  *  the stream would repeat its last picture as if live) and the page is
  *  `visible` (`document.visibilityState`): a hidden tab or a minimised
- *  window would keep the camera grabbing at 5 fps for days. */
+ *  window would keep the camera grabbing at 15 fps for days. */
 export function liveShown(cam, visible) {
   return cam?.state === 'connected' && visible === true;
 }
@@ -44,7 +44,7 @@ export function liveShown(cam, visible) {
  *  before the daemon must count it as a viewer and send pictures. */
 export const LIVE_GRACE_MS = 5000;
 /** A picture older than this, while a viewer is counted, is a frozen one
- *  (the daemon grabs at 5 fps for a viewer). */
+ *  (the daemon grabs at 15 fps for a viewer). */
 const FRAME_STALE_MS = 4000;
 
 /** Is a shown live view really live: `'live'`, `'starting'` or `'stale'`?

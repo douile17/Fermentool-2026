@@ -45,7 +45,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Grabs per second while someone watches the live view. None without.
-pub const LIVE_FPS: u32 = 5;
+pub const LIVE_FPS: u32 = 15;
 
 /// Another program holds the camera: asked again this often, never in a
 /// tight loop (each attempt is a new helper process).
@@ -1183,7 +1183,8 @@ mod tests {
         drop(guard);
         assert_eq!(cam.viewers(), 0);
         let grabs = log.seen(is_grab).iter().filter(|(_, at)| *at >= t0 && *at <= t1).count();
-        assert!((4..=6).contains(&grabs), "{grabs} grabs in 1 s");
+        // Windows rounds short sleeps up (~15 ms): 15 fps asked is ~12 to 13.
+        assert!((LIVE_FPS * 2 / 3..=LIVE_FPS + 1).contains(&(grabs as u32)), "{grabs} grabs in 1 s");
         assert!(cam.latest().unwrap().seq > first);
         // Without a viewer the grabs stop.
         std::thread::sleep(Duration::from_millis(300));

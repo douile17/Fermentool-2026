@@ -4,7 +4,7 @@
 
 ### Caméra, vue en direct (3 novembre)
 
-- Une page Caméra montre l'image de la webcam en direct (5 images par
+- Une page Caméra montre l'image de la webcam en direct (15 images par
   seconde, seulement tant qu'une fenêtre la regarde), et Settings, Caméra
   choisit la webcam. L'image est prise par un petit programme à part,
   `fermentool-camera.exe`, livré dans l'installateur à côté du daemon, à

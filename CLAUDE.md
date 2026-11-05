@@ -583,7 +583,9 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   next to `fermentool-core.exe` in `target\release` (the daemon looks for it
   there; a deploy of `fermentool-core` alone reports "Camera helper missing").
   The installer ships it as a sidecar (`copy-sidecar.ps1`).
-- The live view grabs only while a viewer is counted (`LIVE_FPS` 5). Every
+- The live view grabs only while a viewer is counted (`LIVE_FPS` 15; 5 until 2026-11-05: 4 min at
+  15 left the balance reads as they were, `scale_poll` p99 58 to 74 ms
+  against 65 to 82 at 5 and 41 to 69 with no viewer). Every
   live `<img>` is `components/LiveImg.svelte` (`liveSrc`), so an unmounted
   view closes its stream, and it is mounted only while the page is visible
   (`liveShown(cam, visible)`): a hidden tab stops the grabbing.
