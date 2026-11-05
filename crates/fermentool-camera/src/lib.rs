@@ -3,7 +3,8 @@
 
 pub mod backend;
 #[cfg(feature = "capture")]
-pub mod nokhwa_backend;
+pub mod mf_backend;
+pub mod pixels;
 pub mod protocol;
 pub mod serve;
 pub mod test_pattern;

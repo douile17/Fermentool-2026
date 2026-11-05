@@ -11,6 +11,11 @@
   priorité réduite : il s'arrête avec le daemon et ne touche jamais à la
   pompe ni à la balance. Webcam déjà ouverte par une autre application :
   la bande le dit (« Camera in use »).
+- La « HUE HD Camera » marche (5 novembre) : avec la bibliothèque caméra
+  d'avant (nokhwa), le programme caméra plantait 3 à 5 s après chaque
+  ouverture, d'où une image qui se déconnectait et revenait sans arrêt,
+  alors que l'application Caméra de Windows la montrait bien. Il lit
+  maintenant la webcam par Media Foundation directement.
 
 ### Correction après un refill (2 novembre)
 

@@ -5,7 +5,7 @@ use std::io::{BufWriter, Write};
 use std::time::Duration;
 
 use fermentool_camera::backend::{Backend, Combined};
-use fermentool_camera::nokhwa_backend::NokhwaBackend;
+use fermentool_camera::mf_backend::MfBackend;
 use fermentool_camera::serve::{forward_input, serve};
 
 /// After stdin closes, how long a `Quit` sent just before has to end the
@@ -15,9 +15,9 @@ const EOF_GRACE: Duration = Duration::from_millis(300);
 fn main() {
     let test_pattern = std::env::args().any(|a| a == "--test-pattern");
     let mut backend: Box<dyn Backend> = if test_pattern {
-        Box::new(Combined::new(Box::new(NokhwaBackend::default())))
+        Box::new(Combined::new(Box::new(MfBackend::default())))
     } else {
-        Box::new(NokhwaBackend::default())
+        Box::new(MfBackend::default())
     };
     // The daemon closing our stdin (it quit, crashed or was killed) ends
     // this process within EOF_GRACE, even with a grab stuck in the driver.

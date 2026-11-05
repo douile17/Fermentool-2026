@@ -565,9 +565,17 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   daemon, and it exits on stdin EOF).
 - **No camera call on the control thread, ever.** Same rule as the serial
   port: the pump and the balance come first, a webcam must never delay them.
-- **The helper process is the unit of release.** nokhwa's Close does not free
-  the webcam and dropping a `Camera` crashes at `MFShutdown`, so the helper
-  leaks it on purpose and the daemon quits and respawns the helper to let go.
+- **The helper reads the webcam through Media Foundation directly**
+  (`mf_backend.rs`: a synchronous source reader, RGB32 out, converted by
+  Media Foundation). nokhwa was dropped on 2026-11-05: the "HUE HD Camera"
+  crashed it in `FrameServerClient.dll` 3 to 5 s after every open (seen in
+  the Windows event log, Application, event 1000), while the Windows
+  Camera app showed it fine; nokhwa also never released a webcam and
+  crashed when dropping one. Test a camera outside the daemon by driving
+  the helper over its pipe (`Open`, then `Grab` 5 times a second).
+- **The helper process is the unit of release.** The daemon quits and
+  respawns the helper to let go of a webcam (a rule from the nokhwa days,
+  kept: an exiting process frees the device whatever the driver does).
   A webcam in use by another app shows up as HRESULT 0xC00D3704 at the first
   frame, not at open.
 - **Build the helper with the daemon**: `cargo build --release -p

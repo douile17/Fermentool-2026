@@ -18,8 +18,8 @@ pub trait Backend {
     /// size it really delivers.
     fn open(&mut self, device: &str, index: u32, width: u32, height: u32) -> Result<(u32, u32), BackendError>;
     fn grab(&mut self) -> Result<Vec<u8>, BackendError>;
-    /// Stops streaming; harmless when none is open. The nokhwa backend cannot
-    /// release the device itself: that happens when the helper process exits.
+    /// Stops streaming; harmless when none is open. The daemon still counts
+    /// on the helper process exiting to free the device.
     fn close(&mut self);
 }
 
