@@ -625,9 +625,10 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   frames dropped first). Run-linked: started by `POST /api/runs`'s
   `timelapse: {interval_min}` after the run starts (a failure never fails
   the start, `timelapse_error`), images only while the run is driven, none
-  while it awaits Resume (not missed), ended once the run is neither for
-  `run_gone_grace` (3 s: a status queued from before the start must not end
-  it). Standalone: from the Camera page, resumed after a restart. Slot k due
+  while it awaits Resume (not missed), ended at the first status without
+  the run once it has been seen driven (Stop ends it within a second);
+  before that, only after `run_gone_grace` (3 s: a status queued from
+  before the start must not end it). Standalone: from the Camera page, resumed after a restart. Slot k due
   `anchor + (k - anchor_slot) * interval` (`schedule.rs`, 2 s grace in
   fractions of a second); `last_slot` is stored, so a restart counts the
   slots it missed once. Camera lost: slots missed, `camera_lost` /

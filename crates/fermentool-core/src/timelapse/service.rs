@@ -292,6 +292,9 @@ struct Live {
     awaiting: bool,
     /// Since when its run is neither driven nor awaiting resume.
     gone_since: Option<Instant>,
+    /// Its run has been seen driven since this thread took it on: a status
+    /// without it now is the run's end, not one from before its start.
+    run_seen: bool,
     /// The last still failed: waiting for the camera.
     camera_lost: bool,
     /// Paused for the disk or the folder: when to look again.
@@ -353,7 +356,7 @@ impl<S: StillSource> Svc<S> {
         match self.store.open_timelapse() {
             Ok(Some(row)) => {
                 tracing::info!(id = row.id, name = %row.name, "timelapse resumes after a restart");
-                self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false, recheck_at: None });
+                self.live = Some(Live { row, awaiting: false, gone_since: None, run_seen: false, camera_lost: false, recheck_at: None });
             }
             Ok(None) => {}
             Err(e) => tracing::error!("cannot read the open timelapse: {e}"),
@@ -412,6 +415,7 @@ impl<S: StillSource> Svc<S> {
                 tracing::info!(id = live.row.id, "run resumed: timelapse goes on");
             }
             live.gone_since = None;
+            live.run_seen = true;
         } else if v.active.is_none() && v.pending_recovery {
             if !live.awaiting {
                 tracing::info!(id = live.row.id, "run awaits resume: timelapse waits");
@@ -419,8 +423,10 @@ impl<S: StillSource> Svc<S> {
             live.awaiting = true;
             live.gone_since = None;
         } else {
+            // Seen driven, then gone: the run was stopped, end now. Never
+            // seen yet: the status may predate the run, wait the grace.
             let since = *live.gone_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= self.t.run_gone_grace {
+            if live.run_seen || since.elapsed() >= self.t.run_gone_grace {
                 self.end("its run ended");
             }
         }
@@ -753,7 +759,7 @@ impl<S: StillSource> Svc<S> {
         })?;
         self.event(Some(run_id), "timelapse_start", Some(format!("every {interval_s} s, in {}", row.folder)));
         let id = row.id;
-        self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false, recheck_at: None });
+        self.live = Some(Live { row, awaiting: false, gone_since: None, run_seen: false, camera_lost: false, recheck_at: None });
         Ok(id)
     }
 
@@ -781,7 +787,7 @@ impl<S: StillSource> Svc<S> {
             stop_at: stop_after_s.map(|s| now + SignedDuration::from_secs(s)),
         })?;
         let id = row.id;
-        self.live = Some(Live { row, awaiting: false, gone_since: None, camera_lost: false, recheck_at: None });
+        self.live = Some(Live { row, awaiting: false, gone_since: None, run_seen: false, camera_lost: false, recheck_at: None });
         Ok(id)
     }
 

@@ -184,6 +184,39 @@ fn run_linked_starts_with_the_run_and_ends_with_it() {
 }
 
 #[test]
+fn a_run_seen_driven_then_stopped_ends_its_timelapse_at_once() {
+    let fx = Fixture::new("stopnow");
+    let run = fx.store().insert_run(&crate::store::tests::sample_run()).unwrap();
+    let root = fx.root.clone();
+    // a grace far longer than the wait below: only the stop itself can end it
+    let t = Timings { run_gone_grace: Duration::from_secs(30), ..quick() };
+    let tl = Timelapses::spawn_with(fx.store(), FakeCam::on(), move || root.clone(), t);
+    let feed = tl.status_sink();
+    let id = tl.start_with_run(run, "Run 8".into(), 60).unwrap();
+    feed.send(driving(run, 0.0)).unwrap();
+    assert!(wait_for(Duration::from_secs(3), || images(&tl) >= 1));
+    feed.send(gone()).unwrap();
+    assert!(wait_for(Duration::from_secs(1), || tl.current().is_none()), "still recording after the run's stop");
+    assert_eq!(fx.store().timelapse(id).unwrap().unwrap().state, TimelapseState::Ended);
+    tl.shutdown();
+}
+
+#[test]
+fn a_status_from_before_the_run_does_not_end_its_timelapse() {
+    let fx = Fixture::new("stalestatus");
+    let tl = fx.spawn(FakeCam::on());
+    let feed = tl.status_sink();
+    // queued before the start: the run is not in it yet
+    feed.send(gone()).unwrap();
+    tl.start_with_run(9, "Run 9".into(), 60).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    feed.send(driving(9, 0.5)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(tl.current().is_some(), "ended by a status older than its run");
+    tl.shutdown();
+}
+
+#[test]
 fn awaiting_resume_pauses_without_missing() {
     let fx = Fixture::new("awaiting");
     let tl = fx.spawn(FakeCam::on());
