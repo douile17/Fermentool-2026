@@ -16,7 +16,7 @@
   import { sizeParts, tubeLabel } from '../lib/tubesize.js';
   import { downloadSettings, readSettings } from '../lib/runfile.js';
   import { segThumb } from '../lib/segthumb.js';
-  import { estimate, estimateText } from '../lib/timelapse.js';
+  import { bytesText, countText, estimate, INTERVAL_CHOICES, intervalChoice, intervalWords, tlSummary } from '../lib/timelapse.js';
   import { liveShown } from '../lib/camera.js';
   import LiveImg from '../components/LiveImg.svelte';
 
@@ -65,11 +65,15 @@
   // The steps, in the order the bench is set up. Every step can be opened at
   // any time: the steps guide, they do not lock.
   let step = $state(1);
+  // The Timelapse step has nothing to enter: green once seen (or brought by
+  // Run again or a file), so a fresh form still has no green step.
+  let tlSeen = $state(false);
   // A step turns green the moment its fields are right. None is right on
   // its defaults alone (the name and the direction are always to enter, the
   // duration starts at zero), so green always means something was entered.
   function goTo(n) {
     step = n;
+    if (n === 4) tlSeen = true;
   }
   // From "Still to set": to the field's step, then to the field, lit up.
   function jumpTo(it) {
@@ -109,7 +113,8 @@
     f.direction = null;
     trimFromSeed = !!f.gravimetric_trim;
     tubeTouched = true;
-    step = 4;
+    tlSeen = true;
+    step = 5;
   }
 
   // Settings file: export the form as it stands, or fill it from a file
@@ -136,7 +141,8 @@
       trimFromSeed = !!f.gravimetric_trim;
       tubeTouched = true;
       importMsg = `Settings loaded from ${file.name}`;
-      step = 4;
+      tlSeen = true;
+      step = 5;
     } catch (err) {
       importErr = `${file.name}: ${err.message}`;
     }
@@ -173,18 +179,36 @@
   let camSize = $state([1280, 720]);
   const tlOn = $derived(cameraReady && (f.timelapse ?? true));
   const tlMin = $derived(f.timelapse_min ?? tlDefaultMin);
+  // The interval buttons: one of INTERVAL_CHOICES, or Custom with its field
+  // (a value from Run again that is none of them lights Custom).
+  let tlCustom = $state(false);
+  const tlPick = $derived(tlCustom ? 'custom' : intervalChoice(tlMin));
+  let customInput = $state(null);
+  function pickTlChoice(c) {
+    if (c === 'custom') {
+      tlCustom = true;
+      requestAnimationFrame(() => customInput?.focus());
+    } else {
+      tlCustom = false;
+      f.timelapse_min = c;
+    }
+  }
   function pickTlMin(input) {
     const n = Math.round(Number(input.value));
     if (n >= 1 && n <= 1440) f.timelapse_min = n;
     else input.value = String(tlMin);
   }
-  // On Check and start: the camera's picture to check the framing, and a
-  // timelapse recording on its own (the run's ends it).
+  // On the Timelapse step: the camera's picture to check the framing, the
+  // disk's free room, and a timelapse recording on its own (the run's ends it).
   let cam = $state(null);
   let camOk = $state(true);
   let standalone = $state(null);
+  let freeBytes = $state(null);
   $effect(() => {
     if (step !== 4 || !cameraReady) return;
+    get('/api/camera/captures')
+      .then((c) => (freeBytes = c?.free_bytes ?? null))
+      .catch(() => {});
     let live = true;
     const load = () => {
       get('/api/camera')
@@ -527,10 +551,11 @@
       done: !!f.direction && !needsCalibration && !refillNeeded && !levelNeeded,
     },
     { n: 3, label: 'Feed profile', sub: durationS > 0 ? `${kindLabel}, ${dur(durationS)}` : kindLabel, done: curveOk },
-    { n: 4, label: 'Check and start', sub: `${checklist.filter((i) => i.done).length} of ${checklist.length} ready` },
+    { n: 4, label: 'Timelapse', sub: cameraReady ? (tlOn ? `every ${intervalWords(tlMin)}` : 'off') : 'no camera', done: tlSeen },
+    { n: 5, label: 'Check and start', sub: `${checklist.filter((i) => i.done).length} of ${checklist.length} ready` },
   ]);
-  const NEXT = { 1: 'Next: pump and tube', 2: 'Next: feed profile', 3: 'Next: check and start' };
-  const BACK = { 2: 'Run', 3: 'Pump and tube', 4: 'Feed profile' };
+  const NEXT = { 1: 'Next: pump and tube', 2: 'Next: feed profile', 3: 'Next: timelapse', 4: 'Next: check and start' };
+  const BACK = { 2: 'Run', 3: 'Pump and tube', 4: 'Feed profile', 5: 'Timelapse' };
 </script>
 
 <div class="nr">
@@ -805,6 +830,54 @@
           {/if}
         </details>
       {/if}
+    {:else if step === 4}
+      <h3 class="tl-title"><Icon name="camera" size={22} />Timelapse</h3>
+      {#if !cameraReady}
+        <p class="k">No camera is set up, so no timelapse. <a href="#settings/camera">Settings, Camera</a></p>
+      {:else}
+        <div class="tl-step">
+          <figure class="tl-pic">
+            <div class="framing">
+              {#if liveShown(cam, true)}
+                <LiveImg {cam} pollOk={camOk} alt="What the camera sees now" bind:live={camLive} />
+              {/if}
+            </div>
+            {#if cam?.device}<figcaption class="k">{cam.device}{cam.width ? `, ${cam.width} × ${cam.height}` : ''}</figcaption>{/if}
+          </figure>
+          <div class="tl-side">
+            <label class="tl-switch">
+              <span class="what">
+                <b>Take a timelapse during this run</b>
+                <small>{tlOn ? 'Starts and stops with the run' : 'Off: no images for this run'}</small>
+              </span>
+              <input type="checkbox" checked={tlOn} onchange={(e) => (f.timelapse = e.currentTarget.checked)} />
+            </label>
+            {#if tlOn}
+              <div class="field"><span>One image every</span>
+                <div class="tl-every">
+                  <div use:segThumb class="seg" role="radiogroup" aria-label="One image every" tabindex="-1" onkeydown={radioKeys}>
+                    {#each [...INTERVAL_CHOICES, 'custom'] as c (c)}
+                      <button role="radio" aria-checked={tlPick === c} tabindex={rovingTab(tlPick === c, false)} class:on={tlPick === c}
+                        onclick={() => pickTlChoice(c)}>{c === 'custom' ? 'Custom' : intervalWords(c)}</button>
+                    {/each}
+                  </div>
+                  {#if tlPick === 'custom'}
+                    <label class="tl-custom"><input bind:this={customInput} type="number" min="1" max="1440" step="1" value={tlMin}
+                      aria-label="Timelapse every (minutes)" onchange={(e) => pickTlMin(e.currentTarget)} /> min</label>
+                  {/if}
+                </div>
+              </div>
+              {#if tlEst}
+                <ul class="tl-figs">
+                  <li><Icon name="gallery" size={18} /><span>about <b>{countText(tlEst.images)}</b> images over {dur(durationS)}</span></li>
+                  <li><Icon name="database" size={18} /><span>about <b>{bytesText(tlEst.bytes)}</b>{#if freeBytes != null}, {bytesText(freeBytes)} free{/if}</span></li>
+                </ul>
+              {/if}
+              {#if standalone}<p class="k warn-t">Starting the run ends the timelapse “{standalone.name}” ({standalone.images} images).</p>{/if}
+            {/if}
+          </div>
+        </div>
+      {/if}
     {:else}
       <h3>Check and start</h3>
       <div class="review">
@@ -833,20 +906,8 @@
           <dd class="edit"><button class="linkish" onclick={() => goTo(3)}>Change</button></dd>
 
           <dt>Timelapse</dt>
-          <dd class="tl">
-            {#if !cameraReady}
-              no camera, <a href="#settings/camera">Settings, Camera</a>
-            {:else}
-              <label class="tl-on"><input type="checkbox" checked={tlOn} onchange={(e) => (f.timelapse = e.currentTarget.checked)} />
-                {tlOn ? 'every' : 'off'}</label>
-              {#if tlOn}
-                <input class="tl-min" type="number" min="1" max="1440" step="1" value={tlMin}
-                  aria-label="Timelapse every (minutes)" onchange={(e) => pickTlMin(e.currentTarget)} /> min{#if tlEst}, {estimateText(tlEst)} over {dur(durationS)}{/if}
-                {#if standalone}<small class="tl-ends">Ends the timelapse {standalone.name}</small>{/if}
-              {/if}
-            {/if}
-          </dd>
-          <dd class="edit"></dd>
+          <dd>{cameraReady ? tlSummary(tlOn, tlMin, tlEst) : 'no camera'}</dd>
+          <dd class="edit"><button class="linkish" onclick={() => goTo(4)}>Change</button></dd>
 
           <dt>Feed</dt>
           <dd>{feed && !feed.unknown ? vol(feed.ml) : '–'}</dd>
@@ -863,12 +924,6 @@
                 <span><b>{dur(durationS)}</b></span>
               </div>
             </div>
-          {/if}
-          {#if tlOn && liveShown(cam, true)}
-            <!-- the framing, checked before Start -->
-            <figure class="framing">
-              <LiveImg {cam} pollOk={camOk} alt="What the camera sees now" bind:live={camLive} />
-            </figure>
           {/if}
           {#if startErr}
             <ErrorText message={startErr.message} hint={startErr.hint} />
@@ -1008,10 +1063,41 @@
   .recap .edit { font-size: 13px; }
   .todo { color: color-mix(in srgb, var(--measured) 80%, var(--ink)); }
   .go { display: flex; flex-direction: column; gap: var(--s-3); }
-  .tl { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2); }
-  .tl-on { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-  .tl-min { width: 72px; }
-  .tl-ends { flex-basis: 100%; color: var(--muted); }
+  /* the Timelapse step: the picture to check the framing, the choice beside it */
+  .tl-title { display: flex; align-items: center; gap: var(--s-2); }
+  .tl-title :global(svg) { color: var(--teal-700); }
+  .tl-step { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: var(--s-5); align-items: start; }
+  @media (max-width: 900px) { .tl-step { grid-template-columns: minmax(0, 1fr); } }
+  .tl-pic { margin: 0; min-width: 0; }
+  .tl-pic figcaption { margin-top: var(--s-2); }
+  .tl-side { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
+  .tl-switch {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--s-4); cursor: pointer;
+    padding: var(--s-3) var(--s-4); border: 1px solid var(--line); border-radius: var(--radius-ctl);
+  }
+  .tl-switch .what { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .tl-switch .what b { font-weight: 500; }
+  .tl-switch .what small { font-size: 12.5px; color: var(--muted); }
+  /* a switch, as in Settings */
+  .tl-switch input {
+    appearance: none; flex: none; position: relative; width: 36px; height: 20px; margin: 0; border-radius: 999px;
+    background: var(--line); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--muted) 30%, transparent);
+    cursor: pointer; transition: background 0.15s;
+  }
+  .tl-switch input::before {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--surface); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); transition: transform 0.15s;
+  }
+  .tl-switch input:checked { background: var(--teal-700); box-shadow: none; }
+  .tl-switch input:checked::before { transform: translateX(16px); }
+  .tl-switch input:focus-visible { outline: 2px solid var(--teal-700); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .tl-switch input, .tl-switch input::before { transition: none; } }
+  .tl-every { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }
+  .tl-custom { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+  .tl-custom input { width: 80px; }
+  .tl-figs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); color: var(--muted); }
+  .tl-figs li { display: flex; align-items: center; gap: var(--s-2); }
+  .tl-figs b { color: var(--ink); font-weight: 600; }
   .framing { margin: 0; aspect-ratio: 16 / 9; border-radius: var(--radius-ctl); overflow: hidden; background: var(--video-bg); }
   .start { padding: var(--s-3) var(--s-4); font-size: 15px; }
 

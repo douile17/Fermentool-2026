@@ -3,10 +3,15 @@ import {
   BYTES_PER_IMAGE,
   bytesText,
   cardState,
+  countText,
   estimate,
   estimateText,
   everyWords,
   freeWarning,
+  INTERVAL_CHOICES,
+  intervalChoice,
+  intervalWords,
+  tlSummary,
   nextInText,
   perDayText,
   timelapseSeed,
@@ -51,6 +56,10 @@ describe('words', () => {
     expect(bytesText(1_234_000_000)).toBe('1.2 GB');
     expect(bytesText(0)).toBe('0 kB');
   });
+  it('a count to two figures, thousands spaced', () => {
+    expect(countText(1201)).toBe('1 200');
+    expect(countText(7)).toBe('7');
+  });
   it('a day of images', () => {
     expect(perDayText(estimate(3600, 5, 1280, 720))).toBe('288 images, 73 MB a day');
   });
@@ -93,5 +102,27 @@ describe('freeWarning', () => {
     expect(freeWarning({ state: 'recording' }, true)).toBe('Under 1 GB free on this disk');
     expect(freeWarning({ state: 'paused', pause_reason: 'user' }, false)).toBeNull();
     expect(freeWarning(null, true)).toBeNull();
+  });
+});
+
+describe('the New run interval', () => {
+  it('offers 1, 5, 15, 30 min and 1 h, anything else is Custom', () => {
+    expect(INTERVAL_CHOICES).toEqual([1, 5, 15, 30, 60]);
+    expect(intervalChoice(5)).toBe(5);
+    expect(intervalChoice(60)).toBe(60);
+    // Run again from a run filmed every 7 min: Custom, with 7 in its field
+    expect(intervalChoice(7)).toBe('custom');
+  });
+  it('says an interval in minutes, hours past one', () => {
+    expect(intervalWords(5)).toBe('5 min');
+    expect(intervalWords(60)).toBe('1 h');
+    expect(intervalWords(90)).toBe('1 h 30 min');
+    expect(intervalWords(1440)).toBe('24 h');
+  });
+  it('sums the timelapse up in one line for Check and start and its step', () => {
+    const e = estimate(100 * 3600, 5, 1280, 720);
+    expect(tlSummary(true, 5, e)).toBe('every 5 min, about 1 200 images, 310 MB');
+    expect(tlSummary(true, 5, null)).toBe('every 5 min');
+    expect(tlSummary(false, 5, e)).toBe('off');
   });
 });

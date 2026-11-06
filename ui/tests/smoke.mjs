@@ -114,7 +114,7 @@ try {
     // --- New run: steps turn green as their fields are filled, not before
     check('New run opens', await click('button', 'New run'));
     await sleep(1200);
-    check('a fresh New run has no green step', (await greens()) === '----', await greens());
+    check('a fresh New run has no green step', (await greens()) === '-----', await greens());
     await type('#nr-name input', 'smoke');
     if (await js(`!!document.querySelector('#nr-resp select')`)) {
       await js(`(() => { const s = document.querySelector('#nr-resp select'); const o = [...s.options].find((x) => !x.disabled); s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
@@ -162,11 +162,23 @@ try {
     check('the curve is drawn beside the profile', await js(`!!document.querySelector('.preview svg')`));
     // a time scale under it, in minutes for this 2 h curve (hours past 2 h)
     check('the curve has a time scale, 0 to 120 min', await js(`(() => { const t = [...document.querySelectorAll('.preview svg text')].map((e) => e.textContent.trim()); return t.includes('0') && t.includes('120 min'); })()`));
+    // the Timelapse step (2026-11-06): its switch and interval buttons with a camera, the way to Settings without
+    await click('.step', 'Timelapse');
+    await sleep(600);
+    check('Timelapse turns green once seen', (await greens())[3] === 'G', await greens());
+    check('the Timelapse step has its switch or the way to Settings', await js(`!!document.querySelector('.tl-switch input[type=checkbox]') || !!document.querySelector('.panel a[href="#settings/camera"]')`));
+    if (await js(`!!document.querySelector('[aria-label="One image every"]')`)) {
+      await click('[aria-label="One image every"] button', 'Custom');
+      await sleep(300);
+      check('Custom opens its minutes field', await js(`!!document.querySelector('.tl-custom input')`));
+      await click('[aria-label="One image every"] button', '5 min');
+      await sleep(300);
+      check('a preset closes the Custom field', await js(`!document.querySelector('.tl-custom input')`));
+    }
     await click('.step', 'Check and start');
     await sleep(600);
     check('Check and start shows the curve and a Start button', await js(`!!document.querySelector('.go .preview svg') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Start run'))`));
-    // the timelapse row: its switch and interval with a camera, the way to Settings without
-    check('Check and start has the timelapse row', await js(`(() => { const dt = [...document.querySelectorAll('.recap dt')].find((d) => d.textContent.trim() === 'Timelapse'); const dd = dt?.nextElementSibling; return !!dd && (!!dd.querySelector('input[type=checkbox]') || !!dd.querySelector('a[href="#settings/camera"]')); })()`));
+    check('Check and start sums the timelapse up in one line', await js(`(() => { const dt = [...document.querySelectorAll('.recap dt')].find((d) => d.textContent.trim() === 'Timelapse'); const t = dt?.nextElementSibling?.textContent.trim() ?? ''; return /^(every \\d|off$|no camera$)/.test(t); })()`));
 
     // --- History: Run again opens New run on its check (broke once)
     check('History opens', await click('.tab', 'History'));

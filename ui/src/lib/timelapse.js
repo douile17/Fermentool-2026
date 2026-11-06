@@ -30,10 +30,15 @@ export function bytesText(n) {
   return `${twoFigures(b / 1e9)} GB`;
 }
 
+/** A count to two figures, thousands spaced: "1 200". */
+export function countText(n) {
+  return spaced(twoFigures(n));
+}
+
 /** "about 1 200 images, 310 MB" */
 export function estimateText(e) {
   if (!e) return '';
-  return `about ${spaced(twoFigures(e.images))} images, ${bytesText(e.bytes)}`;
+  return `about ${countText(e.images)} images, ${bytesText(e.bytes)}`;
 }
 
 /** "288 images, 73 MB a day" */
@@ -46,6 +51,28 @@ export function perDayText(e) {
 export function everyWords(seconds) {
   if (seconds >= 60 && seconds < 3600 && seconds % 60 === 0) return `${seconds / 60} min`;
   return dur(seconds);
+}
+
+/** New run's interval buttons, in minutes; any other value is Custom. */
+export const INTERVAL_CHOICES = [1, 5, 15, 30, 60];
+
+/** The button an interval lights: its own, or `'custom'`. */
+export function intervalChoice(min) {
+  return INTERVAL_CHOICES.includes(min) ? min : 'custom';
+}
+
+/** Minutes in words: "5 min", "1 h", "1 h 30 min". */
+export function intervalWords(min) {
+  if (min < 60) return `${min} min`;
+  return min % 60 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${min / 60} h`;
+}
+
+/** The timelapse in one line: "every 5 min, about 1 200 images, 310 MB",
+ *  "every 5 min" before the duration is known, or "off". */
+export function tlSummary(on, min, est) {
+  if (!on) return 'off';
+  const every = `every ${intervalWords(min)}`;
+  return est ? `${every}, ${estimateText(est)}` : every;
 }
 
 /** "in 3 m 20 s", "now", "–" without a next image. */
