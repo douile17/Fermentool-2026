@@ -65,15 +65,21 @@ copie de travail, et c'est elle qui tourne sur le banc.
 ## 5. Pas fait, à faire
 
 - Commité et poussé sur la branche `steps-raw-audit` (pas encore fusionnée
-  dans `main`). Installateur 0.1.7 construit depuis elle ; son contrôle de
-  fenêtre (RELEASE.md, étape 6) reste à faire, le run 264 occupait le
-  port 8730. Puis taguer `v0.1.7`.
-- Le daemon du banc tourne encore en 0.1.6 + la section 4 : le redéployer
-  en 0.1.7 une fois le run 264 fini.
+  dans `main`), tag `v0.1.7`. Installateur 0.1.7 construit depuis elle,
+  contrôle de fenêtre (RELEASE.md, étape 6) passé : daemon 0.1.7, il survit
+  à la fenêtre tuée. Daemon du banc redéployé en 0.1.7 après le run 264.
 - La section 4 des notes du 6 reste ouverte (`App.svelte` à trancher,
   vérification sur un vrai run à plus de 4 ml/min, limites du refill).
 - Le détail d'un run dans History n'a pas été repris à 900 px.
 - C: : 3,3 Go libres ; `target\debug` pèse 4,4 Go.
+- **Stop en fin de run : une valeur rpm ou ml/min « un peu random »
+  s'affiche** (vu par l'utilisateur le 9 novembre, runs 263/264 sans
+  régulation, en ml/min). Pas grave, à corriger plus tard. À préciser
+  d'abord : où elle s'affiche (écran de la pompe, Overview, pop-up de fin,
+  History) et quelle valeur par rapport à la consigne. Pistes non
+  vérifiées : la dernière lecture de la pompe (`read_actual`) prise pendant
+  sa décélération, ou la pompe qui affiche après l'arrêt une valeur de sa
+  propre table tête/tuyau.
 - **Balance muette plus de 3 s : gardé tel quel (décidé le 9 novembre),
   à reprendre à tête reposée.** Tout silence est compté `k_est` x commandé,
   jamais pesé, même long (`settle_anchor`, `anchor_a_silent_balance`). Revue
