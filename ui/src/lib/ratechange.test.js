@@ -61,6 +61,12 @@ describe('curveFact', () => {
     expect(curveFact({ ...r, duration_s: 5400 })).toBe('Constant, 1 h 30 m');
     expect(curveFact({ ...r, duration_s: 600 })).toBe('Constant, 10 m');
   });
+  it('names a Steps run by its steps and range: start → end hid the ones between', () => {
+    const steps = { control_var: 'ml_min', duration_s: 600, curve: { start: 5, end: 1, params: { kind: 'step', segments: [
+      { at_seconds: 0, value: 5 }, { at_seconds: 120, value: 2 }, { at_seconds: 240, value: 6 }, { at_seconds: 360, value: 1 },
+    ] } } };
+    expect(curveFact(steps)).toBe('4 steps, 1.000 to 6.000');
+  });
   it('keeps start → end for any other curve', () => {
     const lin = { control_var: 'ml_min', duration_s: 3600, curve: { start: 5, end: 50, params: { kind: 'linear' } } };
     expect(curveFact(lin)).toBe('5.000 → 50.000');

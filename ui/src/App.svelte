@@ -17,18 +17,6 @@
   import { runState, stateTitle } from './lib/runview.js';
   import { num, unitFor, digitsFor } from './lib/fmt.js';
   import StateIcon from './components/StateIcon.svelte';
-  import { parseHash } from './lib/route.js';
-  import { SECTIONS } from './routes/settings/sections.js';
-
-  // A deep link (#settings/pumps, #history) opens that page at start.
-  {
-    const deep = parseHash(location.hash, SECTIONS.map((x) => x.id));
-    if (deep) {
-      app.route = deep.route;
-      if (deep.tab) app.tab = deep.tab;
-      if (deep.section) app.settingsSection = deep.section;
-    }
-  }
 
   const pumpLink = $derived(linkState(app.status, app.connected));
 
@@ -76,6 +64,14 @@
         label: 'Feed stopped | bottle empty or line blocked',
         title:
           'The pump is running but the bottle weight has not moved for 3 minutes: refill the bottle, or check the line (pinched, disconnected, air). The correction is held at its last good value and resumes by itself once the feed flows again; what was missed meanwhile is not caught up.',
+      };
+    }
+    if (s.tracking?.alarm === 'ratio_jump') {
+      return {
+        tone: 'bad',
+        label: 'Pump ratio moved too fast | correction held',
+        title:
+          'For 15 minutes the balance has read the pump delivering differently from before, faster than tubing wears: check the tube in the head, the bottle and the lines into it (a weight on the pan, a refill line seeping). The correction is held at its value from before; it resumes by itself once the pump reads as before.',
       };
     }
     if (!s.scale_ok) {
@@ -399,7 +395,7 @@
     <!-- One page title for screen readers; the tabs already say it on screen. -->
     <h1 class="sr-only">{pageTitle}</h1>
     <div class="wrap">
-      <ConnBar onopen={() => go(() => { app.route = 'settings'; app.settingsSection = 'pumps'; })} />
+      <ConnBar />
 
       {#if runPill && !onOverview}
         <div class="run-bar {runRs.tone}" role={runRs.tone === 'bad' ? 'alert' : 'status'}>
@@ -476,7 +472,10 @@
 {/if}
 
 <style>
-  .app { display: grid; grid-template-columns: 200px 1fr; min-height: 100vh; }
+  /* minmax(0, 1fr): the page column is the window's room, never its widest
+     content's (a plain 1fr let Tubing calibration push the page past a
+     900 px window) */
+  .app { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 100vh; }
 
   .rail {
     display: flex;
@@ -548,7 +547,7 @@
   .status.on .dot { background: var(--green-500); }
 
   /* Pump-link line, sits just above "daemon online". Persistent cue once the
-     line at the top of the page has hidden itself. */
+     big ConnBar has hidden itself. */
   .pumpstat {
     display: inline-flex; align-items: center; gap: var(--s-2);
     font-size: 12px; font-weight: 600; color: var(--muted);
@@ -579,7 +578,9 @@
   .paging-text { display: flex; flex-direction: column; gap: 2px; }
   .paging-sub { font-size: 12px; color: var(--muted); }
 
-  .main { padding: var(--s-7) var(--s-8) var(--s-8); }
+  .main { padding: var(--s-7) var(--s-8) var(--s-8); min-width: 0; }
+  /* a narrow window (900 px is the desktop app's least): margins to the cards */
+  @media (max-width: 1100px) { .main { padding: var(--s-6) var(--s-5) var(--s-7); } }
   .wrap { max-width: 1000px; margin: 0 auto; }
 
   /* Segmented control with a sliding teal indicator behind the active tab. */

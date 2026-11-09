@@ -184,6 +184,13 @@ export function runState(status, connected, inHold) {
       check: 'Bottle empty? Line pinched, unplugged, or full of air? Tube seated in the head?',
       note: `Correction held at ${c}. Feed missed meanwhile is not caught up.`,
     });
+  if (trimmed && s.tracking?.alarm === 'ratio_jump')
+    return bad({
+      title: 'Pump ratio moved too fast',
+      detail: 'For 15 minutes the pump has read as delivering differently from before, faster than tubing wears.',
+      check: 'Tube moved in the head? Something on the pan, a refill line seeping into the bottle?',
+      note: `Correction held at ${c}; it resumes by itself once the pump reads as before.`,
+    });
   if (trimmed && (s.tracking?.alarm === 'saturated' || (s.scale_connected !== false && s.scale_ok === false)))
     return bad({
       title: 'Correction out of bounds',

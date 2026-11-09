@@ -504,8 +504,8 @@
   .sim { margin-right: auto; }
   .why { flex-basis: 100%; margin: 0; }
 
-  /* a phone: the photo above, everything else under it at full width */
-  @media (max-width: 560px) {
+  /* a narrow pane: the photo above, everything else under it at full width */
+  @container pane (max-width: 600px) {
     .row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'pic state' 'top top' 'ctl ctl'; grid-template-rows: auto; }
     .pic { justify-self: start; }
     .what, .more { padding-left: var(--s-4); }

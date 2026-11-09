@@ -6,27 +6,32 @@
   import { num } from '../lib/fmt.js';
   import { splitEstimated } from '../lib/refill.js';
   import { gapSeries, gapScale } from '../lib/rundetail.js';
-  import { elapsedTicks, ticksFor } from '../lib/chartscale.js';
+  import { elapsedTicks, ticksFor, axisGutter } from '../lib/chartscale.js';
 
-  /** @type {{ points: [number, number, number][], spans?: [number, number][], spanS: number, ticks?: { t: number, label: string }[] }} */
-  let { points, spans = [], spanS, ticks = null } = $props();
+  /** @type {{ points: [number, number, number][], spans?: [number, number][], spanS: number, ticks?: { t: number, label: string }[], minGutter?: number, gutter?: number }} */
+  // `minGutter` / `gutter`: as in Chart.svelte, the two charts' margins agree.
+  let { points, spans = [], spanS, ticks = null, minGutter = 0, gutter = $bindable(0) } = $props();
 
   let boxW = $state(700);
   const W = $derived(Math.max(240, Math.round(boxW)));
   const H = 120;
-  // Edge to edge like Chart.svelte, values above their gridline at the left:
-  // the two charts of a run detail line up, refill bands included.
-  const padL = 0;
   const padT = 8;
   const padB = 22;
 
   const series = $derived(gapSeries(points, spans));
   const scale = $derived(gapScale(series));
   const span = $derived(spanS > 0 ? spanS : 1);
-  const x = (t) => padL + (Math.min(Math.max(t, 0), span) / span) * (W - padL);
-  const y = (v) => padT + ((scale.hi - v) / (2 * scale.hi)) * (H - padT - padB);
   const digits = $derived(scale.ticks.length > 1 && scale.ticks[1] - scale.ticks[0] < 1 ? 1 : 0);
   const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + num(Math.abs(v), digits);
+  // Values level with their gridline in a left margin, as in Chart.svelte:
+  // the two charts of a run detail line up, refill bands included.
+  const ownGutter = $derived(axisGutter(scale.ticks.map(signed)));
+  $effect(() => {
+    gutter = ownGutter;
+  });
+  const padL = $derived(Math.max(ownGutter, minGutter));
+  const x = (t) => padL + (Math.min(Math.max(t, 0), span) / span) * (W - padL);
+  const y = (v) => padT + ((scale.hi - v) / (2 * scale.hi)) * (H - padT - padB);
 
   const parts = $derived(
     splitEstimated(series, spans).map((p) => ({
@@ -45,7 +50,7 @@
     {/each}
     {#each scale.ticks as v}
       <line x1={padL} x2={W} y1={y(v)} y2={y(v)} class={v === 0 ? 'zero' : 'grid'} />
-      <text x={padL + 2} y={Math.max(10, y(v) - 3)} class="axl tick">{signed(v)}</text>
+      <text x={padL - 4} y={y(v) + 3.5} text-anchor="end" class="axl tick">{signed(v)}</text>
     {/each}
     {#each parts as p}
       <path d={p.d} class={p.est ? 'blind' : 'gap'} />

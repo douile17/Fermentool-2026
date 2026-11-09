@@ -73,6 +73,12 @@
     gap: var(--s-5);
   }
   .group { display: flex; flex-direction: column; gap: 1px; }
+  /* The sections lay out on the room the pane has (@container pane), not
+     on the window's: at 900 px, menus aside, a card is ~350 px wide. */
+  .pane { container: pane / inline-size; }
+  @media (max-width: 1100px) {
+    .settings { grid-template-columns: 160px minmax(0, 1fr); gap: var(--s-4); }
+  }
   .group-title { padding: 0 var(--s-3); margin-bottom: var(--s-1); }
   .item {
     display: flex;

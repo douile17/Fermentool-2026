@@ -53,7 +53,10 @@
     };
   });
 
-  const W = 1000;
+  // Drawn at the width it is shown at, as Chart.svelte: a fixed 1000 viewBox
+  // shrank its labels to ~5 px in a 900 px window (UX audit, 2026-11-06).
+  let boxW = $state(1000);
+  const W = $derived(Math.max(360, Math.round(boxW)));
   const L = 64;
   const R = 70;
   const PH = 104;
@@ -172,6 +175,7 @@
     alarm_feed_stopped: 'feed stopped',
     alarm_saturated: 'correction out of bounds',
     alarm_wrong_side: 'balance on the other side',
+    alarm_ratio_jump: 'pump ratio moved too fast',
     alarm_cleared: 'regulation resumed',
     refill: 'bottle refilled',
   };
@@ -191,7 +195,7 @@
 </script>
 
 {#if report || ticks.length}
-  <div class="reg">
+  <div class="reg" bind:clientWidth={boxW}>
     <svg viewBox="0 0 {W} {H}" role="img"
          aria-label="Regulation over the run on one time axis: correction factor, gap between weighed and requested volume, balance weight">
       <!-- panel titles, each on its own row above its plot, and the hour axis -->

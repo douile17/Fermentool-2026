@@ -2,6 +2,8 @@
 // back into New run on this PC or another one. Only the New run form fields
 // travel; nothing in here is trusted until `readSettings` has checked it.
 
+import { MAX_STEPS } from './steps.js';
+
 const TAG = 'fermentool-run-settings';
 const VERSION = 1;
 
@@ -16,13 +18,16 @@ const FIELDS = {
   duration_h: durPart,
   duration_m: durPart,
   duration_s: durPart,
-  kind: (v) => ['linear', 'exponential', 'sigmoid', 'constant'].includes(v),
+  kind: (v) => ['linear', 'exponential', 'sigmoid', 'constant', 'step'].includes(v),
   mode: (v) => v === 'endpoints' || v === 'physio',
   start: isNum,
   end: isNum,
   value: isNum,
   mu_per_hour: isNum,
   steepness: isNum,
+  steps: (v) =>
+    Array.isArray(v) && v.length > 0 && v.length <= MAX_STEPS &&
+    v.every((s) => s != null && /^\d*\.?\d*$/.test(String(s.h)) && /^\d*\.?\d*$/.test(String(s.m)) && isNum(s.value)),
   fb_x0: numOrNull,
   fb_v0: numOrNull,
   fb_yxs: numOrNull,

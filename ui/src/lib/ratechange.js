@@ -36,10 +36,16 @@ export function rateSince(run) {
 }
 
 /** The Overview's "Curve" fact: "Constant, 24 h" (its rate, which may have
- *  changed, is said above it), "5.0 → 50.0" for any other curve. */
+ *  changed, is said above it), "4 steps, 1.000 to 6.000" (start → end hid
+ *  the steps between), "5.0 → 50.0" for any other curve. */
 export function curveFact(run) {
   if (run.curve?.params?.kind === 'constant') return `Constant, ${dur(run.duration_s).replace(/ 0 [ms]$/, '')}`;
   const d = digitsFor(run.control_var);
+  const segs = run.curve?.params?.kind === 'step' ? (run.curve.params.segments ?? []).filter((s) => s.at_seconds < run.duration_s) : [];
+  if (segs.length > 1) {
+    const vs = segs.map((s) => s.value);
+    return `${segs.length} steps, ${num(Math.min(...vs), d)} to ${num(Math.max(...vs), d)}`;
+  }
   return `${num(run.curve.start, d)} → ${num(run.curve.end, d)}`;
 }
 

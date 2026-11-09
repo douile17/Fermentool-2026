@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  alarmCount, atRun, runTimeAt, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines, pumpLine,
+  alarmCount, atRun, runTimeAt, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines, pumpLine, recentLines,
   refillRows, regulationFigures, verdict, whenLine,
 } from './rundetail.js';
 
@@ -291,5 +291,12 @@ describe('pumpLine', () => {
   it('a run made before the models was a LabQ', () => {
     expect(pumpLine({})).toBe('LabQ');
     expect(pumpLine({ pump_model: null })).toBe('LabQ');
+  });
+});
+
+describe('recentLines', () => {
+  it('numbers the last refill from the whole journal, newest first', () => {
+    const l = recentLines(events194, run194, 3);
+    expect(l.map((x) => x.title)).toEqual(['Stopped', 'Curve done', 'Refill 3']);
   });
 });

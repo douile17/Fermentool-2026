@@ -16,6 +16,8 @@
   import { sizeParts, tubeLabel } from '../lib/tubesize.js';
   import { downloadSettings, readSettings } from '../lib/runfile.js';
   import { segThumb } from '../lib/segthumb.js';
+  import { MAX_STEPS, parseStepRows, readCsv, runDurationS, spanLabel, stepAt, stepLasts, stepsCheck, stepsCurve, templateSheets } from '../lib/steps.js';
+  import { readXlsx, writeXlsx } from '../lib/xlsx.js';
 
   let f = $state({
     name: '',
@@ -33,6 +35,8 @@
     value: 10, // constant
     mu_per_hour: 0.15,
     steepness: 8,
+    // Steps: each rate held from its time on, the first at 0 (lib/steps.js)
+    steps: [{ h: '0', m: '0', value: 5 }],
     // fed-batch F0 calculator
     fb_x0: null,
     fb_v0: null,
@@ -186,12 +190,7 @@
   // An rpm curve is not flattened at the pump's max: the preview shows what
   // was asked, the daemon refuses a peak over it and `rpmOver` says so first.
   const lim = $derived(f.control_var === 'ml_min' ? FLOW_LIMITS : { ...RPM_LIMITS, max: FLOW_LIMITS.max });
-  const durationS = $derived(
-    Math.max(
-      0,
-      Math.round((+f.duration_h || 0) * 3600 + (+f.duration_m || 0) * 60 + (+f.duration_s || 0)),
-    ),
-  );
+  const durationS = $derived(runDurationS(f));
 
   // Duration cells: a lone "0" clears on focus so you can type straight over
   // it; an empty cell falls back to "0" on blur.
@@ -245,6 +244,10 @@
   }
 
   function curveSpec() {
+    if (f.kind === 'step') {
+      const { start, end, segments } = stepsCurve(f.steps);
+      return { mode: 'endpoints', start, end, duration: durationS, clamp_min: lim.min, clamp_max: lim.max, params: { kind: 'step', segments } };
+    }
     const isConst = f.kind === 'constant';
     const start = isConst ? Number(f.value) : Number(f.start);
     const end = isConst ? Number(f.value) : Number(f.end);
@@ -269,7 +272,16 @@
   let preview = $state([]);
   let previewErr = $state(null);
   let debounce;
+  // Steps typed wrong are said here, in words, before the daemon sees them.
+  const stepsBad = $derived(f.kind === 'step' ? stepsCheck(f.steps, durationS) : null);
+  const stepsErr = $derived(stepsBad?.text ?? null);
   $effect(() => {
+    if (stepsErr) {
+      clearTimeout(debounce);
+      preview = [];
+      previewErr = stepsErr;
+      return;
+    }
     const spec = curveSpec();
     clearTimeout(debounce);
     debounce = setTimeout(async () => {
@@ -313,10 +325,12 @@
     calibrations.some((c) => !c.archived_at) && forFeedPump(calibrations, app.status?.pump_model).every((c) => c.archived_at),
   );
   const feedModelLabel = $derived(modelOf(app.status?.pump_model).label);
-  const chosenCal = $derived(calMatches.find((c) => c.id === f.tubing_calibration_id) ?? null);
+  // Without the regulation no tube is used: the pump gets the rpm or ml/min
+  // as typed, calibrated by the operator on the pump itself.
+  const chosenCal = $derived(trimOn ? (calMatches.find((c) => c.id === f.tubing_calibration_id) ?? null) : null);
   // ml/min asked, rpm written: the pump's own head/tubing table is not used.
   const drivePerRpm = $derived(f.control_var === 'ml_min' ? mlPerRpmOf(chosenCal) : null);
-  const showCal = $derived(trimOn || (f.control_var === 'ml_min' && calMatches.length > 0));
+  const showCal = $derived(trimOn);
   // Drop a selection that no longer matches the run's unit. Only once the list
   // has loaded: before that, a calibration seeded by "Run again" would look
   // unknown and be wiped.
@@ -365,6 +379,70 @@
       ? rpmCurveProblem({ peak: Math.max(...preview.map((p) => p[1])), maxRpm: pumpMaxRpm, label: feedModelLabel })
       : null,
   );
+  // Steps from a file made from the template: checked whole, one bad row
+  // and nothing is taken (lib/steps.js says each problem with its row).
+  let stepsFile = $state(null);
+  let stepsMenu = $state(false);
+  // the step row under the pointer, lit on the curve
+  let stepHover = $state(-1);
+  const stepSpan = $derived.by(() => {
+    if (f.kind !== 'step' || stepsErr || stepHover < 0 || stepHover >= f.steps.length) return null;
+    const a = stepHover === 0 ? 0 : stepAt(f.steps[stepHover]);
+    return [a, a + stepLasts(f.steps, stepHover, durationS)];
+  });
+  let stepsMsg = $state(null);
+  let stepsFileErr = $state(null);
+  // The most a step may ask, and why, for the file's check.
+  const stepMax = $derived(
+    f.control_var === 'rpm'
+      ? { max: pumpMaxRpm, maxWhy: `this ${feedModelLabel} turns, ${pumpMaxRpm} rpm` }
+      : drivePerRpm != null
+        ? { max: pumpMaxRpm * drivePerRpm, maxWhy: `this tube delivers, ${num(pumpMaxRpm * drivePerRpm, 2)} ml/min at ${pumpMaxRpm} rpm` }
+        : { max: FLOW_LIMITS.max, maxWhy: `a run takes, ${FLOW_LIMITS.max} ml/min` },
+  );
+  async function importSteps(e) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = '';
+    if (!file) return;
+    stepsMsg = null;
+    stepsFileErr = null;
+    try {
+      const rows = /\.csv$/i.test(file.name) ? readCsv(await file.text()) : await readXlsx(await file.arrayBuffer());
+      const got = parseStepRows(rows, { unit, ...stepMax });
+      if (got.errors) {
+        stepsFileErr = { file: file.name, errors: got.errors };
+        return;
+      }
+      f.steps = got.steps;
+      const last = got.steps.at(-1);
+      stepsMsg = `${got.steps.length} step${got.steps.length > 1 ? 's' : ''} from ${file.name}, the last at ${spanLabel(+last.h * 3600 + +last.m * 60) || '0 h'}`;
+    } catch (err) {
+      stepsFileErr = { file: file.name, errors: [err.message] };
+    }
+  }
+  function downloadTemplate() {
+    const url = URL.createObjectURL(
+      new Blob([writeXlsx(templateSheets(unit))], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    );
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `step-profile-template-${f.control_var === 'rpm' ? 'rpm' : 'ml-min'}.xlsx`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+  function addStep() {
+    // an hour after the last one, at its rate, to be changed
+    const last = f.steps.at(-1);
+    const at = f.steps.length === 1 ? 0 : stepAt(last);
+    const h = Number.isFinite(at) ? Math.floor(at / 3600) + 1 : 1;
+    f.steps.push({ h: String(h), m: '0', value: last?.value ?? 0 });
+  }
+  function clearSteps() {
+    f.steps = [{ h: '0', m: '0', value: f.steps[0]?.value ?? 0 }];
+    stepsMsg = null;
+    stepsFileErr = null;
+  }
+
   const flowOf = (v) => (f.control_var === 'ml_min' ? v : mlPerRpm != null ? v * mlPerRpm : null);
   const feed = $derived.by(() => {
     if (previewErr || preview.length < 2) return null;
@@ -400,7 +478,7 @@
         gravimetric_trim: trimOn,
         auto_refill: autoRefill,
         refill_draw_g: autoRefill && f.refill_draw_kg > 0 ? f.refill_draw_kg * 1000 : null,
-        tubing_calibration_id: trimOn || drivePerRpm != null ? f.tubing_calibration_id : null,
+        tubing_calibration_id: trimOn ? f.tubing_calibration_id : null,
         responsible: f.responsible || null,
       });
       try {
@@ -455,6 +533,7 @@
     { v: 'exponential', label: 'Exponential', d: 'M4 26 C30 26 46 22 56 4' },
     { v: 'sigmoid', label: 'Sigmoid', d: 'M4 26 C26 26 34 4 56 4' },
     { v: 'constant', label: 'Constant', d: 'M4 15 L56 15' },
+    { v: 'step', label: 'Steps', d: 'M4 24 H20 V15 H38 V6 H56' },
   ];
   const kindLabel = $derived(KINDS.find((k) => k.v === f.kind)?.label ?? f.kind);
   const digits = $derived(digitsFor(f.control_var));
@@ -567,6 +646,13 @@
       {:else if trimOn && !scaleLive}
         <p class="k bad">The balance is not responding: the regulation cannot correct anything until it is back.</p>
       {/if}
+      {#if !trimOn}
+        <p class="k" id="nr-raw">
+          {#if f.control_var === 'ml_min'}The pump gets the ml/min as typed and turns it into rpm with its own head and
+            tubing setting: set that on the pump for this tube.
+          {:else}The pump gets the rpm as typed, no tube calibration is used.{/if}
+        </p>
+      {/if}
       {#if autoRefill && f.refill_draw_kg > 0 && plan}
         {#if !plan.error}
           <p class="k refill-levels"><Icon name="droplet" size={14} />
@@ -629,6 +715,105 @@
             </div>
           </div>
 
+          {#if f.kind === 'step'}
+          <div class="field" id="nr-steps">
+            <div class="sheet-head">
+              <span>Steps</span><span class="count">{f.steps.length}</span>
+              <div class="tools">
+                <input type="file" accept=".xlsx,.csv" hidden bind:this={stepsFile} onchange={importSteps} />
+                <button class="tbtn out" type="button" onclick={() => stepsFile.click()}
+                  title="Fill the steps from a file made from the template"><Icon name="upload" size={16} />Import from Excel</button>
+                <button class="tbtn" type="button" onclick={downloadTemplate}
+                  title="An Excel file to fill in, then import"><Icon name="download" size={16} />Template</button>
+                <div class="menu-wrap" onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) stepsMenu = false; }}>
+                  <button class="tbtn icon" type="button" aria-label="More step actions" aria-haspopup="menu" aria-expanded={stepsMenu}
+                    onclick={() => (stepsMenu = !stepsMenu)} onkeydown={(e) => { if (e.key === 'Escape') stepsMenu = false; }}><Icon name="more" size={16} /></button>
+                  {#if stepsMenu}
+                    <div class="menu" role="menu">
+                      <button role="menuitem" type="button" disabled={f.steps.length < 2}
+                        onkeydown={(e) => { if (e.key === 'Escape') stepsMenu = false; }}
+                        onclick={() => { clearSteps(); stepsMenu = false; }}>Clear all steps</button>
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            </div>
+            {#if stepsFileErr}
+              <div class="err steps-err">
+                <b>{stepsFileErr.file}</b> not imported, nothing changed:
+                <ul>
+                  {#each stepsFileErr.errors.slice(0, 8) as e, i (i)}<li>{e}</li>{/each}
+                </ul>
+                {#if stepsFileErr.errors.length > 8}<span>and {stepsFileErr.errors.length - 8} more.</span>{/if}
+              </div>
+            {/if}
+            <div class="sheet">
+              <div class="sheet-scroll">
+                <table class="steps">
+                  <thead><tr>
+                    <th><span class="sr-only">Step</span></th><th>From</th><th class="r">{unit}</th><th>Lasts</th><th><span class="sr-only">Remove</span></th>
+                  </tr></thead>
+                  <tbody>
+                    {#each f.steps as s, i (i)}
+                      {@const a = i === 0 ? 0 : stepAt(s)}
+                      {@const lasts = stepLasts(f.steps, i, durationS)}
+                      {@const rowBad = stepsBad?.i === i}
+                      {@const badTime = rowBad && stepsBad.field === 'time'}
+                      <tr class:bad-row={rowBad} onpointerenter={() => (stepHover = i)} onpointerleave={() => (stepHover = -1)}>
+                        <td class="n">{i + 1}</td>
+                        <td>
+                          <span class="cell t">
+                            <input type="text" inputmode="decimal" autocomplete="off" aria-label="Step {i + 1} hours" class:bad={badTime} aria-invalid={badTime}
+                              disabled={i === 0} value={i === 0 ? '0' : s.h} oninput={(e) => (s.h = e.currentTarget.value)} /><span class="u">h</span>
+                            <input type="text" inputmode="decimal" autocomplete="off" aria-label="Step {i + 1} minutes" class:bad={badTime} aria-invalid={badTime}
+                              disabled={i === 0} value={i === 0 ? '0' : s.m} oninput={(e) => (s.m = e.currentTarget.value)} /><span class="u">min</span>
+                          </span>
+                        </td>
+                        <td>
+                          <span class="cell rate">
+                            <input type="text" inputmode="decimal" autocomplete="off" aria-label="Step {i + 1} rate"
+                              class:bad={rowBad && stepsBad.field === 'rate'} aria-invalid={rowBad && stepsBad.field === 'rate'}
+                              value={Number.isFinite(s.value) ? s.value.toFixed(digits) : ''}
+                              onchange={(e) => { const t = e.currentTarget.value.trim().replace(',', '.'); s.value = t === '' ? NaN : Number(t); }} />
+                          </span>
+                        </td>
+                        <td>
+                          <span class="span">
+                            <span class="track">{#if !stepsErr && durationS > 0 && lasts > 0}<i style="left: {(a / durationS) * 100}%; width: {(lasts / durationS) * 100}%"></i>{/if}</span>
+                            <small>{!stepsErr && durationS > 0 ? spanLabel(lasts) : ''}</small>
+                          </span>
+                        </td>
+                        <td>
+                          {#if i > 0}
+                            <button class="rm" type="button" aria-label="Remove step {i + 1}" onclick={() => f.steps.splice(i, 1)}><Icon name="x" size={16} /></button>
+                          {/if}
+                        </td>
+                      </tr>
+                      {#if rowBad}
+                        <tr class="bad-row why-row"><td></td><td colspan="4" class="why"><span role="alert">{stepsErr}</span></td></tr>
+                      {/if}
+                    {/each}
+                  </tbody>
+                </table>
+                <button class="add" type="button" onclick={addStep} disabled={f.steps.length >= MAX_STEPS}><Icon name="plus" size={16} />Add a step</button>
+              </div>
+              <div class="end" id="nr-duration">
+                <span class="n">End</span>
+                <span class="cell t">
+                  <input type="text" inputmode="numeric" autocomplete="off" aria-label="Run ends, hours"
+                    bind:value={f.duration_h} onfocus={() => durFocus('duration_h')} onblur={() => durBlur('duration_h')}
+                    oninput={(e) => (f.duration_h = e.currentTarget.value.replace(/[^0-9]/g, ''))} /><span class="u">h</span>
+                  <input type="text" inputmode="numeric" autocomplete="off" aria-label="Run ends, minutes"
+                    bind:value={f.duration_m} onfocus={() => durFocus('duration_m')} onblur={() => durBlur('duration_m')}
+                    oninput={(e) => (f.duration_m = e.currentTarget.value.replace(/[^0-9]/g, ''))} /><span class="u">min</span>
+                </span>
+                <span class="note">then holds the last rate until Stop</span>
+              </div>
+            </div>
+            {#if stepsErr && !(stepsBad?.i >= 0)}<p class="k bad" role="alert">{stepsErr}</p>{/if}
+            {#if stepsMsg}<p class="imported-steps"><Icon name="check" size={16} />{stepsMsg}</p>{/if}
+          </div>
+          {:else}
           <div class="row">
             {#if f.kind === 'constant'}
               <label class="field num-f"><span>Speed, {unit}</span>
@@ -665,7 +850,9 @@
               </label>
             {/if}
           </div>
+          {/if}
 
+          {#if f.kind !== 'step'}
           <div class="field" id="nr-duration"><span>Duration</span>
             <div class="dur">
               <label><input type="text" inputmode="numeric" autocomplete="off" aria-label="Hours"
@@ -685,18 +872,19 @@
                 oninput={(e) => (f.duration_s = e.target.value.replace(/[^0-9]/g, ''))} /><span>s</span></label>
             </div>
           </div>
+          {/if}
         </div>
 
         <div class="preview">
-          {#if previewErr}
+          {#if stepsErr}
+            <!-- said once, under the steps -->
+            <p class="k">Correct the steps to see the curve.</p>
+          {:else if previewErr}
             <div class="err">{previewErr}</div>
           {:else if preview.length && durationS > 0}
-            <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} {digits} />
-            <div class="pv-cap mono">
-              <span>start <b>{num(startV, digits)}</b></span>
-              <span>end <b>{num(endV, digits)}</b> {unit}</span>
-              <span><b>{dur(durationS)}</b></span>
-            </div>
+            <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} {digits}
+              endpoints={f.kind !== 'step'} highlight={stepSpan} />
+            {@render curveCap()}
             {@render fitNote()}
             {@render feedNote()}
           {:else}
@@ -764,9 +952,11 @@
           </dd>
           <dd class="edit"><button class="linkish" onclick={() => goTo(2)}>Change</button></dd>
 
-          <dt>Tube</dt>
-          <dd>{chosenCal ? tubeName(chosenCal) : needsCalibration ? '' : 'no calibration'}{#if needsCalibration}<b class="todo">calibration to choose</b>{/if}</dd>
-          <dd class="edit"><button class="linkish" onclick={() => goTo(2)}>Change</button></dd>
+          {#if trimOn}
+            <dt>Tube</dt>
+            <dd>{chosenCal ? tubeName(chosenCal) : needsCalibration ? '' : 'no calibration'}{#if needsCalibration}<b class="todo">calibration to choose</b>{/if}</dd>
+            <dd class="edit"><button class="linkish" onclick={() => goTo(2)}>Change</button></dd>
+          {/if}
 
           <dt>Curve</dt>
           <dd>
@@ -783,12 +973,8 @@
           <!-- the curve the pump will follow, the last thing seen before Start -->
           {#if curveOk}
             <div class="preview">
-              <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} {digits} />
-              <div class="pv-cap mono">
-                <span>start <b>{num(startV, digits)}</b></span>
-                <span>end <b>{num(endV, digits)}</b> {unit}</span>
-                <span><b>{dur(durationS)}</b></span>
-              </div>
+              <Chart planned={preview} actual={[]} nowS={null} {durationS} {unit} {digits} endpoints={f.kind !== 'step'} />
+              {@render curveCap()}
             </div>
           {/if}
           {#if startErr}
@@ -822,6 +1008,21 @@
     </div>
   </section>
 </div>
+
+<!-- under the curve: its start and end, or for steps how many and their range -->
+{#snippet curveCap()}
+  <div class="pv-cap mono">
+    {#if f.kind === 'step'}
+      {@const vs = f.steps.map((s) => s.value)}
+      <span><b>{f.steps.length}</b> step{f.steps.length > 1 ? 's' : ''}</span>
+      <span><b>{num(Math.min(...vs), digits)}</b> to <b>{num(Math.max(...vs), digits)}</b> {unit}</span>
+    {:else}
+      <span>start <b>{num(startV, digits)}</b></span>
+      <span>end <b>{num(endV, digits)}</b> {unit}</span>
+    {/if}
+    <span><b>{dur(durationS)}</b></span>
+  </div>
+{/snippet}
 
 {#snippet fitNote()}
   {#if rpmOver}
@@ -883,8 +1084,8 @@
   .profile { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 380px); gap: var(--s-5); align-items: start; }
   @media (max-width: 900px) { .profile { grid-template-columns: 1fr; } }
   .profile-form { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
-  .shapes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--s-2); max-width: 520px; }
-  @media (max-width: 520px) { .shapes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .shapes { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--s-2); max-width: 640px; }
+  @media (max-width: 620px) { .shapes { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   .shape {
     display: flex; flex-direction: column; align-items: center; gap: 4px;
     padding: var(--s-2) var(--s-2) 6px; border: 1px solid var(--line); border-radius: var(--radius-ctl);
@@ -896,6 +1097,90 @@
   .shape.on { border-color: var(--teal-700); box-shadow: inset 0 0 0 1px var(--teal-700); color: var(--teal-700); }
   .shape.on span { font-weight: 600; }
   .num-f input { width: 120px; font-family: var(--mono); }
+  /* steps: a quiet sheet, a box only under the pointer or the caret, each
+     step's stretch drawn on the run's time; the run's end its last row */
+  .sheet-head { display: flex; align-items: center; gap: 10px; }
+  .count { font-size: 12px; color: var(--muted); background: var(--surface-sunken); border-radius: var(--radius-tag); padding: 1px 7px; }
+  .tools { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+  .tbtn {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; color: var(--ink);
+    background: none; border: 1px solid transparent; border-radius: var(--radius-ctl); padding: 5px 9px;
+  }
+  .tbtn:not(:disabled):hover { background: var(--surface-sunken); }
+  .tbtn.out { border-color: var(--line); }
+  .tbtn.icon { padding: 5px; color: var(--muted); }
+  .menu-wrap { position: relative; }
+  .menu {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 170px; padding: 4px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-ctl); box-shadow: var(--shadow-pop);
+  }
+  .menu button {
+    display: block; width: 100%; text-align: left; font-size: 13px; background: none; border: 0;
+    padding: 7px 10px; border-radius: 6px; color: var(--danger-ink);
+  }
+  .menu button:not(:disabled):hover { background: var(--danger-bg); }
+  .menu button:disabled { color: var(--muted); }
+
+  .sheet { border: 1px solid var(--line); border-radius: var(--radius-ctl); overflow: hidden; }
+  .sheet-scroll { max-height: 336px; overflow-y: auto; }
+  .steps { width: 100%; border-collapse: collapse; }
+  .steps th {
+    position: sticky; top: 0; z-index: 1; background: var(--surface); box-shadow: 0 1px 0 var(--line);
+    text-align: left; font-size: 11.5px; font-weight: 500; letter-spacing: 0.02em; color: var(--muted); padding: 7px 8px;
+  }
+  .steps th.r { text-align: right; padding-right: 14px; }
+  /* fixed columns, the stretch takes the rest: its bars read as the run's time */
+  .steps th:nth-child(1) { width: 30px; }
+  .steps th:nth-child(2) { width: 140px; }
+  .steps th:nth-child(3) { width: 112px; }
+  .steps th:nth-child(5) { width: 30px; }
+  .steps td { padding: 0; height: 38px; border-top: 1px solid var(--line-soft); }
+  .steps tbody tr:first-child td { border-top: 0; }
+  .steps tbody tr:hover, .steps tbody tr:focus-within { background: color-mix(in srgb, var(--surface-sunken) 55%, var(--surface)); }
+  .n { width: 30px; font-size: 12px; color: var(--muted); text-align: right; padding-right: 6px; }
+  .steps td.n { padding-right: 6px; }
+  .cell { display: flex; align-items: baseline; gap: 2px; padding: 0 4px; }
+  .cell input {
+    font-family: var(--mono); color: var(--ink); background: transparent; border: 1px solid transparent;
+    border-radius: 6px; padding: 4px 5px; text-align: right; width: 100%; min-width: 0;
+  }
+  .cell input:not(:disabled):hover { border-color: var(--line); background: var(--surface); }
+  .cell input:focus { outline: none; border-color: var(--teal-700); background: var(--surface);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--teal-700) 18%, transparent); }
+  .cell input:disabled { color: var(--muted); background: transparent; }
+  .cell .u { font-size: 11.5px; color: var(--muted); margin-right: 6px; }
+  .cell.t input { width: 42px; flex: none; }
+  .cell.rate { width: 108px; }
+  .cell.rate input { padding-right: 9px; }
+  .span { display: flex; align-items: center; gap: 10px; padding: 0 8px; min-width: 80px; }
+  .track { position: relative; flex: 1; height: 6px; border-radius: 3px; background: var(--line-soft); min-width: 40px; }
+  .track i { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: var(--teal-400); }
+  .span small { font-size: 12px; color: var(--muted); white-space: nowrap; width: 50px; text-align: right; }
+  .rm { background: none; border: 0; padding: 4px; line-height: 0; color: var(--muted); border-radius: 6px; opacity: 0; }
+  .steps td:last-child { width: 30px; }
+  .steps tr:hover .rm, .steps tr:focus-within .rm, .rm:focus-visible { opacity: 1; }
+  .rm:hover { color: var(--danger-ink); background: var(--danger-bg); }
+  .steps tr.bad-row, .steps tr.bad-row:hover { background: var(--danger-bg); }
+  .steps tr.bad-row .n { color: var(--danger-ink); font-weight: 600; }
+  .steps .cell input.bad { border-color: var(--danger); background: var(--surface); }
+  .steps tr.why-row td { height: auto; border-top: 0; }
+  .why { font-size: 12.5px; color: var(--danger-ink); padding: 0 8px 8px 9px; }
+  .add {
+    width: 100%; display: flex; align-items: center; gap: 6px; padding: 8px 12px 8px 36px; font-size: 13px; font-weight: 500;
+    color: var(--teal-700); background: none; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; text-align: left;
+  }
+  .add:not(:disabled):hover { background: color-mix(in srgb, var(--surface-sunken) 55%, var(--surface)); }
+  .end { display: flex; align-items: center; min-height: 42px; background: var(--surface-sunken); border-top: 1px solid var(--line); }
+  .end .n { font-size: 11.5px; flex: none; }
+  .end .cell input { border-color: var(--line); background: var(--surface); }
+  .end .note { font-size: 12px; color: var(--muted); padding: 0 8px; }
+  .imported-steps { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+  .imported-steps :global(svg) { color: var(--teal-700); flex: none; }
+  .steps-err ul { margin: var(--s-1) 0 0; padding-left: 18px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .rm { transition: opacity 0.12s; }
+    .steps tbody tr { transition: background-color 0.12s; }
+  }
   .dur { display: flex; gap: var(--s-3); }
   .dur label { display: flex; align-items: baseline; gap: var(--s-2); }
   .dur input { width: 70px; text-align: right; font-family: var(--mono); }

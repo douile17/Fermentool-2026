@@ -153,6 +153,15 @@ try {
       await sleep(300);
       check('Escape closes the tube list', await js(`!document.querySelector('#nr-tube .pop')`));
     }
+    // No regulation: the setpoint goes to the pump as typed, no tube is asked
+    const trimWasOn = await js(`[...document.querySelectorAll('[aria-label="Regulation"] button')].some((b) => b.textContent.includes('Balance') && b.getAttribute('aria-checked') === 'true')`);
+    await click('[aria-label="Regulation"] button', 'No regulation');
+    await sleep(300);
+    check('No regulation asks for no tube', await js(`!document.querySelector('#nr-tube') && !!document.querySelector('#nr-raw')`));
+    if (trimWasOn) {
+      await click('[aria-label="Regulation"] button', 'Balance regulation');
+      await sleep(300);
+    }
 
     await click('.step', 'Feed profile');
     await sleep(400);
@@ -162,6 +171,27 @@ try {
     check('the curve is drawn beside the profile', await js(`!!document.querySelector('.preview svg')`));
     // a time scale under it, in minutes for this 2 h curve (hours past 2 h)
     check('the curve has a time scale, 0 to 120 min', await js(`(() => { const t = [...document.querySelectorAll('.preview svg text')].map((e) => e.textContent.trim()); return t.includes('0') && t.includes('120 min'); })()`));
+
+    // Steps: typed in a table, a step back in time is pointed at (the 4th
+    // before the 3rd), the file buttons are there. Nothing is imported.
+    check('the Steps shape opens a table of one step', (await click('.shape', 'Steps')) && (await sleep(300), await js(`document.querySelectorAll('#nr-steps tbody tr').length === 1`)));
+    for (let i = 0; i < 3; i++) await click('#nr-steps button', 'Add a step');
+    await type('input[aria-label="Step 2 hours"]', '0.5');
+    await type('input[aria-label="Step 3 hours"]', '1');
+    await type('input[aria-label="Step 4 hours"]', '0.25');
+    await sleep(400);
+    check('a step typed back in time is refused, on its row', await js(`(() => { const r = document.querySelectorAll('#nr-steps tbody tr'); return r.length === 5 && r[3].classList.contains('bad-row') && r[4]?.classList.contains('why-row') && /Step 4 starts at or before step 3/.test(r[4].textContent); })()`));
+    check('Feed profile is not green with a step back in time', (await greens())[2] === '-', await greens());
+    await type('input[aria-label="Step 4 hours"]', '1.5');
+    await sleep(900);
+    check('steps in order draw the curve', await js(`!document.querySelector('#nr-steps .bad-row') && !!document.querySelector('.preview svg')`));
+    check("each step draws its stretch on the run's time", await js(`document.querySelectorAll('#nr-steps .track i').length === 4`));
+    check('Steps has Import from Excel and Template', await js(`(() => { const b = [...document.querySelectorAll('#nr-steps button')].map((x) => x.textContent.trim()); return b.includes('Import from Excel') && b.includes('Template'); })()`));
+    check("the run's end is the last row of the steps", await js(`document.querySelector('#nr-steps .end input')?.value === '2' && !document.querySelector('input[aria-label="Hours"]')`));
+    check('Clear all steps waits in the "…" menu', (await click('#nr-steps button[aria-label="More step actions"]')) && (await sleep(200), await js(`[...document.querySelectorAll('#nr-steps .menu button')].some((b) => b.textContent.trim() === 'Clear all steps')`)));
+    await js(`document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await click('.shape', 'Linear');
+    await sleep(900);
     await click('.step', 'Check and start');
     await sleep(600);
     check('Check and start shows the curve and a Start button', await js(`!!document.querySelector('.go .preview svg') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Start run'))`));
@@ -186,6 +216,9 @@ try {
       check('the run detail Settings says its feed pump', await js(`/^(LabQ|LabV|PDS II, head \\d)$/.test([...document.querySelectorAll('.modal.detail details.fold dl dt')].find((t) => t.textContent.trim() === 'Feed pump')?.nextElementSibling?.textContent.trim() ?? '')`));
       check('the run detail charts count the experiment time, not the clock', await js(`(() => { const t = [...document.querySelectorAll('.modal.detail svg text')].map((e) => e.textContent.trim()); return t.some((x) => / (h|min)$/.test(x)) && !t.some((x) => /^(\\w{3} )?\\d{2}:\\d{2}$/.test(x)); })()`));
       check('its bottle table and journal count it too, no time of day', await js(`![...document.querySelectorAll('.modal.detail .t, .modal.detail .jr .tm')].some((e) => /\\d{1,2}:\\d{2}/.test(e.textContent))`));
+      // the two stacked charts start their plot at the same x: their times line up
+      const plotEdges = await js(`[...document.querySelectorAll('.modal.detail .block svg')].map((s) => s.querySelector('text.tick')?.getAttribute('x')).filter((x) => x != null).slice(0, 2)`);
+      if (plotEdges.length >= 2) check('the feed rate and running total charts line up', new Set(plotEdges).size === 1, plotEdges);
       if (await js(`!!document.querySelector('.modal.detail .jr')`)) {
         check('the journal is in words, not event kinds', await js(`![...document.querySelectorAll('.modal.detail .jr b')].some((b) => /_/.test(b.textContent))`));
       }
@@ -285,6 +318,16 @@ try {
     await sleep(200);
     check('Escape closes the menu', await js(`!document.querySelector('.person .menu')`));
   }
+  check('no "Saved" before anything was saved', await js(`!/Saved/.test(document.querySelector('.settings-pane .save-state')?.textContent ?? '')`));
+
+  // --- the desktop app's narrowest window, 900 px (UX audit, 2026-11-06):
+  // sections laid out on the window's width squeezed a 350 px card
+  await cmd('Emulation.setDeviceMetricsOverride', { width: 900, height: 800, deviceScaleFactor: 1, mobile: false });
+  await sleep(600);
+  const fits = () => js(`document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1`);
+  check('at 900 px, Notifications keeps its names and topics readable', await js(`[...document.querySelectorAll('.settings-pane .row input')].every((i) => i.getBoundingClientRect().width >= 120)`));
+  check('at 900 px, Pumps shows the three models of each pump', (await click('.side button', 'Pumps')) && (await sleep(1200), await js(`(() => { const pane = document.querySelector('.settings-pane').getBoundingClientRect(); const b = [...document.querySelectorAll('.settings-pane .seg button')]; return b.length >= 6 && b.every((x) => { const r = x.getBoundingClientRect(); return r.width > 30 && r.right <= pane.right + 1; }); })()`)));
+  check('at 900 px, Settings fits the window', await fits());
 
   // --- Tubing calibration last: it is only looked at, its draft untouched
   await click('button', 'Feeding profile');
@@ -311,6 +354,10 @@ try {
       check('Stay keeps the calibration on screen', await js(`!!document.querySelector('.steps')`));
     }
   }
+
+  await click('.tab', 'Tubing calibration');
+  await sleep(800);
+  check('at 900 px, Tubing calibration fits the window', await fits(), String(await js(`document.documentElement.scrollWidth`)));
 
   check('no error in the page', pageErrors.length === 0, pageErrors.join(' | '));
   console.log(`\n${passed} checks passed`);

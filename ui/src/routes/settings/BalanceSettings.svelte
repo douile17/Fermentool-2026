@@ -55,6 +55,10 @@
   // the saved port's link, live from the status frame
   let savedPort = $state('');
   const line = $derived(balanceLine(app.status, savedPort));
+  // A run regulated by the balance counts its feed with this port, baud,
+  // density and position: the daemon refuses them until it stops, so they
+  // are greyed here rather than refused after a click. The limit can change.
+  const runLocked = $derived(!!app.status?.active?.gravimetric_trim);
 
   const formPath = $derived(scalePort === '__custom' ? scaleCustom.trim() : scalePort);
 
@@ -127,15 +131,15 @@
     {#snippet action()}
       <!-- as in Pumps: Disconnect (red ink, no box) while it answers, Connect otherwise -->
       {#if app.status?.scale_connected}
-        <button class="unplug" type="button" onclick={disconnect} disabled={saving}
+        <button class="unplug" type="button" onclick={disconnect} disabled={saving || runLocked}
           title="Close the port: the weight is no longer read until Connect"><Icon name="unplug" size={15} />Disconnect</button>
       {:else}
-        <button class="btn-primary" type="button" onclick={connect} disabled={saving || !formPath}>Connect</button>
+        <button class="btn-primary" type="button" onclick={connect} disabled={saving || !formPath || runLocked}>Connect</button>
       {/if}
     {/snippet}
   </LinkHeader>
   <div class="conn">
-    <select class="port" bind:value={scalePort} aria-label="Balance port">
+    <select class="port" bind:value={scalePort} aria-label="Balance port" disabled={runLocked}>
       <option value="">No balance</option>
       {#each ports as p}
         <option value={p.name} disabled={p.name === pumpPort}>
@@ -148,22 +152,22 @@
       <option value="__custom">Other port…</option>
     </select>
     {#if scalePort === '__custom'}
-      <input class="custom" type="text" placeholder="COM5" bind:value={scaleCustom} aria-label="Port name" />
+      <input class="custom" type="text" placeholder="COM5" bind:value={scaleCustom} aria-label="Port name" disabled={runLocked} />
     {/if}
     <button class="iconbtn" type="button" title="Rescan the ports" aria-label="Rescan the ports" onclick={rescanPorts}>
       <Icon name="refresh-cw" size={16} />
     </button>
-    <select bind:value={scaleBaud} aria-label="Baud">
+    <select bind:value={scaleBaud} aria-label="Baud" disabled={runLocked}>
       {#each [1200, 2400, 4800, 9600, 19200, 38400] as b}<option value={b}>{b} baud</option>{/each}
     </select>
   </div>
 
   <div class="grid three">
     <label class="field"><span>Liquid density, g/mL</span>
-      <input type="number" step="0.01" min="0.5" max="2" bind:value={scaleDensity} />
+      <input type="number" step="0.01" min="0.5" max="2" bind:value={scaleDensity} disabled={runLocked} />
     </label>
     <label class="field"><span>Balance weighs</span>
-      <select bind:value={scalePosition}>
+      <select bind:value={scalePosition} disabled={runLocked}>
         <option value="feed">the feed bottle</option>
         <option value="receiver">the receiving vessel</option>
       </select>
@@ -173,6 +177,9 @@
       <small class="hint">×{(1 / (1 + (Number(trimLimit) || 25) / 100)).toFixed(2)} to ×{(1 + (Number(trimLimit) || 25) / 100).toFixed(2)}</small>
     </label>
   </div>
+  {#if runLocked}
+    <p class="field-note">A run regulated by the balance is active: the port, baud, density and position are locked until it stops. The correction limit can change.</p>
+  {/if}
   {#if scalePosition === 'receiver'}
     <p class="field-note warn">Anything else added to the vessel (base, antifoam) counts as feed.</p>
   {/if}
@@ -195,7 +202,7 @@
   .iconbtn:hover { color: var(--teal-700); border-color: var(--teal-700); }
   .iconbtn:focus-visible { outline: 2px solid var(--teal-600); outline-offset: 2px; }
   .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  @media (max-width: 640px) { .grid.three { grid-template-columns: minmax(0, 1fr); } }
+  @container pane (max-width: 560px) { .grid.three { grid-template-columns: minmax(0, 1fr); } }
   .hint { font-size: 12px; color: var(--muted); }
   .warn { color: var(--warn-ink); margin-top: var(--s-3); }
   .save { margin-left: auto; }

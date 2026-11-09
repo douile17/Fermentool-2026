@@ -112,6 +112,21 @@
       { 'stroke-linecap': 'round', d: 'M22 6.9585L20 6.9585' },
     ],
     // Settings > Notifications, a person's other actions
+    // Solar download-minimalistic / upload-minimalistic
+    download: [
+      { 'stroke-linecap': 'round', 'stroke-linejoin': 'round', d: 'M3 15C3 17.8284 3 19.2426 3.87868 20.1213C4.75736 21 6.17157 21 9 21H15C17.8284 21 19.2426 21 20.1213 20.1213C21 19.2426 21 17.8284 21 15' },
+      { 'stroke-linecap': 'round', 'stroke-linejoin': 'round', d: 'M12 3V16M12 16L16 11.625M12 16L8 11.625' },
+    ],
+    upload: [
+      { 'stroke-linecap': 'round', 'stroke-linejoin': 'round', d: 'M3 15C3 17.8284 3 19.2426 3.87868 20.1213C4.75736 21 6.17157 21 9 21H15C17.8284 21 19.2426 21 20.1213 20.1213C21 19.2426 21 17.8284 21 15' },
+      { 'stroke-linecap': 'round', 'stroke-linejoin': 'round', d: 'M12 16V3M12 3L16 7.375M12 3L8 7.375' },
+    ],
+    check: [
+      { 'stroke-linecap': 'round', 'stroke-linejoin': 'round', d: 'M4 12.9L8.2 17L20 6.5' },
+    ],
+    plus: [
+      { 'stroke-linecap': 'round', d: 'M12 6V18M6 12H18' },
+    ],
     more: [
       { el: 'circle', 'stroke-linecap': 'round', cx: '5', cy: '12', r: '2' },
       { el: 'circle', 'stroke-linecap': 'round', cx: '12', cy: '12', r: '2' },

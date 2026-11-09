@@ -91,6 +91,10 @@ describe('runState', () => {
     const s = { ...run, ...cycle({ phase: 'filling' }), tracking: { alarm: 'feed_stopped' } };
     expect(runState(s, true, false)).toMatchObject({ tone: 'bad', word: 'Alarm', title: 'Feed stopped' });
   });
+  it('a ratio moved too fast is its own alarm, not "out of bounds" (it sets scale_ok false too)', () => {
+    const s = { ...run, scale_ok: false, tracking: { alarm: 'ratio_jump' } };
+    expect(runState(s, true, false)).toMatchObject({ tone: 'bad', word: 'Alarm', title: 'Pump ratio moved too fast' });
+  });
   it('a silent cable shared by two pumps blames neither: one switched off silences both (2026-10-23)', () => {
     const r = cycle();
     r.refill.address = 2;

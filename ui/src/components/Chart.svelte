@@ -1,6 +1,6 @@
 <script>
   import { num, vol } from '../lib/fmt.js';
-  import { valueScale, elapsedTicks, ticksFor } from '../lib/chartscale.js';
+  import { valueScale, elapsedTicks, ticksFor, axisGutter } from '../lib/chartscale.js';
   import { splitEstimated } from '../lib/refill.js';
   import { refillMarkAt } from '../lib/runview.js';
   import { textBox, placeLabel, besideLine } from '../lib/chartlabels.js';
@@ -24,6 +24,9 @@
    *   ticks?: { t: number, label: string }[],
    *   plannedWide?: boolean,
    *   endpoints?: boolean,
+   *   highlight?: [number, number] | null,
+   *   minGutter?: number,
+   *   gutter?: number,
    * }}
    */
   let {
@@ -56,6 +59,13 @@
     plannedWide = false,
     // The values at the curve's start and end, by its two dots.
     endpoints = true,
+    // Two charts stacked (History): the wider of their two value margins,
+    // so their time axes line up; `gutter` gives this one's own.
+    minGutter = 0,
+    gutter = $bindable(0),
+    // A stretch lit behind the curve, `[from_s, to_s]` (New run: the step
+    // row under the pointer).
+    highlight = null,
   } = $props();
 
   // Two charts can share a page (a run's curve and its weighed feed): each
@@ -67,14 +77,10 @@
   let boxW = $state(960);
   const W = $derived(Math.max(240, Math.round(boxW)));
   const H = 240;
-  // No horizontal inset: the plot spans the full width so it lines up edge to
-  // edge with the progress bar above it.
-  const padL = 0;
   const padR = 0;
   const padT = 16;
   const padB = 22;
   const dotR = 3.5;
-  const clampX = (px) => Math.max(dotR, Math.min(W - dotR, px));
 
   // From zero with a graduated axis, never zoomed onto the data (chartscale.js).
   const bounds = $derived(valueScale([...planned.map((p) => p[1]), ...actual.map((p) => p[1])]));
@@ -82,6 +88,15 @@
     const step = bounds.ticks.length > 1 ? bounds.ticks[1] - bounds.ticks[0] : 1;
     return (String(+step.toPrecision(6)).split('.')[1] ?? '').length;
   });
+  // The graduations sit outside the plot, right-aligned in a left margin as
+  // wide as the longest one: inside, they read as part of the curve.
+  const tickTexts = $derived(bounds.ticks.map((v) => num(v, tickDigits)));
+  const ownGutter = $derived(axisGutter(tickTexts));
+  $effect(() => {
+    gutter = ownGutter;
+  });
+  const padL = $derived(Math.max(ownGutter, minGutter));
+  const clampX = (px) => Math.max(padL + dotR, Math.min(W - dotR, px));
 
   const dspan = $derived(durationS > 0 ? durationS : 1);
   const x = (t) => padL + (Math.min(t, dspan) / dspan) * (W - padL - padR);
@@ -107,16 +122,8 @@
     };
   });
 
-  // A gridline per graduation, its value above it at the left edge; left out
-  // where it would sit on the curve's start label.
-  const grid = $derived(
-    bounds.ticks.map((v) => {
-      const gy = y(v);
-      const ly = Math.max(10, gy - 3);
-      const clash = labels && labels.sx < 80 && Math.abs(ly - labels.sy) < 12;
-      return { gy, ly, text: clash ? null : num(v, tickDigits) };
-    })
-  );
+  // A gridline per graduation, its value level with it in the left margin.
+  const grid = $derived(bounds.ticks.map((v, i) => ({ gy: y(v), ly: y(v) + 3.5, text: tickTexts[i] })));
 
   // At least 2 px wide, so a short refill still shows.
   const bandRects = $derived(
@@ -182,7 +189,7 @@
       .sort((a, b) => a.t - b.t)
       .forEach((m, i) => {
         const lx = clampX(x(m.t));
-        const bx = Math.min(W - BADGE_R - 1, Math.max(lx, lastBx + 2 * BADGE_R + 3, BADGE_R + 1));
+        const bx = Math.min(W - BADGE_R - 1, Math.max(lx, lastBx + 2 * BADGE_R + 3, padL + BADGE_R + 1));
         lastBx = bx;
         out.push({ lx, bx, n: i + 1 });
       });
@@ -199,7 +206,7 @@
   const mark = $derived(refillMarkAt(refill, dspan));
   const refillX = $derived(mark ? (mark.edge ? W - padR - 1 : x(mark.t)) : null);
   const takenBoxes = $derived.by(() => {
-    const out = grid.filter((g) => g.text != null).map((g) => textBox(padL + 2, g.ly, g.text, 'start', 9.5));
+    const out = grid.map((g) => textBox(padL - 4, g.ly, g.text, 'end', 9.5));
     if (labels) {
       out.push(textBox(clampX(labels.sx) + 6, labels.sy, `${num(labels.sVal, digits)} ${unit}`, 'start'));
       out.push(textBox(clampX(labels.ex) - 6, labels.ey, `${num(labels.eVal, digits)} ${unit}`, 'end'));
@@ -254,14 +261,17 @@
 
     {#each grid as g}
       <line x1={padL} x2={W - padR} y1={g.gy} y2={g.gy} stroke="var(--line-soft)" stroke-width="1" />
-      {#if g.text != null}
-        <text x={padL + 2} y={g.ly} class="axl tick">{g.text}</text>
-      {/if}
+      <text x={padL - 4} y={g.ly} text-anchor="end" class="axl tick">{g.text}</text>
     {/each}
 
     {#each bandRects as b}
       <rect x={b.x} y={padT} width={b.w} height={H - padT - padB} class="band" />
     {/each}
+
+    {#if highlight && highlight[1] > highlight[0]}
+      <rect x={x(Math.max(0, highlight[0]))} y={padT} width={Math.max(2, x(highlight[1]) - x(Math.max(0, highlight[0])))}
+            height={H - padT - padB} class="hl" />
+    {/if}
 
     {#if area}
       <path d={area} fill="url(#{fillId})" />
@@ -328,14 +338,15 @@
 
 <style>
   .chart-wrap { overflow-x: hidden; }
-  /* The viewBox is the box's own width: full width, edge to edge with the
-     progress bar, and labels at their real size. */
+  /* The viewBox is the box's own width: full width, and labels at their real
+     size. */
   svg { width: 100%; height: auto; display: block; }
   .axl { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
   .tick { font-size: 9.5px; opacity: 0.8; }
   .now-vol { fill: var(--ink); font-weight: 600; }
   .marker { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
   .band { fill: var(--fill); fill-opacity: 0.16; }
+  .hl { fill: var(--teal-400); fill-opacity: 0.14; }
   .blind { fill: none; stroke: var(--muted); stroke-width: 1.75; stroke-dasharray: 4 4; stroke-linecap: round; }
   .refill { stroke: var(--teal-600); stroke-width: 1.5; stroke-dasharray: 6 4; }
   .refill-l { fill: var(--teal-600); font-weight: 600; }

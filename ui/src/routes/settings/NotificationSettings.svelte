@@ -114,7 +114,9 @@
     }),
   );
   let savedSnapshot = null; // what the daemon has
-  let saveState = $state('saved'); // 'saving' | 'saved' | 'error'
+  // 'idle' until something is saved in this visit: a "Saved" shown on
+  // opening read as if something had just been done (UX audit, 2026-11-06)
+  let saveState = $state('idle'); // 'idle' | 'saving' | 'saved' | 'error'
   let saveErr = $state(null);
   $effect(() => {
     const snap = snapshot;
@@ -265,7 +267,7 @@
   {#snippet foot()}
     <button class="btn-ghost" onclick={addPerson}>+ Add a person</button>
     <span class="save-state" class:bad={saveState === 'error'} aria-live="polite">
-      {#if saveState === 'saving'}Saving…{:else if saveState === 'error'}Not saved: {saveErr}{:else}✓ Saved{/if}
+      {#if saveState === 'saving'}Saving…{:else if saveState === 'error'}Not saved: {saveErr}{:else if saveState === 'saved'}✓ Saved{/if}
     </span>
   {/snippet}
 </SettingsCard>
@@ -316,7 +318,8 @@
   .linkish { background: none; border: none; padding: 0; font: inherit; font-size: 12px; color: var(--teal-700); cursor: pointer; }
   .server { margin-top: var(--s-4); }
   .server-field { margin-top: var(--s-2); }
-  @media (max-width: 720px) {
+  /* a narrow pane: the name and the topic each on a full line */
+  @container pane (max-width: 680px) {
     .row { flex-wrap: wrap; }
     .row .name, .row .topic { flex: 1 1 100%; }
   }

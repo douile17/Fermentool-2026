@@ -13,6 +13,7 @@
     refillRows, regulationFigures, verdict, whenLine, curveChips, blindLegend, pumpLine,
   } from '../lib/rundetail.js';
   import { rateLabel, rateMarks, rateSteps, runAgainSeed } from '../lib/ratechange.js';
+  import { stepsFromSegments } from '../lib/steps.js';
 
   let runs = $state([]);
   let err = $state(null);
@@ -26,6 +27,9 @@
   let sel = $state(null); // { run, planned, ticks, events, report, cal }
   // The journal's events fetched for a detail: enough for any run's.
   const EVENTS_MAX = 1000;
+  // the value margins of the two stacked charts, the wider one for both
+  let feedGutter = $state(0);
+  let gapGutter = $state(0);
   let rawJournal = $state(false);
   let q = $state('');
 
@@ -174,6 +178,7 @@
       value: c.start,
       mu_per_hour: c.params.mu_per_hour ?? 0.15,
       steepness: c.params.steepness ?? 8,
+      ...(c.params.kind === 'step' ? { steps: stepsFromSegments(c.params.segments) } : {}),
       gravimetric_trim: !!run.gravimetric_trim,
       auto_refill: !!run.auto_refill,
       refill_draw_kg: run.refill_draw_g != null ? run.refill_draw_g / 1000 : null,
@@ -183,9 +188,9 @@
     };
   }
 
-  // The curve shapes the New run form can rebuild. A step or custom curve
-  // (made through the API) would come back as a constant one.
-  const FORM_KINDS = ['linear', 'exponential', 'sigmoid', 'constant'];
+  // The curve shapes the New run form can rebuild. A custom curve (made
+  // through the API) would come back as a constant one.
+  const FORM_KINDS = ['linear', 'exponential', 'sigmoid', 'constant', 'step'];
   const replayable = $derived(!!sel && FORM_KINDS.includes(sel.run.curve.params.kind));
   const notReplayable = 'New run cannot rebuild this curve shape';
 
@@ -557,6 +562,8 @@
           plannedWide
           endpoints={false}
           markers={marks.map((m) => ({ t: m.t, label: m.text }))}
+          minGutter={gapGutter}
+          bind:gutter={feedGutter}
         />
         {#if marks.length}
           <ol class="marks">
@@ -571,7 +578,7 @@
             <h3>Running total vs requested</h3>
             <div class="legend"><span>delivered − requested, mL</span></div>
           </div>
-          <GapChart points={sel.report.points} {spans} spanS={reportSpanS} />
+          <GapChart points={sel.report.points} {spans} spanS={reportSpanS} minGutter={feedGutter} bind:gutter={gapGutter} />
         </div>
       {/if}
 

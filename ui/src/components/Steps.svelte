@@ -76,7 +76,11 @@
   .step.done .step-n, .step.on.done .step-n { background: var(--green-500); color: var(--on-primary); }
   .step-t { display: flex; flex-direction: column; min-width: 0; }
   .step-l { font-weight: 600; }
-  .step-s { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* two lines before it is cut: "rpm to set, direction to ch…" lost its point */
+  .step-s {
+    font-size: 12px; line-height: 1.3; color: var(--muted); overflow: hidden;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  }
   @media (max-width: 760px) {
     .step-s { display: none; }
   }

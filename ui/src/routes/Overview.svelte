@@ -12,7 +12,9 @@
   import StateIcon from '../components/StateIcon.svelte';
   import ChangeRate from '../components/ChangeRate.svelte';
   import { canChangeRate, curveFact, rateSince, rateSteps } from '../lib/ratechange.js';
-  import { runTimeAt } from '../lib/rundetail.js';
+  import { recentLines, runTimeAt } from '../lib/rundetail.js';
+  // the whole journal, as History reads it: a refill is numbered from the first
+  const EVENTS_RECENT = 1000;
   import { cycleLine } from '../lib/refill.js';
 
   // Overview follows feeding cycles only: a calibration burst is watched
@@ -25,6 +27,8 @@
   let run = $state(null);
   let planned = $state([]);
   let events = $state([]);
+  // in words, as History's journal says them, the newest first
+  const actLines = $derived(run ? recentLines(events, run) : []);
   let err = $state(null);
   let loadedId = $state(null);
   let lastEventsAt = 0;
@@ -86,15 +90,15 @@
     if (id != null) load(id);
   });
 
-  // Refresh the "recent activity" list as the run advances, at most once a
-  // second whatever the status frame rate.
+  // Refresh the "recent activity" list as the run advances, at most every
+  // 5 s whatever the status frame rate: it reads the whole journal.
   $effect(() => {
     void active?.last_seq;
     if (loadedId == null || !run) return;
     const t = Date.now();
-    if (t - lastEventsAt < 1000) return;
+    if (t - lastEventsAt < 5000) return;
     lastEventsAt = t;
-    get(`/api/runs/${loadedId}/events?limit=6`).then((e) => (events = e)).catch(() => {});
+    get(`/api/runs/${loadedId}/events?limit=${EVENTS_RECENT}`).then((e) => (events = e)).catch(() => {});
   });
 
   async function load(id) {
@@ -103,7 +107,7 @@
       // the curve the run follows, its rate changes included
       const p = await post('/api/preview', { curve: run.effective_curve ?? run.curve, samples: 200 });
       planned = p.series;
-      events = await get(`/api/runs/${id}/events?limit=6`);
+      events = await get(`/api/runs/${id}/events?limit=${EVENTS_RECENT}`);
     } catch (e) {
       err = e.message;
     }
@@ -630,7 +634,7 @@
           {#if trimmed}
             <section class="panel delivery" class:on={deliveryTone === 'on'} class:off={deliveryTone === 'off'} aria-label="Delivery">
               <div class="p-head">
-                <h3>Delivery</h3>
+                <h2>Delivery</h2>
                 {#if app.status?.tracking?.alarm}
                   <span class="tag bad">correction held</span>
                 {:else if gapPct != null}
@@ -664,7 +668,7 @@
             {#if feedSide}
               <section class="panel grow" class:alarmed={app.status?.tracking?.alarm === 'feed_stopped'} aria-label="Feed bottle">
                 <div class="p-head">
-                  <h3>Feed bottle</h3>
+                  <h2>Feed bottle</h2>
                   {#if app.status?.tracking?.alarm === 'feed_stopped'}
                     <span class="tag bad">not moving</span>
                   {:else if app.status?.scale_connected === false}
@@ -695,7 +699,7 @@
             {/if}
           {:else}
             <section class="panel grow" aria-label="Run">
-              <div class="p-head"><h3>This run</h3><span class="k">no balance</span></div>
+              <div class="p-head"><h2>This run</h2><span class="k">no balance</span></div>
               {#if run.control_var === 'ml_min' && estimatedMl != null}
                 <div class="mid-line">
                   <span class="mid mono-num">{vol(estimatedMl)}</span>
@@ -716,7 +720,7 @@
         <!-- 3. What did the regulation do, and when? -->
         <section class="panel" aria-label="Balance regulation">
           <div class="p-head">
-            <h3>Balance regulation</h3>
+            <h2>Balance regulation</h2>
             <span class="k">
               {#if app.status?.tracking?.alarm}Correction held at ×{num(app.status?.trim_c, 3)} while the alarm lasts.
               {:else if limitPct != null}Correction ×{num(app.status?.trim_c, 3)}, limit ±{limitPct} %. Delivery tolerance ±{TOL * 100} % of what was asked.
@@ -748,14 +752,15 @@
 {#if (active || complete) && run}
   <section class="panel journal" aria-label="Journal">
     <div class="p-head">
-      <h3>Recent activity</h3>
+      <h2>Recent activity</h2>
       <button class="link" onclick={() => (app.tab = 'history')}>Full journal in History</button>
     </div>
     <ol class="acts">
-      {#each events as e (e.id)}
-        <li class="act {e.level}">
-          <span class="when"><time class="mono">{shortTime(e.wall_time)}</time>{#if runTimeAt(e.wall_time, run.started_at)}<span class="mono at">{runTimeAt(e.wall_time, run.started_at)}</span>{/if}</span>
-          <span><b>{e.kind.replaceAll('_', ' ')}</b>{#if e.detail}<span class="body">, {e.detail}</span>{/if}</span>
+      {#each actLines as l, i (`${l.ms}:${i}`)}
+        {@const iso = new Date(l.ms).toISOString()}
+        <li class="act" class:error={l.tone === 'bad'}>
+          <span class="when"><time class="mono">{shortTime(iso)}</time>{#if runTimeAt(iso, run.started_at)}<span class="mono at">{runTimeAt(iso, run.started_at)}</span>{/if}</span>
+          <span><b>{l.title}</b>{#if l.detail}<span class="body">, {l.detail}</span>{/if}</span>
         </li>
       {:else}
         <li class="muted">No events yet.</li>
@@ -923,7 +928,8 @@
     padding: var(--s-5) var(--s-5); min-width: 0;
     display: flex; flex-direction: column; gap: var(--s-3);
   }
-  .panel h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0; }
+  /* h2: the page's h1 is the state (sr-only), the panels come next */
+  .panel h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0; }
   .p-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; }
   .rate { flex: 2 1 560px; gap: var(--s-5); }
   .side { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-4); }
@@ -995,7 +1001,6 @@
   .act .at { color: var(--muted); font-size: 11px; white-space: nowrap; }
   .act b { font-weight: 500; }
   .act .body { color: var(--muted); overflow-wrap: anywhere; }
-  .act.warn b { color: var(--warn-ink); }
   .act.error b { color: var(--danger-ink); }
   .muted { color: var(--muted); }
 

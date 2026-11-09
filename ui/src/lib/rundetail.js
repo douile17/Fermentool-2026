@@ -221,6 +221,7 @@ const TITLES = {
   alarm_feed_stopped: 'Alarm: feed stopped',
   alarm_saturated: 'Alarm: correction out of bounds',
   alarm_wrong_side: 'Alarm: balance on the other side',
+  alarm_ratio_jump: 'Alarm: pump ratio moved too fast',
   alarm_refill_no_rise: 'Alarm: bottle not filling',
   alarm_refill_dry: 'Alarm: refill stopped, nothing comes',
   alarm_refill_overfill: 'Alarm: bottle overfilled',
@@ -238,6 +239,11 @@ const TITLES = {
   setpoint_change: 'Rate changed',
 };
 const kindTitle = (k) => TITLES[k] ?? (k.charAt(0).toUpperCase() + k.slice(1)).replaceAll('_', ' ');
+
+/** The last `n` journal lines of a run, the newest first (Overview's
+ *  Recent activity). Built from the whole journal, not its last `n`
+ *  events: a refill takes three events and is numbered from the first. */
+export const recentLines = (events, run, n = 6) => journalLines(events, run).reverse().slice(0, n);
 
 /** A run's events as the journal's lines, in time order: `[{ day, time,
  *  title, detail, tone }]`. A refill's start, stop and settle make one line

@@ -52,3 +52,12 @@ export function elapsedTicks(spanS, max = 6) {
  *  6 at most. "100 min" and "120 min" overlapped on New run's narrow
  *  preview (2026-10-22). */
 export const ticksFor = (widthPx) => Math.min(6, Math.max(2, Math.floor(widthPx / 80)));
+
+/** The left margin, px, that holds a chart's value labels `texts` (9.5 px
+ *  figures, right-aligned 4 px from the plot): outside the plot, where they
+ *  no longer sit on the curve. At least 36 px, so the two charts of a run
+ *  detail (Chart, GapChart) keep the same plot edge and their times line up. */
+export function axisGutter(texts) {
+  const longest = Math.max(0, ...texts.map((t) => String(t).length));
+  return Math.max(36, Math.ceil(longest * 9.5 * 0.6) + 8);
+}

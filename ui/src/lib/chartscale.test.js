@@ -1,6 +1,6 @@
 // The chart's value axis (chartscale.js): from zero, with round graduations.
 import { describe, expect, it } from 'vitest';
-import { niceStep, valueScale, elapsedTicks, ticksFor } from './chartscale.js';
+import { niceStep, valueScale, elapsedTicks, ticksFor, axisGutter } from './chartscale.js';
 
 describe('niceStep', () => {
   it('rounds to 1, 2, 2.5 or 5 times a power of ten', () => {
@@ -62,5 +62,16 @@ describe('ticksFor', () => {
     expect(elapsedTicks(7200, ticksFor(360)).map((k) => k.label)).toEqual(['0', '30 min', '60 min', '90 min', '120 min']);
     expect(ticksFor(1000)).toBe(6);
     expect(ticksFor(100)).toBe(2);
+  });
+});
+
+describe('axisGutter', () => {
+  it('a margin outside the plot, the same for both charts of a run detail', () => {
+    // Overview's Feed rate drew its graduations inside the plot, over the curve (2026-11-02)
+    expect(axisGutter(['0', '2.5', '5', '7.5', '10'])).toBe(36);
+    expect(axisGutter(['−10', '0', '+10'])).toBe(36);
+  });
+  it('wider for long labels, so none runs off the left edge', () => {
+    expect(axisGutter(['0', '250', '500', '750', '1000.5'])).toBeGreaterThanOrEqual(Math.ceil(6 * 9.5 * 0.6) + 4);
   });
 });

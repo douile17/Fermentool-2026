@@ -186,11 +186,11 @@
     padding: 5px var(--s-2); font-size: 12.5px; white-space: nowrap;
   }
   .err-line { display: block; font-size: 12px; color: var(--danger-ink); margin: var(--s-1) 0 0; }
-  @media (max-width: 760px) {
+  @container pane (max-width: 640px) {
     .facts { grid-template-columns: minmax(0, 1fr); gap: var(--s-1); }
     dd { margin-bottom: var(--s-3); }
   }
-  @media (max-width: 560px) {
+  @container pane (max-width: 480px) {
     .root, .files li { flex-wrap: wrap; }
     .files { margin-left: var(--s-2); padding-left: var(--s-3); }
     .open { width: auto; }
