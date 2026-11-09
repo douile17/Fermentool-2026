@@ -659,6 +659,9 @@ mod tests {
         dry: bool,
         /// What the refill pump really delivers, mL/min.
         refill_ml_min: f64,
+        /// The feed's curve, mL/min, and what the feed pump delivers of it.
+        feed_ml_min: f64,
+        feed_k: f64,
         run_id: i64,
     }
 
@@ -670,7 +673,7 @@ mod tests {
                 RefillConfig { pump_address: 2, ..RefillConfig::default() },
                 Instant::now(),
             ).unwrap();
-            Bench { e, w: 1100.0, dry: false, refill_ml_min: 285.0, run_id: 0 }
+            Bench { e, w: 1100.0, dry: false, refill_ml_min: 285.0, feed_ml_min: 60.0, feed_k: 1.0, run_id: 0 }
         }
 
         fn start(&mut self) {
@@ -681,7 +684,7 @@ mod tests {
                 control_var: ControlVar::MlMin,
                 direction: crate::store::Direction::Cw,
                 pump_addr: 1,
-                curve: CurveSpec::linear(60.0, 60.0, Duration::from_secs(36_000)),
+                curve: CurveSpec::linear(self.feed_ml_min, self.feed_ml_min, Duration::from_secs(36_000)),
                 gravimetric_trim: true,
                 kind: RunKind::Dosing,
                 tubing_calibration_id: None,
@@ -702,7 +705,7 @@ mod tests {
             self.e.attach_scale_for_test(Box::new(Reading(self.w)));
             self.e.scale_tick(now);
             self.e.tick(now).unwrap();
-            self.w -= 60.0 / 60.0 * self.e.trim_c();
+            self.w -= self.feed_k * self.feed_ml_min / 60.0 * self.e.trim_c();
             if self.refill_running() && !self.dry {
                 self.w += self.refill_ml_min / 60.0;
             }
@@ -917,6 +920,42 @@ mod tests {
         assert!(b.e.refill_cycle_status().unwrap().halted);
         let dry = b.e.store.events(Some(b.run_id), 10_000).unwrap().into_iter().find(|e| e.kind == "alarm_refill_dry").unwrap();
         assert!(dry.detail.unwrap().contains("Refill now"), "says how to go on");
+    }
+
+    #[test]
+    fn a_fill_on_an_empty_reservoir_does_not_move_c() {
+        // Run 256, 3 Nov 2026: Refill now on an empty reservoir, the refill
+        // line pushed its last 1.5 g in, nothing more came. Measured across
+        // the attempt, the bottle read as a feed pump running short: c went
+        // from 0.963 to 1.013, then back over ten minutes.
+        let mut b = Bench::new(Store::open_in_memory().unwrap());
+        b.feed_ml_min = 10.0;
+        b.feed_k = 1.035;
+        b.dry = true;
+        b.start();
+        let mut cs = Vec::new();
+        let mut i = 1;
+        while !b.refill_running() {
+            b.second(i);
+            cs.push(b.e.trim_c());
+            i += 1;
+            assert!(i < 5_000, "no fill started");
+        }
+        let start = cs.len();
+        while i < start as i64 + 2_000 {
+            if (start as i64..start as i64 + 15).contains(&i) {
+                b.w += 0.1;
+            }
+            b.second(i);
+            cs.push(b.e.trim_c());
+            i += 1;
+        }
+        assert!(b.kinds().contains(&"alarm_refill_no_rise".to_string()), "{:?}", b.kinds());
+        assert!(!b.refill_running(), "cut");
+        let before = cs[start - 5];
+        assert!((before - 1.0 / 1.035).abs() < 0.005, "c settled at {before}");
+        let swing = cs[start..].iter().map(|c| (c - before).abs()).fold(0.0, f64::max);
+        assert!(swing < 0.002, "c moved {swing} after the fill on an empty reservoir");
     }
 
     #[test]

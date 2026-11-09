@@ -899,6 +899,57 @@ struct Tracker {
     /// Since a refill, c rides on `k` from before it, until the reads after
     /// it fill a settled window ([`tracking::ratio_after_refill`]).
     ratio_frozen: bool,
+    /// The settled ratio c regulates on: it drifts toward the measured one
+    /// at most [`tracking::K_DRIFT_PER_S`]. Learned at `k_ref_rate` (g/s),
+    /// last moved at `k_ref_t`; learned once that rate has held since
+    /// `k_learn_t` for a settled window.
+    k_ref: Option<f64>,
+    k_ref_rate: f64,
+    k_ref_t: f64,
+    k_learn_t: f64,
+    /// The measured ratio strays from `k_ref`: since when it is seen, and
+    /// when it began (a settled window earlier: the window held it before
+    /// the slope showed it).
+    k_jump: Option<(f64, f64)>,
+    /// `(t_s, commanded_g, delivered_g)` at each update over the last hour.
+    #[serde(skip)]
+    mass_hist: std::collections::VecDeque<(f64, f64, f64)>,
+    /// What a stray read as fed or missed, once over: the bottle disturbed,
+    /// written off like `forgiven_g` but not feed missed. Written off up to
+    /// `discounted_until_t`: a stray seen again counts from there, never
+    /// twice (one flapping at the tolerance wrote off 24 g of a 2.4 g seep).
+    discounted_g: f64,
+    discounted_until_t: f64,
+}
+
+impl Tracker {
+    /// What the regulation still owes: asked, less delivered, less what is
+    /// written off.
+    fn deficit(&self) -> f64 {
+        self.required_g - self.delivered_g - self.forgiven_g - self.discounted_g
+    }
+
+    /// [`Self::deficit`] with what the balance weighed since `since_t`
+    /// replaced by `k` times the commanded mass, as a refill's stretch is.
+    fn deficit_weighed_until(&self, since_t: f64, k: f64) -> f64 {
+        let at = self.mass_hist.iter().rev().find(|(t, _, _)| *t <= since_t).or(self.mass_hist.front());
+        match at {
+            Some((_, com, del)) => self.deficit() + (self.delivered_g - del) - k * (self.commanded_g - com),
+            None => self.deficit(),
+        }
+    }
+
+    /// What the pump delivers when the balance can't say: the measured
+    /// ratio, else what the starting c assumes (the calibration's c0).
+    fn k_est(&self) -> Option<f64> {
+        self.k.or(self.c_seed.filter(|c| *c > 0.0).map(|c| 1.0 / c))
+    }
+
+    /// The reads after a touch, a refill or a silence: counted `k_est`
+    /// times the commanded mass, not weighed.
+    fn settling(&self, t: f64) -> bool {
+        self.ratio_hold_until_t.is_some_and(|until| t < until)
+    }
 }
 
 /// Delivered mass below `-max(WRONG_SIDE_MIN_G, WRONG_SIDE_FRACTION *
@@ -2291,6 +2342,7 @@ const MARKER_KINDS: &[&str] = &[
     "alarm_feed_stopped",
     "alarm_saturated",
     "alarm_wrong_side",
+    "alarm_ratio_jump",
     "alarm_cleared",
     "refill",
 ];
@@ -2393,6 +2445,7 @@ impl<T: Transport> Engine<T> {
         }
         let Some((raw_g, _stable)) = self.read_scale() else {
             self.refill_cycle_read_failed(now);
+            self.anchor_a_silent_balance(now);
             return;
         };
         // Everything below reasons about a feed bottle whose weight falls as
@@ -2501,7 +2554,7 @@ impl<T: Transport> Engine<T> {
             // The level jumped: these reads would read as a rise.
             self.recent_reads.clear();
             // No more weight than before: the bottle was lifted and put back,
-            // what it lost meanwhile is measured, not estimated.
+            // or a fill brought nothing. No refill to journal.
             if !gained {
                 if let Some(a) = self.tracker.anchor.as_mut() {
                     a.refill = false;
@@ -2583,22 +2636,25 @@ impl<T: Transport> Engine<T> {
         // on the saved weight with the masses saved alongside it, so the
         // downtime is measured whatever the save lag.
         let mut save = tr.anchor.is_some() || tr.last_weight_g.is_none();
+        let k_est = tr.k_est();
+        let settling = tr.settling(t);
         if let Some(a) = tr.anchor.take() {
-            // The ratio history is kept: across the gap the count grows by
-            // k times the commanded mass, a segment of slope k, neutral for
-            // the ratio. c resumes on the settled window, not from scratch.
-            // Unless the feed had stopped: then the history is the dry
-            // bottle, and the pump starts over on what it does now.
-            tr.delivered_g += tracking::settle_anchor(&a, weight_g, tr.commanded_g, tr.k, resolution_g);
-            if a.refill && tr.alarm.is_some() {
-                tr.points.clear();
-            } else if a.refill && tr.k.is_some() {
-                // Regulated on the first minutes after a refill, the ratio
-                // read the balance settling, not the pump (run 251).
-                tr.points.clear();
+            // Whatever moved the bottle (a touch, a refill, a fill on an
+            // empty reservoir, a silent balance), the stretch counts k times
+            // the commanded mass, neutral for c, and the ratio starts over
+            // on the reads that follow it, c riding on k meanwhile. Unless
+            // the feed had stopped: then the history is the dry bottle, and
+            // the pump starts over on what it does now.
+            tr.delivered_g += tracking::settle_anchor(&a, weight_g, tr.commanded_g, k_est, resolution_g);
+            tr.points.clear();
+            if tr.alarm.is_none() {
+                // The first minutes after read the balance settling, the
+                // line draining, not the pump (runs 251, 256).
                 tr.ratio_hold_until_t = Some(t + tracking::REFILL_SETTLE_S);
-                tr.ratio_frozen = true;
+                tr.ratio_frozen = tr.k.is_some();
             }
+        } else if settling {
+            tr.delivered_g += k_est.unwrap_or(1.0) * (tr.commanded_g - tr.last_normal_commanded_g).max(0.0);
         } else if let Some(w0) = tr.last_weight_g {
             tr.delivered_g += w0 - weight_g;
         } else {
@@ -2647,6 +2703,10 @@ impl<T: Transport> Engine<T> {
         while tr.c_hist.front().is_some_and(|(t0, _)| *t0 < t - tracking::C_HISTORY_S) {
             tr.c_hist.pop_front();
         }
+        tr.mass_hist.push_back((t, tr.commanded_g, tr.delivered_g));
+        while tr.mass_hist.front().is_some_and(|(t0, _, _)| *t0 < t - tracking::C_HISTORY_S) {
+            tr.mass_hist.pop_front();
+        }
         // An alarm to raise (kind, onset time, detail), applied once the
         // tracker borrow ends: it restores c, so it needs the whole engine.
         let mut raise: Option<(tracking::TrimAlarm, f64, String)> = None;
@@ -2694,26 +2754,54 @@ impl<T: Transport> Engine<T> {
         // only, the history is still full of the stopped stretch.
         let mut cleared = false;
         if raise.is_none()
-            && matches!(tr.alarm, Some(tracking::TrimAlarm::FeedStopped | tracking::TrimAlarm::Saturated))
+            && matches!(
+                tr.alarm,
+                Some(
+                    tracking::TrimAlarm::FeedStopped
+                        | tracking::TrimAlarm::Saturated
+                        | tracking::TrimAlarm::RatioJump
+                )
+            )
         {
             if let Some(k) = tracking::recent_ratio(&tr.points, resolution_g) {
-                if !tracking::needs_alarm(k, bounds) {
-                    let missed = tr.required_g - tr.delivered_g - tr.forgiven_g;
+                let jump = tr.alarm == Some(tracking::TrimAlarm::RatioJump);
+                // Back by the settled ratio from before, when there is one:
+                // merely within bounds, the window can still hold the end of
+                // what raised it (a seep at 0.05 g/s cleared at 0.88 and
+                // moved c 2 %).
+                // A feed stopped or out of bounds also needs the ratio within
+                // bounds: a settled ratio out of them (the limit narrowed)
+                // read as "back" and the alarm flapped every 7 min.
+                let back = match tr.k_ref {
+                    Some(kr) => !tracking::ratio_jumped(kr, k) && (jump || !tracking::needs_alarm(k, bounds)),
+                    None => !jump && !tracking::needs_alarm(k, bounds),
+                };
+                if back {
+                    let missed = tr.deficit();
                     tr.forgiven_g += missed;
                     tr.alarm = None;
                     tracking::keep_recent(&mut tr.points, resolution_g);
-                    tr.k = Some(k);
+                    tr.k = tr.k_ref.or(Some(k));
+                    tr.k_jump = None;
                     tr.saturated_updates = 0;
                     tr.saturated_since_t = None;
                     tr.flow_ref = None;
                     cleared = true;
                     trim_events.push((
                         "alarm_cleared",
-                        format!(
-                            "feed flowing again (pump ratio {k:.3}), regulation resumed at x{:.3}; \
-                             {missed:.1} g missed meanwhile are not caught up",
-                            self.trim_c
-                        ),
+                        if jump {
+                            format!(
+                                "pump ratio back at {k:.3}, regulation resumed at x{:.3}; \
+                                 {missed:.1} g counted meanwhile are not caught up",
+                                self.trim_c
+                            )
+                        } else {
+                            format!(
+                                "feed flowing again (pump ratio {k:.3}), regulation resumed at x{:.3}; \
+                                 {missed:.1} g missed meanwhile are not caught up",
+                                self.trim_c
+                            )
+                        },
                     ));
                 }
             }
@@ -2732,7 +2820,7 @@ impl<T: Transport> Engine<T> {
                 // wrong calibration): estimate the ratio from what there is and
                 // correct at full speed, as the ratio path would. Otherwise
                 // nudge around the starting c on the cumulative deficit.
-                let deficit = tr.required_g - tr.delivered_g - tr.forgiven_g;
+                let deficit = tr.deficit();
                 let early_k = tracking::deficit_is_significant(deficit, tr.required_g, resolution_g)
                     .then(|| tracking::early_ratio(&tr.points, resolution_g))
                     .flatten();
@@ -2742,7 +2830,7 @@ impl<T: Transport> Engine<T> {
                     self.trim_c =
                         tracking::next_c_early(self.trim_c, seed, deficit, rate, resolution_g, bounds);
                 }
-            } else if let Some(r) = ratio {
+            } else if let Some(mut r) = ratio {
                 let k = r.k;
                 if tr.k.is_none() {
                     trim_events.push((
@@ -2750,7 +2838,83 @@ impl<T: Transport> Engine<T> {
                         format!("pump ratio measured: {k:.3}, regulating on it"),
                     ));
                 }
-                tr.k = Some(k);
+                let mut deficit = tr.deficit();
+                let same_speed = (rate - tr.k_ref_rate).abs() <= tracking::K_RATE_CHANGE * tr.k_ref_rate;
+                if !tracking::ratio_precise(rate, resolution_g) {
+                    // Too slow a feed for the balance to tell wear from a
+                    // stray: the measured ratio regulates, as it always did.
+                    // Back at a precise rate, it is learned again from there.
+                    tr.k_ref = None;
+                    tr.k_ref_rate = rate;
+                    tr.k_learn_t = t;
+                    tr.k_jump = None;
+                } else if !r.settled && same_speed && tr.k_ref.is_some() {
+                    // A short window again (an alarm just cleared): the
+                    // settled ratio from before stands until a settled one.
+                    r = tracking::Ratio { k: tr.k_ref.unwrap_or(k), settled: true };
+                } else if r.settled {
+                    // Tubing wears slowly; a settled ratio moving faster is
+                    // the bottle disturbed (a weight left on the pan, a line
+                    // seeping into it): c regulates on a ratio that drifts
+                    // at the wear's pace, and holds while the measured one
+                    // strays.
+                    match tr.k_ref {
+                        Some(kr) if same_speed => {
+                            if tracking::ratio_jumped(kr, k) {
+                                let back = (t - tracking::SETTLED_WINDOW_S).max(tr.discounted_until_t);
+                                let (since, onset) = *tr.k_jump.get_or_insert((t, back));
+                                if t - since >= tracking::K_JUMP_ALARM_S {
+                                    raise = Some((
+                                        tracking::TrimAlarm::RatioJump,
+                                        onset,
+                                        format!(
+                                            "pump ratio moved from {kr:.3} to {k:.3} in {:.0} min, \
+                                             faster than tubing wears",
+                                            (t - since) / 60.0
+                                        ),
+                                    ));
+                                }
+                            } else {
+                                if let Some((_, onset)) = tr.k_jump.take() {
+                                    // What the stray read as fed or missed
+                                    // was the bottle, not the pump.
+                                    tr.discounted_g += tr.deficit() - tr.deficit_weighed_until(onset, kr);
+                                    tr.discounted_until_t = t;
+                                }
+                                tr.k_ref = Some(tracking::drift_toward(kr, k, t - tr.k_ref_t));
+                            }
+                        }
+                        _ if tr.k_ref.is_some() || !same_speed => {
+                            // Another speed, another ratio: learned again once
+                            // the window holds only this speed, the measured
+                            // one standing meanwhile.
+                            tr.k_ref = None;
+                            tr.k_ref_rate = rate;
+                            tr.k_learn_t = t;
+                            tr.k_jump = None;
+                        }
+                        _ => {
+                            if t - tr.k_learn_t >= tracking::SETTLED_WINDOW_S {
+                                tr.k_ref = Some(k);
+                            }
+                        }
+                    }
+                    tr.k_ref_t = t;
+                    r.k = tr.k_ref.unwrap_or(k);
+                    // The weighing reaches c only once the slope has had
+                    // time to show a stray (a seep, read as the pump running
+                    // short): the last minutes, and a stray's whole
+                    // stretch, count as the ratio says.
+                    if tr.k_ref.is_some() {
+                        // Never back over a stretch already written off.
+                        let since = tr
+                            .k_jump
+                            .map_or(t - tracking::WEIGH_DELAY_S, |(_, onset)| onset)
+                            .max(tr.discounted_until_t);
+                        deficit = tr.deficit_weighed_until(since, r.k);
+                    }
+                }
+                tr.k = Some(r.k);
                 if tracking::needs_alarm(k, bounds) {
                     tr.saturated_updates += 1;
                     tr.saturated_since_t.get_or_insert(t);
@@ -2771,7 +2935,6 @@ impl<T: Transport> Engine<T> {
                         ),
                     ));
                 } else {
-                    let deficit = tr.required_g - tr.delivered_g - tr.forgiven_g;
                     self.trim_c = tracking::next_c_for(self.trim_c, r, deficit, rate, bounds);
                 }
             }
@@ -2813,16 +2976,41 @@ impl<T: Transport> Engine<T> {
     /// estimate: while the balance cannot measure (a refill, a touch), the
     /// weighed count stands still since the anchor; the pump's ratio times
     /// what it was told since then carries it on, as the anchor will settle
-    /// it, instead of a flat line the gap chart reads as a dive.
+    /// it, instead of a flat line the gap chart reads as a dive. The
+    /// settling minutes after are estimated too.
     fn delivered_for_journal(&self) -> (f64, bool) {
         let tr = &self.tracker;
         match tr.anchor {
             Some(a) => (
-                tr.delivered_g + tr.k.unwrap_or(1.0) * (tr.commanded_g - a.commanded_g).max(0.0),
+                tr.delivered_g + tr.k_est().unwrap_or(1.0) * (tr.commanded_g - a.commanded_g).max(0.0),
                 true,
             ),
-            None => (tr.delivered_g, false),
+            None => (tr.delivered_g, tr.last_t_s.is_some_and(|t| tr.settling(t))),
         }
+    }
+
+    /// No balance reading for [`REFILL_BLIND_S`]: anchored as a touch is,
+    /// so whatever the bottle did meanwhile (a drop from the refill line, a
+    /// hand) is not read as the feed when the readings come back.
+    fn anchor_a_silent_balance(&mut self, now: Timestamp) {
+        let Some(started) = self.active.as_ref().map(|a| a.started_at) else {
+            return;
+        };
+        let t = now.duration_since(started).as_secs_f64();
+        let tr = &mut self.tracker;
+        let (Some(last_t), Some(w)) = (tr.last_t_s, tr.last_weight_g) else {
+            return;
+        };
+        if tr.anchor.is_some() || t - last_t < refill_cycle::REFILL_BLIND_S {
+            return;
+        }
+        tr.anchor = Some(tracking::Anchor {
+            weight_g: w,
+            commanded_g: tr.last_normal_commanded_g,
+            refill: false,
+            resumed: false,
+        });
+        self.save_trim_state();
     }
 
     /// Stop regulating, say why, and put c back to its value from before the
@@ -2842,6 +3030,7 @@ impl<T: Transport> Engine<T> {
             self.trim_c = c;
         }
         tr.alarm = Some(kind);
+        tr.k_jump = None;
         tr.points.clear();
         tr.k = None;
         tr.saturated_updates = 0;
@@ -2943,7 +3132,7 @@ impl<T: Transport> Engine<T> {
             // Same as a recovery: what the pump fell short by while out of
             // bounds is written off, not paid back in a burst.
             let tr = &mut self.tracker;
-            missed = tr.required_g - tr.delivered_g - tr.forgiven_g;
+            missed = tr.deficit();
             tr.forgiven_g += missed;
             tr.alarm = None;
             tr.saturated_updates = 0;
@@ -4170,8 +4359,212 @@ mod tests {
         }
         assert!(event_times(&e, id, "refill").is_empty(), "a lift is not a refill");
         let tr = e.status().tracking.unwrap();
-        // Measured across the lift, not estimated.
         assert!((tr.delivered_ml - truth).abs() < 0.5, "{} vs {truth}", tr.delivered_ml);
+    }
+
+    /// Run 256's pump (10 mL/min, delivering 103.5 %), its bottle read
+    /// through `read(i, w)` (`None`: the read fails), ±0.1 g of balance
+    /// noise; c at each second.
+    fn c_through(read: impl Fn(i64, f64) -> Option<f64>, until: i64) -> Vec<f64> {
+        c_through_pump(|_| 1.035, read, until).0
+    }
+
+    /// [`c_through`] with the pump delivering `k(i)` at second `i`; the
+    /// engine at the end too.
+    fn c_through_pump(
+        k: impl Fn(i64) -> f64,
+        read: impl Fn(i64, f64) -> Option<f64>,
+        until: i64,
+    ) -> (Vec<f64>, Engine<SimPump>) {
+        let spec = CurveSpec::linear(10.0, 10.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        e.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+        let mut w = 4_500.0;
+        let mut cs = Vec::new();
+        for i in 0..until {
+            let noise = 0.1 * ((i * 7_919 % 3) - 1) as f64;
+            let reads: Vec<f64> = read(i, w + noise).map(|r| (r * 10.0).round() / 10.0).into_iter().collect();
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&reads)));
+            e.scale_tick(at(i));
+            cs.push(e.trim_c());
+            w -= k(i) * spec.value_at(Duration::from_secs(i as u64)) / 60.0 * e.trim_c();
+        }
+        (cs, e)
+    }
+
+    /// How far c strays from the same run left alone, from `from` on: what
+    /// the event moved, apart from the ratio window's own wander.
+    fn c_moved(cs: &[f64], from: usize) -> f64 {
+        let quiet = c_through(|_, w| Some(w), cs.len() as i64);
+        cs[from..].iter().zip(&quiet[from..]).map(|(c, q)| (c - q).abs()).fold(0.0, f64::max)
+    }
+
+    /// The bottle handled must never move c, whatever is left on the pan:
+    /// within the ratio's own noise (the quiet run flips c by 0.1 % from one
+    /// second to the next, and the event shifts that noise in time).
+    const HANDLED_C_SWING: f64 = 0.004;
+
+    #[test]
+    fn a_touch_that_leaves_a_gram_on_the_pan_does_not_move_c() {
+        // A hand on the bottle for 40 s, then a cap left on the pan: the
+        // 1.5 g it weighs are not feed the pump missed.
+        let cs = c_through(
+            |i, w| match i {
+                3_000..3_040 => Some(w + 20.0),
+                3_040.. => Some(w + 1.5),
+                _ => Some(w),
+            },
+            5_000,
+        );
+        assert!((cs[2_990] - 1.0 / 1.035).abs() < 0.005, "c settled at {}", cs[2_990]);
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < HANDLED_C_SWING, "c moved {swing} after the touch");
+    }
+
+    #[test]
+    fn the_line_draining_into_the_bottle_after_a_refill_does_not_move_c() {
+        // ~1 kg poured, then the refill line drains 1.5 g over a minute and
+        // the balance creeps 0.6 g: neither is the pump running short.
+        let cs = c_through(
+            |i, w| {
+                let poured = 2.0 * (i.clamp(3_000, 3_500) - 3_000) as f64;
+                let after = (i - 3_500).max(0) as f64;
+                let drained = 1.5 * (after / 60.0).min(1.0);
+                let creep = 0.6 * (1.0 - (-after / 60.0).exp());
+                Some(w + poured + drained + creep)
+            },
+            5_500,
+        );
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < HANDLED_C_SWING, "c moved {swing} after the refill");
+    }
+
+    #[test]
+    fn a_balance_silent_while_a_drop_falls_in_does_not_move_c() {
+        // 4 s without a reading (a PC busy compiling), and a drop of 1 g
+        // lands meanwhile.
+        let cs = c_through(
+            |i, w| match i {
+                3_000..3_004 => None,
+                3_004.. => Some(w + 1.0),
+                _ => Some(w),
+            },
+            5_000,
+        );
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < HANDLED_C_SWING, "c moved {swing} after the silence");
+    }
+
+    #[test]
+    fn a_weight_too_small_to_read_as_a_touch_does_not_move_c() {
+        // 0.8 g settles on the pan in one read, under the 1 g a touch needs:
+        // it moved c 2.7 % before c held on a slowly drifting ratio.
+        let cs = c_through(|i, w| Some(if i >= 3_000 { w + 0.8 } else { w }), 5_000);
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < HANDLED_C_SWING, "c moved {swing} after the weight");
+    }
+
+    #[test]
+    fn a_line_seeping_into_the_bottle_does_not_move_c_and_is_said() {
+        // The refill line seeps 0.02 g/s into the bottle for 20 min (a tube
+        // not seated in a stopped refill pump): it read as the feed pump
+        // running 12 % short and pushed c up 15 %.
+        let seep = |i: i64, w: f64| Some(w + 0.02 * (i.clamp(3_000, 4_200) - 3_000) as f64);
+        let (cs, e) = c_through_pump(|_| 1.035, seep, 4_100);
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < HANDLED_C_SWING, "c moved {swing} while the line seeped");
+        assert_eq!(e.status().tracking.unwrap().alarm, Some(tracking::TrimAlarm::RatioJump));
+        let (cs, e) = c_through_pump(|_| 1.035, seep, 6_000);
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < HANDLED_C_SWING, "c moved {swing} after the line stopped seeping");
+        assert_eq!(e.status().tracking.unwrap().alarm, None, "the alarm clears once the seep stops");
+    }
+
+    #[test]
+    fn a_seep_at_the_tolerance_is_written_off_once() {
+        // 0.002 g/s, 1.2 % of the flow: the stray flaps at the 1 % tolerance,
+        // and each clear wrote the same 5 min off again, c down 9.6 %. At the
+        // tolerance part of it reads as wear: c within half the seep's 1.2 %.
+        let cs = c_through(|i, w| Some(w + 0.002 * (i.clamp(3_000, 4_200) - 3_000) as f64), 6_000);
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < 0.006, "c moved {swing}");
+    }
+
+    #[test]
+    fn a_seep_past_the_correction_limit_clears_on_the_ratio_from_before() {
+        // 0.05 g/s reads as the pump at 70 %: "out of bounds" raised, then
+        // cleared while the window still held the seep's end, c up 5.9 %.
+        let cs = c_through(|i, w| Some(w + 0.05 * (i.clamp(3_000, 4_200) - 3_000) as f64), 6_000);
+        let swing = c_moved(&cs, 3_000);
+        assert!(swing < HANDLED_C_SWING, "c moved {swing}");
+    }
+
+    #[test]
+    fn tubing_that_wears_is_still_followed() {
+        // The pump's ratio climbs 0.5 %/h, faster than this bench's tubing
+        // ever wore: c follows it within the ratio's own noise.
+        let wear = |i: i64| 1.035 * (1.0 + 0.005 * (i as f64 / 3_600.0));
+        let (cs, e) = c_through_pump(wear, |_, w| Some(w), 10_800);
+        assert_eq!(e.status().tracking.unwrap().alarm, None);
+        let end = 1.0 / wear(10_800);
+        assert!((cs[10_799] - end).abs() < 0.003, "c {} vs {end}", cs[10_799]);
+    }
+
+    /// A 10 mL/min Constant run on a pump delivering `k`, the balance at
+    /// ±0.1 g; `each(e, i)` runs before second `i`. The run's id too.
+    fn constant_run(k: f64, until: i64, mut each: impl FnMut(&mut Engine<SimPump>, i64)) -> (Engine<SimPump>, i64) {
+        let spec = CurveSpec::constant(10.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[]))), scale_cfg("sim-scale"));
+        let id = e.start_run(RunConfig { curve: spec, ..trim_cfg() }, t0()).unwrap();
+        let mut w = 4_500.0;
+        for i in 0..until {
+            each(&mut e, i);
+            let noise = 0.1 * ((i * 7_919 % 3) - 1) as f64;
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[((w + noise) * 10.0).round() / 10.0])));
+            e.scale_tick(at(i));
+            let rate = e.store().run(id).unwrap().unwrap().effective_curve().value_at(Duration::from_secs(i as u64));
+            w -= k * rate / 60.0 * e.trim_c();
+        }
+        (e, id)
+    }
+
+    #[test]
+    fn a_saturation_alarm_stays_raised_while_the_settled_ratio_is_out_of_bounds() {
+        // A pump at 88 % needs c 1.14: fine within ±25 %, out of bounds once
+        // the limit is narrowed to ±10 %. Its settled ratio is still 0.88,
+        // and "back by the settled ratio" cleared the alarm at once, raised
+        // again 5 min later, the deficit forgiven each time.
+        let (e, id) = constant_run(0.88, 6_000, |e, i| {
+            if i == 3_000 {
+                let cfg = ScaleConfig { trim_limit_pct: 10.0, ..scale_cfg("sim-scale") };
+                assert!(e.reconfigure_scale(cfg).is_ok());
+            }
+        });
+        assert_eq!(e.status().tracking.unwrap().alarm, Some(tracking::TrimAlarm::Saturated));
+        assert!(event_times(&e, id, "alarm_cleared").is_empty(), "cleared at {:?}", event_times(&e, id, "alarm_cleared"));
+    }
+
+    #[test]
+    fn a_rate_too_slow_to_weigh_precisely_learns_the_ratio_again_after_it() {
+        // 10, then 2 mL/min (under what the balance tells precisely, the
+        // settled ratio dropped), then 10 again: the ratio is learned once a
+        // settled window holds only the new 10 mL/min, not adopted from a
+        // window straddling both speeds.
+        let mut early = Vec::new();
+        constant_run(1.035, 5_400, |e, i| {
+            if i == 3_000 {
+                e.set_constant_rate(2.0, 3_000.0, at(3_000)).unwrap();
+            }
+            if i == 4_500 {
+                e.set_constant_rate(10.0, 4_500.0, at(4_500)).unwrap();
+            }
+            if (4_510..4_500 + tracking::SETTLED_WINDOW_S as i64).contains(&i) && e.tracker.k_ref.is_some() {
+                early.push(i);
+            }
+        });
+        assert!(early.is_empty(), "ratio adopted at {:?}", early.first());
     }
 
     #[test]
@@ -7056,7 +7449,10 @@ mod tests {
             .iter()
             .map(|c| (c / before - 1.0).abs())
             .fold(0.0, f64::max);
-        assert!(worst < 0.005, "c moved {:.2} % after the change", 100.0 * worst);
+        // Within 0.6 %: on this bench the pump's ratio reads 0.25 % apart at
+        // the two rates (the weight lags the command a second), and at 3
+        // mL/min a 0.1 g balance step is 0.33 % of c.
+        assert!(worst < 0.006, "c moved {:.2} % after the change", 100.0 * worst);
     }
 
     // --- Feed pump models (LabV, PDS II) ---------------------------------

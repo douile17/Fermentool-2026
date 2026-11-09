@@ -120,7 +120,8 @@ fn slope_from(points: &[TrackPoint], start: usize) -> Option<f64> {
 
 /// Why the trim stopped regulating. Raised with c restored to its value from
 /// before the problem and frozen; `FeedStopped` and `Saturated` clear by
-/// themselves once the feed flows within bounds again.
+/// themselves once the feed flows within bounds again, `RatioJump` once the
+/// ratio is back by the regulated one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrimAlarm {
@@ -131,6 +132,10 @@ pub enum TrimAlarm {
     Saturated,
     /// The weight moves the wrong way for the configured balance position.
     WrongSide,
+    /// The measured ratio left the regulated one faster than tubing wears,
+    /// for [`K_JUMP_ALARM_S`]: tube moved in the head, the bottle or its
+    /// lines disturbed. Clears once the ratio is back.
+    RatioJump,
 }
 
 impl TrimAlarm {
@@ -139,6 +144,7 @@ impl TrimAlarm {
             TrimAlarm::FeedStopped => "alarm_feed_stopped",
             TrimAlarm::Saturated => "alarm_saturated",
             TrimAlarm::WrongSide => "alarm_wrong_side",
+            TrimAlarm::RatioJump => "alarm_ratio_jump",
         }
     }
 }
@@ -313,6 +319,50 @@ pub fn next_c_early(
     bounds.clamp(prev_c + (target - prev_c).clamp(-MAX_C_STEP, MAX_C_STEP))
 }
 
+/// Once settled, the ratio c regulates on follows the measured one at most
+/// this fast (relative, per second: 1 %/h). A pump's tubing wears by 0.1 to
+/// 0.4 %/h on this bench (runs 192, 210, 251); what the balance reads faster
+/// is the bottle disturbed, not the pump (a 0.8 g weight left on the pan
+/// moved c 2.7 %, a refill line seeping 0.02 g/s into the bottle 15 %).
+pub const K_DRIFT_PER_S: f64 = 0.01 / 3600.0;
+/// A settled measured ratio this far from the drifting one is no wear: c
+/// holds, and the deficit counted meanwhile is written off if it comes back.
+pub const K_JUMP_TOLERANCE: f64 = 0.01;
+/// ...still that far after this long: `RatioJump` alarm.
+pub const K_JUMP_ALARM_S: f64 = 900.0;
+/// Once settled, the weighed deficit reaches c this late: a seep takes the
+/// settled slope ~90 s to show, and paid back before that it moved c 1.5 %.
+/// Meanwhile the ratio counts the feed, as over a refill.
+pub const WEIGH_DELAY_S: f64 = 180.0;
+/// The balance must see a [`K_JUMP_TOLERANCE`] stray within a settled
+/// window's time as this many of its steps, or the drifting ratio is off:
+/// at 0.05 mL/min the weight moves a step every 2 min and the settled ratio
+/// read 0.90 to 0.95 on a pump delivering 0.95. With a 0.1 g balance: from
+/// 4 mL/min.
+pub const K_REF_MIN_STEPS: f64 = 2.0;
+
+/// Whether the feed rate (g/s) lets the balance see a stray of the ratio.
+pub fn ratio_precise(rate_g_s: f64, resolution_g: f64) -> bool {
+    rate_g_s * SETTLED_WINDOW_S * K_JUMP_TOLERANCE >= K_REF_MIN_STEPS * resolution_g
+}
+
+/// A feed rate this far from the one the ratio was learned at: the pump turns
+/// at another speed, its ratio is learned again instead of drifting there.
+pub const K_RATE_CHANGE: f64 = 0.10;
+
+/// The regulated ratio moved toward `measured` by at most
+/// [`K_DRIFT_PER_S`] over `dt_s`.
+pub fn drift_toward(k_ref: f64, measured: f64, dt_s: f64) -> f64 {
+    let most = k_ref * K_DRIFT_PER_S * dt_s.max(0.0);
+    k_ref + (measured - k_ref).clamp(-most, most)
+}
+
+/// Whether a measured ratio strays from the regulated one past
+/// [`K_JUMP_TOLERANCE`].
+pub fn ratio_jumped(k_ref: f64, measured: f64) -> bool {
+    (measured - k_ref).abs() > K_JUMP_TOLERANCE * k_ref
+}
+
 /// Whether `k` needs a c outside `bounds`.
 pub fn needs_alarm(k: f64, bounds: Bounds) -> bool {
     k < 1.0 / bounds.max || k > 1.0 / bounds.min
@@ -332,13 +382,14 @@ pub struct Anchor {
     pub resumed: bool,
 }
 
-/// Mass delivered between the anchor and the first `Normal` read after it.
-/// Measured when the weight came back where the feed alone would have taken
-/// it (a bottle lifted and put back); estimated from `k` (1.0 if unknown)
-/// otherwise: a refill, or a jolt that left an offset either way. A tube
-/// pulling on the bottle shifts the reading by a gram or two and stays: once
-/// counted only when it went down, it read as feed delivered (run 78: 3.4 g
-/// too many in 2 min, and c cut to x0.92).
+/// Mass delivered between the anchor and the first `Normal` read after it:
+/// `k` times the commanded mass, never the weight difference, whatever
+/// happened meanwhile. A bottle handled comes back with grams that are not
+/// feed: a tube pulling on it (run 78: 3.4 g, c cut to x0.92), a cap left on
+/// the pan, the last of a refill line on an empty reservoir (run 256: 1.4 g,
+/// c up 5 %). Within a gram or two of the feed, they read as the pump off.
+/// Only a crash resume is measured: the pump may have stopped, or held an
+/// old setpoint, while the daemon was down.
 pub fn settle_anchor(
     a: &Anchor,
     weight_now: f64,
@@ -347,21 +398,12 @@ pub fn settle_anchor(
     resolution_g: f64,
 ) -> f64 {
     let expected = k.unwrap_or(1.0) * (commanded_now - a.commanded_g).max(0.0);
-    let measured = a.weight_g - weight_now;
-    if a.refill {
-        return expected;
-    }
-    if a.resumed {
+    if a.resumed && !a.refill {
         // Only a gain (a refill during the downtime) can't be measured.
+        let measured = a.weight_g - weight_now;
         return if weight_now <= a.weight_g + resolution_g { measured.max(0.0) } else { expected };
     }
-    // The touch's own noise, plus room for a k that is not measured yet.
-    let tolerance = (5.0 * resolution_g).max(1.0) + 0.1 * expected;
-    if (measured - expected).abs() <= tolerance {
-        measured.max(0.0)
-    } else {
-        expected
-    }
+    expected
 }
 
 /// Coefficient of determination of `delivered` against `required` (both
@@ -567,9 +609,12 @@ mod tests {
     }
 
     #[test]
-    fn a_touch_without_refill_is_measured() {
+    fn a_touch_is_estimated_even_a_gram_from_the_feed() {
+        // 10 g commanded at k 0.9: 9 g expected. 1.4 g short of it (run 256,
+        // a refill line's last drops) once passed as measured feed.
         let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false };
-        assert_eq!(settle_anchor(&a, 990.0, 60.0, Some(0.9), 0.1), 10.0);
+        assert!((settle_anchor(&a, 992.4, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
+        assert!((settle_anchor(&a, 991.0, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
     }
 
     #[test]
@@ -611,5 +656,24 @@ mod tests {
         let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false };
         let d = settle_anchor(&a, 1025.0, 60.0, None, 0.1);
         assert!((d - 10.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn the_ratio_drifts_at_most_at_the_wear_pace() {
+        let k = drift_toward(1.0, 1.10, 3_600.0);
+        assert!((k - 1.01).abs() < 1e-9, "{k}");
+        assert_eq!(drift_toward(1.0, 1.001, 3_600.0), 1.001);
+        assert!(ratio_jumped(1.0, 1.011) && ratio_jumped(1.0, 0.989) && !ratio_jumped(1.0, 1.009));
+    }
+
+    #[test]
+    fn the_ratio_is_capped_only_where_the_balance_can_see_a_stray() {
+        // 0.1 g balance: 10 and 4.5 mL/min yes, 3 and 0.05 mL/min no.
+        assert!(ratio_precise(10.0 / 60.0, 0.1));
+        assert!(ratio_precise(4.5 / 60.0, 0.1));
+        assert!(!ratio_precise(3.0 / 60.0, 0.1));
+        assert!(!ratio_precise(0.05 / 60.0, 0.1));
+        // A 1 g balance needs ten times the flow.
+        assert!(!ratio_precise(10.0 / 60.0, 1.0));
     }
 }

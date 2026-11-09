@@ -87,6 +87,11 @@ pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
         "alarm_feed_stopped" => (Alarm, "Feed stopped: bottle empty or line blocked".into()),
         "alarm_saturated" => (Alarm, "Pump out of the correction limit".into()),
         "alarm_wrong_side" => (Alarm, "Balance reads the wrong way for its position".into()),
+        "alarm_ratio_jump" => (Alarm, "Pump ratio moved too fast: check the tube and the bottle".into()),
+        // A ratio stray never stopped the feed: its clear says the ratio.
+        "alarm_cleared" if e.detail.as_deref().is_some_and(|d| d.starts_with("pump ratio back")) => {
+            (Good, "Pump ratio back, regulation resumed".into())
+        }
         "alarm_cleared" => (Good, "Feed flowing again, regulation resumed".into()),
         "scale_lost" => (Alarm, "Balance not answering".into()),
         "scale_recovered" => (Good, "Balance answering again".into()),
@@ -128,7 +133,7 @@ pub fn message_for(e: &EventRow, run: &RunRow) -> Option<Message> {
 /// that ends the condition clears it ([`clears`]).
 pub fn family_of(kind: &str) -> Option<&'static str> {
     match kind {
-        "alarm_feed_stopped" | "alarm_saturated" | "alarm_wrong_side" => Some("trim"),
+        "alarm_feed_stopped" | "alarm_saturated" | "alarm_wrong_side" | "alarm_ratio_jump" => Some("trim"),
         "scale_lost" => Some("scale"),
         "serial_lost" => Some("serial"),
         "readback_mismatch" => Some("readback"),
@@ -803,6 +808,8 @@ mod tests {
         assert_eq!(m.tone, Tone::Alarm);
         assert!(m.title.contains("bottle empty"));
         assert_eq!(message_for(&event("alarm_cleared", None), &run).unwrap().tone, Tone::Good);
+        let back = event("alarm_cleared", Some("pump ratio back at 1.035, regulation resumed at x0.966; 2.1 g counted meanwhile are not caught up"));
+        assert_eq!(message_for(&back, &run).unwrap().title, "Pump ratio back, regulation resumed");
         // Routine journal lines are not messages.
         for quiet in ["write_fail", "readback_ok", "readback_fail", "trim_start", "trim_ratio", "pump_stop"] {
             assert!(message_for(&event(quiet, None), &run).is_none(), "{quiet}");
