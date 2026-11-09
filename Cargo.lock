@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "fermentool-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "fermentool-curves"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1143,14 +1143,14 @@ dependencies = [
 
 [[package]]
 name = "fermentool-modbus"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serialport",
 ]
 
 [[package]]
 name = "fermentool-tauri"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde_json",
  "tauri",

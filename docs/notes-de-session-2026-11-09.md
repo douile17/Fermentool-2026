@@ -64,8 +64,12 @@ copie de travail, et c'est elle qui tourne sur le banc.
 
 ## 5. Pas fait, à faire
 
-- **Commiter** tout ce qui précède, puis taguer la version exportée.
-- Reconstruire l'installateur (0.1.7) pour y mettre la section 4.
+- Commité et poussé sur la branche `steps-raw-audit` (pas encore fusionnée
+  dans `main`). Installateur 0.1.7 construit depuis elle ; son contrôle de
+  fenêtre (RELEASE.md, étape 6) reste à faire, le run 264 occupait le
+  port 8730. Puis taguer `v0.1.7`.
+- Le daemon du banc tourne encore en 0.1.6 + la section 4 : le redéployer
+  en 0.1.7 une fois le run 264 fini.
 - La section 4 des notes du 6 reste ouverte (`App.svelte` à trancher,
   vérification sur un vrai run à plus de 4 ml/min, limites du refill).
 - Le détail d'un run dans History n'a pas été repris à 900 px.

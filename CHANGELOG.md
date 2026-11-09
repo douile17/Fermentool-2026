@@ -2,8 +2,23 @@
 
 ## Non publié (depuis 0.1.5)
 
-Installateur `Fermentool_0.1.6_x64-setup.exe` construit le 6 novembre depuis
-l'arbre de travail (non commité).
+Installateur `Fermentool_0.1.7_x64-setup.exe` construit le 9 novembre
+depuis la branche `steps-raw-audit` (le 0.1.6 du 6 novembre venait de
+l'arbre de travail non commité et ne contenait pas la consigne brute ni les
+corrections de l'audit du 9).
+
+### Audit du 9 novembre
+
+- Régulation : une alarme « hors limite » ne se lève plus et ne retombe plus
+  toutes les 7 min quand la limite de correction est resserrée sous le
+  ratio de la pompe ; le ratio est réappris proprement après un passage à un
+  débit trop lent pour la balance.
+- La notification de fin d'une alarme de ratio dit « Pump ratio back »,
+  plus « Feed flowing again ».
+- Overview : Recent activity lit tout le journal (un 5e remplissage
+  s'appelait « Refill 1 »). History : les deux graphiques d'un run restent
+  alignés. Steps : des secondes tapées sous une autre forme n'allongent plus
+  le run.
 
 ### New run sans régulation : consigne brute (9 novembre)
 
