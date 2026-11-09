@@ -123,7 +123,10 @@ else to install:
 - **Pump is driven by rpm or ml/min only.** Never write the pump's head /
   tubing registers, on any of the three models (LabQ and LabV 1000/1001,
   PDS II n000/n001). Never write the PDS II register 0010 either: it is "all
-  start/stop" for every head of the controller. An ml/min run given an **rpm** tubing calibration is
+  start/stop" for every head of the controller. A run without the balance
+  regulation takes no tube (New run hides it, decided 2026-11-09): its rpm or
+  ml/min goes to the pump as typed, the operator calibrates the pump itself.
+  An ml/min run given an **rpm** tubing calibration is
   *driven in rpm* (`Engine::drive_ml_per_rpm`): curve, journal, volume and
   trim stay in ml/min, only the value written and read back is rpm
   (`write_setpoint` / `read_actual` / `drive_grid`), so the pump's own
@@ -305,6 +308,33 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   window only, never the settled one) is back in bounds; the deficit
   accumulated meanwhile is written off (`forgiven_g`), never paid back in a
   burst. A wider limit lifts a `Saturated` alarm the same way.
+- **Once settled, the ratio moves at the tubing's wear pace** (2026-11-06):
+  c regulates on `k_ref`, which follows the measured settled ratio at most
+  `K_DRIFT_PER_S` (1 %/h; real runs drift 0.1 to 0.4 %/h), and the
+  weighed deficit reaches c `WEIGH_DELAY_S` (3 min) late
+  (`deficit_weighed_until`: the last minutes count `k_ref` x commanded).
+  A measured ratio past `K_JUMP_TOLERANCE` (1 %) from `k_ref` is a stray
+  (`k_jump`, dated a settled window back): c holds, the stretch counts
+  `k_ref`, written off into `discounted_g` (not `forgiven_g`: that one is
+  shown as "missed while the feed was stopped") when it ends; held
+  `K_JUMP_ALARM_S` (15 min), `RatioJump` (`alarm_ratio_jump`), cleared when
+  `recent_ratio` is back by `k_ref`. `k_ref` is learned again at a rate
+  change past `K_RATE_CHANGE` (10 %), once a settled window has run at the
+  new speed (`k_learn_t`: adopted at once, the window straddling both
+  speeds left c 0.5 % off), the measured ratio regulating meanwhile. With a
+  `k_ref`, every trim alarm clears only once `recent_ratio` is back by it
+  (in bounds was not enough: the window still held the end of a 0.05 g/s
+  seep, c moved 2 %), so a pump that changed for good stays in its alarm.
+  A stray's write-off reaches back only to `discounted_until_t`: flapping
+  at the tolerance, each clear wrote the same 5 min off again (24 g for a
+  2.4 g seep). Unmeasured, a sub-1 g weight left on the pan moved c 2.7 % and a
+  0.02 g/s seep 15 %; tests `a_weight_too_small_to_read_as_a_touch_...`,
+  `a_line_seeping_into_the_bottle_...`, `tubing_that_wears_is_still_followed`.
+  Changing the tube on purpose mid-run now raises the alarm. Only where the
+  balance can see a 1 % stray within a settled window's 5 min as
+  `K_REF_MIN_STEPS` (2) steps (`ratio_precise`: from ~4 mL/min on a 0.1 g
+  balance); below, the measured ratio regulates as before (at 0.05 mL/min
+  the settled ratio read 0.90 to 0.95 on a 0.95 pump: a false alarm).
 - The perturbation threshold follows the flow (`perturbation_limit_g`, 5x the
   expected step, 1..5 g): a fixed 5 g let a 3.4 g bump at 2 ml/min pass as
   flow.
@@ -342,6 +372,15 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   start cut the next fill at once, then raised a false "dry" alarm. A run
   ended mid-fill owes its Stop at once (`refill_run_ended`), retried every
   second, and "does not stop" is raised once (`stop_failed_said`).
+- **Handling the bottle never moves c** (run 256, 2026-11-03: a fill on
+  an empty reservoir pushed 1.4 g in, measured as the feed running short,
+  c went 0.963 to 1.013). Every non-`Normal` stretch (touch, lift, refill,
+  a fill that brought nothing, a balance silent `REFILL_BLIND_S`) counts
+  `k_est` x commanded (`settle_anchor`, never the weight, except a crash
+  resume), then the ratio points are cleared and the next
+  `REFILL_SETTLE_S` reads are counted the same way (`Tracker::settling`,
+  journalled estimated), c riding on `k` meanwhile. Tests compare c to
+  the same run left alone (`c_moved`, ±0.004).
 - **A weight jump past `PERTURBATION_MIN_G` never starts a fill**: a bottle
   lifted off the pan read ~0 g, under the low level.
 - A refill due whose pump does not start is notified
@@ -502,8 +541,8 @@ template only targets group chats), which is why ntfy is the default.
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
 - The session logs, findings on the hardware and the to-do list:
-  `docs/notes-de-session-*.md` (latest: `2026-11-02`, its section 5 is the
-  open list). User-facing changes: `CHANGELOG.md`.
+  `docs/notes-de-session-*.md` (latest: `2026-11-09`, its section 5 is the
+  open list, with section 4 of `2026-11-06`). User-facing changes: `CHANGELOG.md`.
 
 ## RS-485 bus: one pump switched off silences the other (2026-10-23)
 

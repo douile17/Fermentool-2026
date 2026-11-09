@@ -2,6 +2,96 @@
 
 ## Non publié (depuis 0.1.5)
 
+Installateur `Fermentool_0.1.6_x64-setup.exe` construit le 6 novembre depuis
+l'arbre de travail (non commité).
+
+### New run sans régulation : consigne brute (9 novembre)
+
+- **No regulation ne demande plus de tuyau** : la pompe reçoit les rpm ou
+  les ml/min tels que tapés, l'opérateur calibre la pompe lui-même (sa
+  tête et son tuyau réglés sur la pompe pour les ml/min). Avant, un tuyau
+  calibré était proposé, et même présélectionné, en ml/min, et la pompe
+  était alors pilotée en rpm d'après sa calibration. Le tuyau ne reste
+  demandé qu'avec Balance regulation (ligne « Tube » du récapitulatif
+  aussi).
+
+### Audit d'utilisabilité avant export (6 novembre)
+
+- **Fenêtre de 900 px (la plus petite de l'appli)** : la colonne de page ne
+  s'élargit plus selon son contenu (Tubing calibration débordait à droite),
+  marges réduites sous 1100 px. Les sections de Settings se mettent en page
+  sur la largeur de leur carte (`@container pane`), plus sur celle de la
+  fenêtre : Pumps montre LabQ / LabV / PDS II, Notifications les noms et
+  topics en entier. Les graphiques de Balance regulation sont dessinés à
+  leur vraie largeur (textes lisibles).
+- Overview d'un run Steps : « 4 steps, 1.000 to 6.000 » au lieu de début →
+  fin. « Recent activity » en phrases, comme le journal de History.
+- Settings, Balance pendant un run régulé : port, baud, densité, position et
+  Disconnect grisés avec une phrase (le daemon les refusait déjà) ; la limite
+  de correction reste modifiable. Notifications : « ✓ Saved » seulement après
+  un enregistrement.
+- Titres des panneaux de l'Overview en h2 (accessibilité) ; le résumé sous
+  chaque étape des barres d'étapes tient sur deux lignes avant d'être coupé.
+- Le smoke test vérifie la fenêtre à 900 px.
+
+### Profil en paliers (Steps), saisi ou importé d'Excel (6 novembre)
+
+- New run, Feed profile : nouvelle forme **Steps**. Un tableau de paliers
+  « à partir de X h Y min → débit », autant que voulu (jusqu'à 1 000), le
+  premier à 0. Le dernier tient jusqu'à la fin, puis jusqu'au Stop, comme
+  les autres courbes. Un palier qui revient en arrière dans le temps, ou
+  qui commence après la fin du run, est refusé sur sa ligne, en rouge.
+- **Import from Excel** (.xlsx ou .csv) et **Download template**. Le
+  modèle a deux colonnes, `From (h)` en heures décimales (12.5 pour
+  12 h 30) et `Rate (ml/min)` ou `Rate (rpm)`, avec la validation d'Excel
+  sur les cellules et une feuille « Read me ». L'import vérifie tout le
+  fichier avant de prendre quoi que ce soit : en-têtes, unité du run,
+  premier palier à 0, heures croissantes, une heure du jour (12:30) au
+  lieu d'un nombre, débit au-delà de la pompe ou du tuyau. Une erreur, et
+  rien n'est importé ; chaque problème est dit avec son numéro de ligne.
+- Run again et l'export des réglages reprennent les paliers.
+- Le daemon n'a pas changé : sa courbe Step existait déjà (changements de
+  débit d'un run Constant).
+
+### Ratio de la pompe : plafonné à la vitesse d'usure du tuyau (6 novembre)
+
+- Ce que la balance ne voit pas comme une manipulation ne fait plus bouger
+  c. Un poids de 0,8 g resté sur le plateau (sous le seuil de 1 g d'un
+  contact) faisait bouger c de 2,7 %, et une ligne de refill qui goutte
+  0,02 g/s dans la bouteille de 15 %. Sur les vrais runs, le ratio de la
+  pompe n'a jamais dérivé de plus de 0,1 à 0,4 % par heure (usure du
+  tuyau). Une fois stabilisé, le ratio sur lequel c régule suit donc le
+  ratio mesuré à 1 %/h au plus, et le déficit pesé ne compte qu'avec 3
+  minutes de retard (le ratio compte le débit en attendant). Un ratio
+  mesuré qui s'écarte de plus de 1 % : c tient, et si ça dure 15 minutes,
+  nouvelle alarme « Pump ratio moved too fast » (notifiée, c remis à sa
+  valeur d'avant). Elle se lève seule quand le ratio revient. Le ratio est
+  réappris au démarrage, et 5 minutes après un changement de débit de plus
+  de 10 % (le ratio mesuré régule en attendant). Une alarme du trim ne se
+  lève plus que quand la pompe est revenue à son ratio d'avant.
+- Actif à partir d'environ 4 ml/min avec la balance à 0,1 g (il faut que
+  1 % d'écart fasse 2 pas de balance en 5 minutes). En dessous, la balance
+  ne peut pas distinguer l'usure d'une perturbation, et la régulation
+  reste celle d'avant.
+- Limite : un tuyau changé ou déplacé volontairement en cours de run
+  donne maintenant cette alarme, et c reste à l'ancien ratio tant qu'elle
+  dure.
+
+### Bouteille manipulée : c ne bouge plus (3 novembre)
+
+- Plus aucune montée ni baisse de c après qu'on a touché la bouteille. Run
+  256 : un « Refill now » sur un réservoir vide (la ligne a poussé ses
+  derniers 1,4 g, puis plus rien) a fait monter c de 0,963 à 1,013, puis il
+  est redescendu en 10 minutes. Les grammes qui ne viennent pas de la pompe
+  d'alimentation passaient pour du débit dès qu'ils restaient sous ~1 g de
+  tolérance. Désormais, toute période où la balance n'est pas en état normal
+  (bouteille touchée ou soulevée, refill, remplissage qui ne donne rien,
+  balance muette plus de 3 s), plus les 3 minutes qui la suivent, est
+  comptée au débit connu de la pompe, jamais pesée, et le ratio repart sur
+  les lectures d'après. Seule une reprise après crash reste pesée (la pompe
+  a pu s'arrêter pendant la panne). Les 3 minutes après une manipulation
+  apparaissent en pointillé gris comme le refill lui-même.
+
 ### Correction après un refill (2 novembre)
 
 - Plus de pic de correction après un refill. Pendant les ~2 minutes qui
