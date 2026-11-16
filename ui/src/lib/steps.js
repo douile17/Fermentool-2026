@@ -158,12 +158,12 @@ export function parseStepRows(rows, { unit, max = null, maxWhy = '' }) {
     let at = null;
     if (empty(a)) errors.push(`Row ${n}: no time in column A.`);
     else if (typeof a === 'object' && 'time' in a) errors.push(`Row ${n}: column A is a time of day; give hours as a number, 12.5 for 12 h 30 min.`);
-    else if (typeof a !== 'number') errors.push(`Row ${n}: "${a}" in column A is not a number of hours.`);
+    else if (!Number.isFinite(a)) errors.push(`Row ${n}: "${a}" in column A is not a number of hours.`);
     else if (a < 0) errors.push(`Row ${n}: ${a} h is negative.`);
     else at = Math.round(a * 3600);
 
     if (empty(b)) errors.push(`Row ${n}: no rate in column B.`);
-    else if (typeof b !== 'number') errors.push(`Row ${n}: "${typeof b === 'object' ? 'a date' : b}" in column B is not a rate.`);
+    else if (!Number.isFinite(b)) errors.push(`Row ${n}: "${typeof b === 'object' ? 'a date' : b}" in column B is not a rate.`);
     else if (b < 0) errors.push(`Row ${n}: ${b} ${unit} is negative.`);
     else if (max != null && b > max + 1e-9) errors.push(`Row ${n}: ${b} ${unit} is more than ${maxWhy || `the most, ${num(max, 2)} ${unit}`}.`);
 

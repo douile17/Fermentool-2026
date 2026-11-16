@@ -78,6 +78,12 @@ describe('parseStepRows', () => {
       'This file is in rpm, the run is in ml/min. Download the ml/min template.',
     ]);
   });
+  it('refuses a number too long to be finite, in either column', () => {
+    // 400 digits in a CSV read as Infinity, and passed with no maximum set
+    expect(parseStepRows([HEAD, [0, Infinity]], ml).errors).toEqual(['Row 2: "Infinity" in column B is not a rate.']);
+    expect(parseStepRows([HEAD, [0, 1], [Infinity, 2]], ml).errors).toEqual(['Row 3: "Infinity" in column A is not a number of hours.']);
+    expect(parseStepRows([HEAD, [0, NaN]], ml).errors).toHaveLength(1);
+  });
   it('lists every bad row with its Excel row number', () => {
     const { errors } = parseStepRows(
       [HEAD, [0, 1], [12, 2], [12, 3], [], [{ time: 0.52 }, 1], ['6h', 1], [20, 'fast'], [21, -1], [22, null]],

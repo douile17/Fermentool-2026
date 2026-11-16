@@ -18,6 +18,7 @@
   import { segThumb } from '../lib/segthumb.js';
   import { MAX_STEPS, parseStepRows, readCsv, runDurationS, spanLabel, stepAt, stepLasts, stepsCheck, stepsCurve, templateSheets } from '../lib/steps.js';
   import { readXlsx, writeXlsx } from '../lib/xlsx.js';
+  import { newestOnly, profileReady } from '../lib/preview.js';
 
   let f = $state({
     name: '',
@@ -275,7 +276,9 @@
   // Steps typed wrong are said here, in words, before the daemon sees them.
   const stepsBad = $derived(f.kind === 'step' ? stepsCheck(f.steps, durationS) : null);
   const stepsErr = $derived(stepsBad?.text ?? null);
+  const previewReq = newestOnly();
   $effect(() => {
+    const id = previewReq.begin();
     if (stepsErr) {
       clearTimeout(debounce);
       preview = [];
@@ -287,9 +290,11 @@
     debounce = setTimeout(async () => {
       try {
         const r = await post('/api/preview', { curve: spec, samples: 200 });
+        if (!previewReq.current(id)) return;
         preview = r.series;
         previewErr = null;
       } catch (e) {
+        if (!previewReq.current(id)) return;
         preview = [];
         previewErr = e.message;
       }
@@ -496,7 +501,7 @@
   const busy = $derived(app.status?.active != null);
   // A run drives the pump, so it needs a live link, single gate in link.js.
   const cannotStart = $derived(!canStartRun(app.status));
-  const curveOk = $derived(!previewErr && durationS > 0 && preview.length > 0);
+  const curveOk = $derived(profileReady({ preview, previewErr, stepsErr, durationS }));
 
   // What has to be right before Start comes on. Each item takes you to its
   // field, on its step. The direction is never set by default (see `f`).

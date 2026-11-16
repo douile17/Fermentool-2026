@@ -56,4 +56,23 @@ describe('readXlsx', () => {
     });
     expect(await readXlsx(bytes)).toEqual([['From (h)', 'Rate (ml/min)'], [], [null, 1.5]]);
   });
+
+  // A sheet holding only `sheet` (its <sheetData> inner XML).
+  const oneSheet = (sheet) =>
+    zip({
+      'xl/workbook.xml': '<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>',
+      'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>',
+      'xl/worksheets/sheet1.xml': `<worksheet><sheetData>${sheet}</sheetData></worksheet>`,
+    });
+
+  it('refuses a cell far past any profile without filling the rows up to it', async () => {
+    // a row number of 4 billion made it allocate rows up to there
+    const bytes = oneSheet('<row r="1"><c r="A1"><v>0</v></c></row><row r="4294967295"><c r="A4294967295"><v>1</v></c></row>');
+    await expect(readXlsx(bytes)).rejects.toThrow(/rows/);
+  });
+
+  it('skips empty rows and far columns past the limits', async () => {
+    const bytes = oneSheet('<row r="1"><c r="A1"><v>0</v></c><c r="XFD1"><v>9</v></c></row><row r="1048576"/>');
+    expect(await readXlsx(bytes)).toEqual([[0]]);
+  });
 });

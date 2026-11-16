@@ -138,6 +138,11 @@ function attrs(s) {
 // All the text runs of a string item (`<si>` or `<is>`), joined.
 const textOf = (xml) => [...xml.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map((m) => unescapeXml(m[1])).join('');
 
+// The most rows and columns read: a profile has at most 1000 steps in two
+// columns, a sheet's own numbers can claim far more.
+const MAX_ROWS = 10_000;
+const MAX_COLS = 64;
+
 // Built-in number formats that show a date or a time.
 const DATE_FMT_IDS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 46, 47, 50, 57]);
 
@@ -185,13 +190,23 @@ export async function readXlsx(buffer) {
   for (const rm of sheet.matchAll(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g)) {
     const ra = attrs(rm[1]);
     rowNo = ra.r ? +ra.r : rowNo + 1;
+    // Excel keeps empty formatted rows down to 1048576: skipped. A filled one
+    // past the limit is refused before any row is filled up to it (a row
+    // number of 4 billion ran the tab out of memory).
+    if (!(rowNo >= 1 && rowNo <= MAX_ROWS)) {
+      if (/<v>|<is>/.test(rm[2] ?? '')) throw new Error(`the sheet has data past its first ${MAX_ROWS} rows`);
+      continue;
+    }
     const cells = [];
     let col = 0;
     for (const cm of (rm[2] ?? '').matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
       const a = attrs(cm[1]);
-      if (a.r) {
-        const letters = a.r.match(/^[A-Z]+/)[0];
-        col = [...letters].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+      const letters = a.r?.match(/^[A-Z]+/)?.[0];
+      if (letters) col = [...letters].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+      // the columns past the first few hold nothing a profile reads
+      if (col >= MAX_COLS) {
+        col++;
+        continue;
       }
       const body = cm[2] ?? '';
       const vm = body.match(/<v>([\s\S]*?)<\/v>/);
