@@ -380,6 +380,12 @@ pub struct Anchor {
     /// truth, however far from the commanded mass.
     #[serde(default)]
     pub resumed: bool,
+    /// Taken because the balance fell silent, not because the bottle moved:
+    /// a crash before it comes back is measured as a resume is (`resumed`
+    /// set then), the downtime counted as commanded fed 600 mL an hour that
+    /// a stopped pump never moved.
+    #[serde(default)]
+    pub silent: bool,
 }
 
 /// Mass delivered between the anchor and the first `Normal` read after it:
@@ -612,7 +618,7 @@ mod tests {
     fn a_touch_is_estimated_even_a_gram_from_the_feed() {
         // 10 g commanded at k 0.9: 9 g expected. 1.4 g short of it (run 256,
         // a refill line's last drops) once passed as measured feed.
-        let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false };
+        let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false, silent: false };
         assert!((settle_anchor(&a, 992.4, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
         assert!((settle_anchor(&a, 991.0, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
     }
@@ -621,7 +627,7 @@ mod tests {
     fn a_jolt_that_leaves_an_offset_is_estimated_either_way() {
         // 10 g commanded at k 0.9: 9 g expected. A tube that pulled the
         // reading down 2.5 g more, or up 2.5 g, is not feed.
-        let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false };
+        let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false, silent: false };
         assert!((settle_anchor(&a, 988.5, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
         assert!((settle_anchor(&a, 993.5, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
     }
@@ -630,7 +636,7 @@ mod tests {
     fn a_crash_downtime_is_measured_even_far_from_the_commanded_mass() {
         // 30 min down with the pump stopped: 270 g commanded, nothing left
         // the bottle. Nothing was fed.
-        let a = Anchor { weight_g: 1000.0, commanded_g: 0.0, refill: false, resumed: true };
+        let a = Anchor { weight_g: 1000.0, commanded_g: 0.0, refill: false, resumed: true, silent: false };
         assert!((settle_anchor(&a, 999.95, 270.0, Some(1.0), 0.1) - 0.05).abs() < 1e-9);
         // A refill during the downtime can only be estimated.
         assert_eq!(settle_anchor(&a, 1200.0, 270.0, Some(1.0), 0.1), 270.0);
@@ -638,7 +644,7 @@ mod tests {
 
     #[test]
     fn a_refill_is_estimated_from_the_ratio() {
-        let a = Anchor { weight_g: 100.0, commanded_g: 50.0, refill: true, resumed: false };
+        let a = Anchor { weight_g: 100.0, commanded_g: 50.0, refill: true, resumed: false, silent: false };
         assert!((settle_anchor(&a, 1100.0, 60.0, Some(0.9), 0.1) - 9.0).abs() < 1e-9);
     }
 
@@ -653,7 +659,7 @@ mod tests {
     #[test]
     fn a_net_gain_is_estimated_not_counted_negative() {
         // 30 g top-up seen as a perturbation: the bottle gained mass.
-        let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false };
+        let a = Anchor { weight_g: 1000.0, commanded_g: 50.0, refill: false, resumed: false, silent: false };
         let d = settle_anchor(&a, 1025.0, 60.0, None, 0.1);
         assert!((d - 10.0).abs() < 1e-9, "got {d}");
     }

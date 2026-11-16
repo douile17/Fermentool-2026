@@ -2604,6 +2604,7 @@ impl<T: Transport> Engine<T> {
                 commanded_g: self.tracker.last_normal_commanded_g,
                 refill: false,
                 resumed: false,
+                silent: false,
             });
             anchor.refill |= refill;
             // A touch or a refill moves the weight for reasons of its own:
@@ -2778,7 +2779,14 @@ impl<T: Transport> Engine<T> {
                 };
                 if back {
                     let missed = tr.deficit();
-                    tr.forgiven_g += missed;
+                    if jump {
+                        // A stray, the feed never stopped: written off as
+                        // the bottle's, not shown as feed missed.
+                        tr.discounted_g += missed;
+                        tr.discounted_until_t = t;
+                    } else {
+                        tr.forgiven_g += missed;
+                    }
                     tr.alarm = None;
                     tracking::keep_recent(&mut tr.points, resolution_g);
                     tr.k = tr.k_ref.or(Some(k));
@@ -2814,6 +2822,9 @@ impl<T: Transport> Engine<T> {
                 tr.k,
                 &mut tr.ratio_frozen,
             );
+            // Still frozen: the ratio is the one from before the refill, not
+            // a measure at this speed.
+            let ratio_measured = !tr.ratio_frozen;
             if ratio.is_none() && tr.k.is_none() {
                 // No ratio yet (the first few g of a slow feed). A deficit well
                 // past start-up noise means the pump is really off (tube moved,
@@ -2894,7 +2905,11 @@ impl<T: Transport> Engine<T> {
                             tr.k_jump = None;
                         }
                         _ => {
-                            if t - tr.k_learn_t >= tracking::SETTLED_WINDOW_S {
+                            // Only a settled window measured at this speed: the
+                            // ratio frozen over a refill is the old speed's
+                            // (a rate changed while a refill settled took it,
+                            // and the real one then raised a false alarm).
+                            if ratio_measured && t - tr.k_learn_t >= tracking::SETTLED_WINDOW_S {
                                 tr.k_ref = Some(k);
                             }
                         }
@@ -3009,6 +3024,7 @@ impl<T: Transport> Engine<T> {
             commanded_g: tr.last_normal_commanded_g,
             refill: false,
             resumed: false,
+            silent: true,
         });
         self.save_trim_state();
     }
@@ -3459,14 +3475,24 @@ impl<T: Transport> Engine<T> {
         // The tracker was restored with the trim. Anchor it on the last weight
         // seen before the crash, so the downtime (the pump kept going) is
         // measured by the weight difference at the first read.
-        if run.gravimetric_trim && self.tracker.anchor.is_none() {
-            if let Some(w) = self.tracker.last_weight_g {
-                self.tracker.anchor = Some(tracking::Anchor {
-                    weight_g: w,
-                    commanded_g: self.tracker.last_normal_commanded_g,
-                    refill: false,
-                    resumed: true,
-                });
+        // An anchor taken because the balance had fallen silent is measured
+        // the same way; one taken for a hand on the bottle is not (the hand's
+        // grams would read as feed).
+        if run.gravimetric_trim {
+            match self.tracker.anchor.as_mut() {
+                None => {
+                    if let Some(w) = self.tracker.last_weight_g {
+                        self.tracker.anchor = Some(tracking::Anchor {
+                            weight_g: w,
+                            commanded_g: self.tracker.last_normal_commanded_g,
+                            refill: false,
+                            resumed: true,
+                            silent: false,
+                        });
+                    }
+                }
+                Some(a) if a.silent && !a.refill => a.resumed = true,
+                Some(_) => {}
             }
         }
         // `trim_c` only applies if this run opted in, same gate as
@@ -4479,6 +4505,9 @@ mod tests {
         let swing = c_moved(&cs, 3_000);
         assert!(swing < HANDLED_C_SWING, "c moved {swing} after the line stopped seeping");
         assert_eq!(e.status().tracking.unwrap().alarm, None, "the alarm clears once the seep stops");
+        // The feed pump never stopped: nothing reads as feed missed.
+        let missed = e.status().tracking.unwrap().missed_ml;
+        assert!(missed.abs() < 0.5, "{missed} ml shown as missed while the feed was stopped");
     }
 
     #[test]
@@ -4544,6 +4573,36 @@ mod tests {
         });
         assert_eq!(e.status().tracking.unwrap().alarm, Some(tracking::TrimAlarm::Saturated));
         assert!(event_times(&e, id, "alarm_cleared").is_empty(), "cleared at {:?}", event_times(&e, id, "alarm_cleared"));
+    }
+
+    #[test]
+    fn a_rate_change_while_a_refill_settles_learns_the_new_ratio() {
+        // 10 mL/min at 103.5 %, a bottle refilled at 2000 s, then 20 mL/min a
+        // minute later, where this pump gives 97 %. The ratio frozen over the
+        // refill was taken for the new speed's reference after 5 min, and the
+        // real 0.97 then read as a stray: a false "ratio moved too fast".
+        let spec = CurveSpec::constant(10.0, Duration::from_secs(36_000));
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[]))), scale_cfg("sim-scale"));
+        let id = e.start_run(RunConfig { curve: spec, ..trim_cfg() }, t0()).unwrap();
+        let mut w = 3_000.0;
+        for i in 0..4_200i64 {
+            if i == 2_000 {
+                w += 500.0;
+            }
+            if i == 2_060 {
+                e.set_constant_rate(20.0, 2_060.0, at(2_060)).unwrap();
+            }
+            let noise = 0.1 * ((i * 7_919 % 3) - 1) as f64;
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[((w + noise) * 10.0).round() / 10.0])));
+            e.scale_tick(at(i));
+            let rate = e.store().run(id).unwrap().unwrap().effective_curve().value_at(Duration::from_secs(i as u64));
+            let k = if rate > 15.0 { 0.97 } else { 1.035 };
+            w -= k * rate / 60.0 * e.trim_c();
+        }
+        assert!(event_times(&e, id, "alarm_ratio_jump").is_empty(), "false alarm at {:?}", event_times(&e, id, "alarm_ratio_jump"));
+        let kr = e.tracker.k_ref;
+        assert!(kr.is_some_and(|k| (k - 0.97).abs() < 0.01), "k_ref {kr:?}");
     }
 
     #[test]
@@ -5344,6 +5403,44 @@ mod tests {
         let st = b.status();
         assert!(!st.scale_ok, "still frozen after the restart");
         assert_eq!(st.tracking.unwrap().alarm, Some(tracking::TrimAlarm::FeedStopped));
+    }
+
+    #[test]
+    fn a_crash_while_the_balance_is_silent_measures_the_downtime() {
+        // The balance falls silent (an anchor is taken), then the daemon dies
+        // and comes back an hour later; the pump stood still meanwhile, the
+        // bottle weighs what it did. The hour was counted as k x commanded,
+        // 600 mL at 10 mL/min that never left the bottle.
+        let db = TempDb::new();
+        let spec = CurveSpec::linear(10.0, 10.0, Duration::from_secs(36_000));
+        let mut w = 4_000.0;
+        let before = {
+            let mut a = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+            a.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+            a.start_run(RunConfig { curve: spec.clone(), ..trim_cfg() }, t0()).unwrap();
+            for i in 0..600i64 {
+                a.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+                a.scale_tick(at(i));
+                a.tick(at(i)).unwrap();
+                w -= 10.0 / 60.0 * a.trim_c();
+            }
+            for i in 600..610i64 {
+                a.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+                a.scale_tick(at(i));
+                a.tick(at(i)).unwrap();
+            }
+            a.status().tracking.unwrap().delivered_ml
+        };
+        let mut b = Engine::new(Pump::new(SimPump::new(1), 1), db.store(), "test");
+        b.attach_scale_for_test(Box::new(ScriptedScale::new(&[])));
+        b.resume(at(4_210), grace()).unwrap();
+        for i in 4_210..4_215i64 {
+            b.attach_scale_for_test(Box::new(ScriptedScale::new(&[w])));
+            b.scale_tick(at(i));
+            b.tick(at(i)).unwrap();
+        }
+        let after = b.status().tracking.unwrap().delivered_ml;
+        assert!(after - before < 10.0, "{} mL counted over the downtime", after - before);
     }
 
     #[test]
