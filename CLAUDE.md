@@ -380,7 +380,17 @@ the pump at their duration (their weighing window). `HoldingStatus` /
   resume), then the ratio points are cleared and the next
   `REFILL_SETTLE_S` reads are counted the same way (`Tracker::settling`,
   journalled estimated), c riding on `k` meanwhile. Tests compare c to
-  the same run left alone (`c_moved`, ±0.004).
+  the same run left alone (`c_moved`, ±0.004). A silent balance's anchor
+  is marked `silent`: a crash before the balance comes back measures it at
+  resume as a resumed anchor (`a_crash_while_the_balance_is_silent_...`:
+  an hour counted as commanded fed 600 mL a stopped pump never moved); a
+  touch's anchor stays estimated.
+- **`k_ref` is learned only from a measured settled window**
+  (`ratio_measured`): the ratio frozen over a refill is the old speed's,
+  and a rate changed while a refill settled adopted it, then raised a false
+  `RatioJump` on the real one. A `RatioJump` clearing writes its deficit
+  into `discounted_g`, never `forgiven_g` (missed feed: the feed never
+  stopped).
 - **A weight jump past `PERTURBATION_MIN_G` never starts a fill**: a bottle
   lifted off the pan read ~0 g, under the low level.
 - A refill due whose pump does not start is notified

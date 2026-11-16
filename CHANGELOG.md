@@ -7,6 +7,21 @@ depuis la branche `steps-raw-audit` (le 0.1.6 du 6 novembre venait de
 l'arbre de travail non commité et ne contenait pas la consigne brute ni les
 corrections de l'audit du 9).
 
+### Revue CodeRabbit (16 novembre)
+
+- Un crash pendant que la balance est muette ne compte plus le temps
+  d'arrêt comme livré : il est pesé à la reprise (une heure comptait 600 mL
+  qu'une pompe arrêtée n'avait pas donnés).
+- Un changement de débit pendant la stabilisation d'un remplissage ne lève
+  plus de fausse alarme « Pump ratio moved too fast » : le ratio est appris
+  au nouveau débit, pas repris de celui d'avant.
+- La fin d'une alarme de ratio n'affiche plus de feed « manqué » (24 mL
+  dans le test) : la pompe n'avait pas arrêté.
+- Import Steps : un fichier Excel qui annonce une ligne lointaine est
+  refusé au lieu de bloquer l'onglet ; un nombre infini est refusé.
+- New run : un aperçu arrivé en retard ne fait plus passer des paliers
+  faux pour valides.
+
 ### Audit du 9 novembre
 
 - Régulation : une alarme « hors limite » ne se lève plus et ne retombe plus
