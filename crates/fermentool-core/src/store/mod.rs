@@ -82,8 +82,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 15,
         sql: include_str!("migrations/0015_pump_model.sql"),
     },
-    // 16 is `feat/rate-change-reset`'s (the bench DB has it): this branch
-    // skips it, a merge adds it back below 17.
+    Migration {
+        version: 16,
+        sql: include_str!("migrations/0016_setpoint_change_reset.sql"),
+    },
     Migration {
         version: 17,
         sql: include_str!("migrations/0017_timelapses.sql"),
@@ -282,6 +284,9 @@ pub struct SetpointChange {
     pub elapsed_s: f64,
     pub value: f64,
     pub wall_time: Timestamp,
+    /// Grams of owed feed the balance correction wrote off at this change
+    /// (None when nothing was written off).
+    pub reset_g: Option<f64>,
 }
 
 impl RunRow {
@@ -589,7 +594,7 @@ impl Store {
     /// A run's rate changes, in time order.
     pub fn setpoint_changes(&self, run_id: i64) -> Result<Vec<SetpointChange>> {
         let mut stmt = self.conn.prepare(
-            "SELECT elapsed_s, value, wall_time FROM setpoint_changes
+            "SELECT elapsed_s, value, wall_time, reset_g FROM setpoint_changes
              WHERE run_id = ?1 ORDER BY elapsed_s, id",
         )?;
         let rows = stmt.query_map([run_id], |r| {
@@ -597,9 +602,23 @@ impl Store {
                 elapsed_s: r.get(0)?,
                 value: r.get(1)?,
                 wall_time: parse_ts(r.get(2)?)?,
+                reset_g: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Record the grams of owed feed written off at the run's change at
+    /// `elapsed_s` (the latest change at or before it).
+    pub fn set_change_reset(&self, run_id: i64, elapsed_s: f64, reset_g: f64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE setpoint_changes SET reset_g = ?3 WHERE id = (
+                 SELECT id FROM setpoint_changes
+                 WHERE run_id = ?1 AND elapsed_s <= ?2
+                 ORDER BY elapsed_s DESC, id DESC LIMIT 1)",
+            params![run_id, elapsed_s, reset_g],
+        )?;
+        Ok(())
     }
 
     /// The single `running` run, if any (the crash-recovery entry point).
@@ -1691,6 +1710,23 @@ pub(crate) mod tests {
         assert_eq!(at(100), 5.0);
         assert_eq!(at(700), 8.0);
         assert_eq!(at(1300), 3.0);
+    }
+
+    #[test]
+    fn a_change_records_its_write_off() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_run(&constant_run()).unwrap();
+        s.add_setpoint_change(id, 600.0, 8.0, ts("2026-09-01T09:40:00Z")).unwrap();
+        s.set_change_reset(id, 600.0, 1.25).unwrap();
+        assert_eq!(s.setpoint_changes(id).unwrap()[0].reset_g, Some(1.25));
+    }
+
+    #[test]
+    fn a_change_without_write_off_reads_none() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_run(&constant_run()).unwrap();
+        s.add_setpoint_change(id, 600.0, 8.0, ts("2026-09-01T09:40:00Z")).unwrap();
+        assert_eq!(s.setpoint_changes(id).unwrap()[0].reset_g, None);
     }
 
     #[test]

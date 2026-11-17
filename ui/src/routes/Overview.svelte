@@ -4,14 +4,14 @@
   import { num, dur, shortTime, stamp, unitFor, digitsFor, vol } from '../lib/fmt.js';
   import { loadConfig } from '../lib/config.js';
   import { bottleWeights, weighedOutShown, REFILL_GRACE_MS } from '../lib/balance.js';
-  import { valueAt, hm, clock, when, refillDueInS, runState, nextRefill, holdBand, inAbout, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
+  import { valueAt, rateNow, hm, clock, when, refillDueInS, runState, nextRefill, holdBand, inAbout, deliveryFigures, DELIVERY_TOL as TOL, NOISE_ML, MIN_ASKED_ML, toleranceMl } from '../lib/runview.js';
   import Chart from '../components/Chart.svelte';
   import FigureBand from '../components/FigureBand.svelte';
   import RegulationPanel from '../components/RegulationPanel.svelte';
   import Icon from '../components/Icon.svelte';
   import StateIcon from '../components/StateIcon.svelte';
   import ChangeRate from '../components/ChangeRate.svelte';
-  import { canChangeRate, curveFact, rateSince, rateSteps } from '../lib/ratechange.js';
+  import { canChangeRate, curveFact, holdChip, rateSince, rateSteps } from '../lib/ratechange.js';
   import { recentLines, runTimeAt } from '../lib/rundetail.js';
   // the whole journal, as History reads it: a refill is numbered from the first
   const EVENTS_RECENT = 1000;
@@ -198,18 +198,24 @@
     if (!run) return 0;
     const v = (active ? liveValue : holding?.value) ?? 0;
     // a Constant run's rate may have changed: its highest rate is the top
-    const ends = run.curve.params.kind === 'constant' ? rateSteps(run).map((s) => s.value) : [run.curve.start, run.curve.end];
+    const ends = run.curve.params.kind === 'constant' ? rateSteps(run).map((s) => s.value) : [run.curve.start, run.curve.end, ...(run.setpoint_changes ?? []).map((c) => c.value)];
     const top = Math.max(...ends, 1e-9);
     return Math.max(0, Math.min(1, v / top));
   });
 
   // --- the live run, as the Overview states it
   const trimmed = $derived(!!active?.gravimetric_trim);
-  // What the curve asks for now (the big figure), off the smooth clock; the
-  // value actually written, curve x c, is `active.last_target`.
-  const curveNow = $derived(active && planned.length ? valueAt(planned, elapsedAnim) : null);
+  // What the curve asks for now (the big figure), off the smooth clock, the
+  // daemon's hold rate past the curve; the value actually written, curve x c,
+  // is `active.last_target`.
+  const curveNow = $derived(rateNow(active, planned, elapsedAnim));
   const endMs = $derived(run ? startedAtMs + run.duration_s * 1000 : NaN);
-  const rs = $derived(runState(app.status, app.connected, inHold));
+  // the rate a change set in the hold, "2.500 ml/min" (null: the curve's end value)
+  const held = $derived.by(() => {
+    const c = run && inHold ? holdChip(run) : null;
+    return c ? `${c.value} ${c.unit}` : null;
+  });
+  const rs = $derived(runState(app.status, app.connected, inHold, held));
 
   // Balance settings the page needs: the correction limit, and whether the
   // balance weighs the feed bottle (then its weight says when it runs dry).
@@ -251,7 +257,7 @@
       ? { t: elapsed + refillInS, label: `refill ${when(now + refillInS * 1000, now)}${inHold ? `, ${inAbout(refillInS)}` : ''}` }
       : null
   );
-  const hold = $derived(inHold ? holdBand({ cycle, inS: refillInS, nowMs: now, holdS }) : null);
+  const hold = $derived(inHold ? holdBand({ cycle, inS: refillInS, nowMs: now, holdS }, held) : null);
   // The one thing the operator has to do next, as a clock time. With
   // automatic refill there is nothing to do: the band says when it refills.
   const next = $derived.by(() => {
@@ -416,7 +422,7 @@
 {/if}
 
 {#if changingRate && rateChangeable}
-  <ChangeRate {run} bounds={active.rate_bounds} {trimmed} onclose={() => (changingRate = false)} onchanged={() => reloadRate(loadedId)} />
+  <ChangeRate {run} bounds={active.rate_bounds} curveValue={active.curve_value} {trimmed} onclose={() => (changingRate = false)} onchanged={() => reloadRate(loadedId)} />
 {/if}
 
 {#if complete}
@@ -576,11 +582,11 @@
             <div>
               <div class="k">Feed rate now</div>
               <div class="big-line">
-                <span class="big mono-num">{num(curveNow ?? active.last_target, digits)}</span>
+                <span class="big mono-num">{num(curveNow, digits)}</span>
                 <span class="big-u">{unit}</span>
               </div>
-              {#if run.curve.params.kind === 'constant' && active.rate_bounds}
-                <div class="k">{rateSince(run)}</div>
+              {#if active.rate_bounds && (run.curve.params.kind === 'constant' || inHold)}
+                <div class="k">{rateSince(run, inHold)}</div>
               {/if}
               {#if rateChangeable}
                 <button class="btn-ghost change" onclick={() => (changingRate = true)}>

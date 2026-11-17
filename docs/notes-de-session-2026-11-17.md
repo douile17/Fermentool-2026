@@ -87,10 +87,11 @@ son k ; c'est le suivant qui démarrera à environ x0.95.
   (546 dans le daemon), `npm run check` et `npm test` passés, poussé,
   déployé. `npm run smoke` pas relancé. `steps-raw-audit` n'est pas encore
   dans `main`.
-- `cargo test` sur tout le workspace échoue sur `fermentool-tauri` tant que
-  `copy-sidecar.ps1` n'a pas mis `fermentool-camera` dans
-  `src-tauri/binaries` : lancer `--exclude fermentool-tauri`, ou le script
-  d'abord.
+- `cargo test` échouait sur `fermentool-tauri` tant que `copy-sidecar.ps1`
+  n'avait pas mis `fermentool-camera` dans `src-tauri/binaries`. Corrigé :
+  `default-members = ["crates/*"]` dans `Cargo.toml`, un `cargo test` ou
+  `cargo build` sans `-p` laisse l'appli de bureau de côté ; `cargo tauri
+  build` la construit toujours, `--workspace` l'inclut.
 - Nouveau câble RS-485 : les pompes sont maintenant sur **COM10** (COM8
   avec l'ancien). Balances : COM7 (flacon), COM9 (réception, test seulement).
   Les deux pompes testées à la main (amorçage 2 s, Test du refill 3 s) : OK.

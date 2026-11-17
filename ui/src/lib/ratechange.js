@@ -6,11 +6,21 @@
 import { LOCALE, dur, num, unitFor, digitsFor } from './fmt.js';
 import { atRun } from './rundetail.js';
 
+const isConstant = (run) => run.curve?.params?.kind === 'constant';
+
 /** The rates a run went through: the start rate (at `started_at`), then
  *  each change, `[{ value, wallMs, elapsedS, atStart, last }]`. One step
- *  when the rate never changed. */
-export function rateSteps(run) {
-  const steps = [{ value: run.curve.start, wallMs: Date.parse(run.started_at), elapsedS: 0, atStart: true }];
+ *  when the rate never changed. Any other curve than Constant starts at its
+ *  end value, from the end of the curve (`duration_s`, not `atStart`):
+ *  `end`, the value the daemon drives there when given (the status frame's
+ *  `curve_value`), else `run.curve.end` (a Physio curve's is not resolved). */
+export function rateSteps(run, end) {
+  // a curve that is not Constant is a rate only once it is done: the rate it
+  // holds from its end, until a change
+  const first = isConstant(run)
+    ? { value: run.curve.start, wallMs: Date.parse(run.started_at), elapsedS: 0, atStart: true }
+    : { value: end ?? run.curve.end, wallMs: Date.parse(run.started_at) + run.duration_s * 1000, elapsedS: run.duration_s, atStart: false };
+  const steps = [first];
   for (const c of run.setpoint_changes ?? []) {
     steps.push({ value: c.value, wallMs: Date.parse(c.wall_time), elapsedS: c.elapsed_s, atStart: false });
   }
@@ -30,10 +40,44 @@ export function rateLabel(step) {
 
 /** Since when the rate of a Constant run holds, under the Overview's feed
  *  rate: "constant since the start", "since Mon 20:30, at 6 h 20". */
-export function rateSince(run) {
+export function rateSince(run, curveDone = false) {
+  const changes = run.setpoint_changes ?? [];
+  // a hold is told in run time, like the charts
+  if (!isConstant(run) && changes.length) return `holding since ${atRun(changes.at(-1).elapsed_s)}`;
   const steps = rateSteps(run);
-  return steps.length === 1 ? 'constant since the start' : `since ${rateLabel(steps.at(-1))}`;
+  return steps.length === 1 ? (curveDone && !isConstant(run) ? 'holding its end value' : 'constant since the start') : `since ${rateLabel(steps.at(-1))}`;
 }
+
+/** The Change rate dialog's steps and rate now, `{ steps, current }`, from
+ *  the status frame's `curveValue` (what the daemon drives, before the
+ *  balance correction); the steps' last value without it (an older daemon). */
+export function changeRateNow(run, curveValue) {
+  const known = curveValue != null && Number.isFinite(curveValue);
+  // the curve's end is the rate now only until a change
+  const unchanged = !(run.setpoint_changes ?? []).length;
+  const steps = rateSteps(run, known && unchanged ? curveValue : undefined);
+  return { steps, current: known ? curveValue : steps.at(-1).value };
+}
+
+/** The ChangeRate dialog's title and the scope line under it. */
+export function rateDialogText(run) {
+  return isConstant(run)
+    ? { title: 'New constant rate', scope: 'From now until the end of the run, or the next change.' }
+    : { title: 'New hold rate', scope: 'From now until you stop the run, or the next change.' };
+}
+
+/** The Overview's "hold" chip for a non-constant run whose hold was changed:
+ *  `{ value, unit }`, null when nothing was changed or the curve is Constant
+ *  (its chip says the changes itself). */
+export function holdChip(run) {
+  const last = (run.setpoint_changes ?? []).at(-1);
+  if (isConstant(run) || !last) return null;
+  return { value: num(last.value, digitsFor(run.control_var)), unit: unitFor(run.control_var) };
+}
+
+/** Whether Run again offers the run's rates to pick from: a Constant run
+ *  that changed. A hold change on another curve is not part of its shape. */
+export const runAgainPicks = (run) => isConstant(run) && (run.setpoint_changes ?? []).length > 0;
 
 /** The Overview's "Curve" fact: "Constant, 24 h" (its rate, which may have
  *  changed, is said above it), "4 steps, 1.000 to 6.000" (start → end hid
@@ -49,12 +93,12 @@ export function curveFact(run) {
   return `${num(run.curve.start, d)} → ${num(run.curve.end, d)}`;
 }
 
-/** Whether the Overview offers "Change rate": the active feed run, a
- *  Constant curve, one the daemon gives bounds for. */
+/** Whether the Overview offers "Change rate": the active feed run, one the
+ *  daemon gives bounds for (a Constant curve, or any curve once it is done). */
 export function canChangeRate(status, run) {
   const a = status?.active;
   if (!a || !run || a.kind === 'calibration' || a.run_id !== run.id) return false;
-  return run.curve?.params?.kind === 'constant' && Array.isArray(a.rate_bounds);
+  return Array.isArray(a.rate_bounds);
 }
 
 /** Why a new rate cannot be sent, shown under the field, or null.

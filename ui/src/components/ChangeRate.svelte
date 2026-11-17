@@ -1,19 +1,22 @@
 <script>
-  // The Overview's "Change rate" dialog for a running Constant run: the rate
+  // The Overview's "Change rate" dialog for a running Constant run, or a run in its hold: the rate
   // now, the new one in the run's unit within the daemon's bounds, then
   // confirmed (a typing slip would change the culture).
   import { post } from '../lib/api.js';
   import { num, unitFor, digitsFor } from '../lib/fmt.js';
-  import { boundsLine, checkRate, rateLabel, rateSteps } from '../lib/ratechange.js';
+  import { boundsLine, changeRateNow, checkRate, rateDialogText, rateLabel } from '../lib/ratechange.js';
   import ErrorText from './ErrorText.svelte';
 
-  /** @type {{ run: any, bounds: [number, number] | null, trimmed?: boolean, onclose: () => void, onchanged?: () => void }} */
-  let { run, bounds, trimmed = false, onclose, onchanged = () => {} } = $props();
+  /** @type {{ run: any, bounds: [number, number] | null, curveValue?: number | null, trimmed?: boolean, onclose: () => void, onchanged?: () => void }} */
+  let { run, bounds, curveValue = null, trimmed = false, onclose, onchanged = () => {} } = $props();
 
   const unit = $derived(unitFor(run.control_var));
   const digits = $derived(digitsFor(run.control_var));
-  const steps = $derived(rateSteps(run));
-  const current = $derived(steps.at(-1).value);
+  const text = $derived(rateDialogText(run));
+  // the rate the daemon drives now (`curve_value`), not the run's `curve.end`
+  const now = $derived(changeRateNow(run, curveValue));
+  const steps = $derived(now.steps);
+  const current = $derived(now.current);
 
   let value = $state(null);
   let busy = $state(false);
@@ -49,9 +52,9 @@
 <div class="layer">
   <div class="modal card confirm" role="dialog" aria-modal="true" aria-labelledby="ft-rate">
     <div class="eyebrow">Change rate</div>
-    <h2 id="ft-rate">New constant rate</h2>
+    <h2 id="ft-rate">{text.title}</h2>
     <p class="lede">
-      Now <b class="mono">{num(current, digits)}</b> {unit}, {steps.length === 1 ? 'since the start' : `since ${rateLabel(steps.at(-1))}`}.
+      Now <b class="mono">{num(current, digits)}</b> {unit}, {steps.length === 1 ? (steps[0].atStart ? 'since the start' : 'since the curve ended') : `since ${rateLabel(steps.at(-1))}`}.
     </p>
     <form onsubmit={(e) => { e.preventDefault(); apply(); }}>
       <label class="field">
@@ -65,7 +68,7 @@
         {#if typed && problem}<small class="bad">{problem}</small>{/if}
       </label>
       <p class="lede">
-        From now until the end of the run, or the next change.{trimmed ? ' The balance correction carries on.' : ''} Kept in the run's history.
+        {text.scope}{trimmed ? ' The balance correction restarts at this rate.' : ''} Kept in the run's history.
       </p>
       {#if err}<ErrorText message={err.message} hint={err.hint} />{/if}
       <div class="modal-foot">

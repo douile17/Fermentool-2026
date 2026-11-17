@@ -280,6 +280,24 @@ corrections de l'audit du 9).
   le début du run ; « since Tue 08:15, at 18 h 05 » sous le débit et dans
   « Change rate », de même dans le choix du débit de « Run again ».
 
+### Changer le débit après la fin de n'importe quelle courbe (27 octobre)
+
+- « Change rate » marche aussi sur un run Linear, Exponential, Sigmoid, Step
+  ou Custom, une fois sa courbe finie (la pompe tient la dernière valeur) :
+  la nouvelle consigne tient jusqu'à l'arrêt ou au changement suivant. Pas
+  avant la fin de la courbe, qui ne change ni de forme ni de durée.
+  Overview dit « holding since … », History ajoute la pastille
+  « hold 2.500 ml/min ».
+- Un changement de débit remet la correction de la balance à zéro : le
+  retard déjà accumulé n'est plus rattrapé (plus de saut de la correction
+  quand on baisse ou monte fortement le débit), la correction repart de
+  l'étalonnage appris. Pendant un remplissage, la remise se fait à la
+  première pesée fiable. Des changements très rapprochés (moins de 3 min)
+  retardent les alarmes d'arrêt ou de saturation du débit.
+- History juge chaque palier à part : l'écart repart de 0 à chaque
+  changement, le retard abandonné est marqué sur la courbe et listé dans
+  Regulation (« Written off at rate changes »).
+
 ### Pompes muettes sur le câble partagé (23 octobre)
 
 - Quand le câble ne répond plus, la ligne en haut de page dit « Pumps not

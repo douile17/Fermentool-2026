@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundsLine, canChangeRate, checkRate, curveFact, rateLabel, rateMarks, rateSince, rateSteps, runAgainSeed } from './ratechange.js';
+import { boundsLine, canChangeRate, changeRateNow, checkRate, curveFact, holdChip, rateDialogText, rateLabel, rateMarks, rateSince, rateSteps, runAgainPicks, runAgainSeed } from './ratechange.js';
 
 // Local times, whatever the machine's zone: the UI shows the PC's clock.
 const at = (d, h, m, s = 0) => new Date(2026, 9, d, h, m, s).toISOString();
@@ -20,6 +20,29 @@ const run214 = {
   ],
 };
 const unchanged = { ...run214, setpoint_changes: [] };
+
+// A linear run, 1 → 5 ml/min over 25 h, held at 5 from 25 h, then 2.5 from 26 h 10.
+const linear = {
+  ...run214,
+  curve: { mode: 'endpoints', start: 1, end: 5, params: { kind: 'linear' } },
+  duration_s: 90000,
+  setpoint_changes: [{ elapsed_s: 94200, value: 2.5, wall_time: at(27, 16, 20) }],
+};
+
+describe('rateSteps of a non-constant curve', () => {
+  it('starts at the curve end, once the curve is done, then each change', () => {
+    const s = rateSteps(linear);
+    expect(s.map((x) => x.value)).toEqual([5, 2.5]);
+    expect(s.map((x) => x.elapsedS)).toEqual([90000, 94200]);
+    expect(s.map((x) => x.atStart)).toEqual([false, false]);
+    expect(s[0].wallMs).toBe(Date.parse(run214.started_at) + 90000 * 1000);
+    expect(s.map((x) => x.last)).toEqual([false, true]);
+  });
+  it('is the end value alone without a change', () => {
+    expect(rateSteps({ ...linear, setpoint_changes: [] })).toHaveLength(1);
+    expect(rateSteps({ ...linear, setpoint_changes: [] })[0]).toMatchObject({ value: 5, elapsedS: 90000, atStart: false, last: true });
+  });
+});
 
 describe('rateSteps', () => {
   it('gives the start rate, then each change, the last one marked', () => {
@@ -52,6 +75,37 @@ describe('rateSince', () => {
     expect(rateSince(unchanged)).toBe('constant since the start');
     expect(rateSince(run214)).toBe('since Tue 08:15, at 18 h 05');
   });
+  it('says a hold in run time, "holding since 26 h 10"', () => {
+    expect(rateSince(linear, true)).toBe('holding since 26 h 10');
+  });
+});
+
+describe('rateDialogText', () => {
+  it('words a Constant run and a hold', () => {
+    expect(rateDialogText(run214, false)).toEqual({ title: 'New constant rate', scope: 'From now until the end of the run, or the next change.' });
+    expect(rateDialogText(linear, true)).toEqual({ title: 'New hold rate', scope: 'From now until you stop the run, or the next change.' });
+  });
+});
+
+describe('holdChip', () => {
+  it('is the last held rate of a non-constant run with changes', () => {
+    expect(holdChip(linear)).toEqual({ value: '2.500', unit: 'ml/min' });
+  });
+  it('is nothing for a Constant run or a run with no change', () => {
+    expect(holdChip(run214)).toBeNull();
+    expect(holdChip({ ...linear, setpoint_changes: [] })).toBeNull();
+    expect(holdChip({ ...linear, setpoint_changes: undefined })).toBeNull();
+  });
+});
+
+describe('runAgainPicks', () => {
+  it('offers the rates only for a Constant run with changes', () => {
+    expect(runAgainPicks(run214)).toBe(true);
+    expect(runAgainPicks(unchanged)).toBe(false);
+    expect(runAgainPicks(linear)).toBe(false);
+    const exp = { ...linear, curve: { start: 1, end: 5, params: { kind: 'exponential' } } };
+    expect(runAgainPicks(exp)).toBe(false);
+  });
 });
 
 describe('curveFact', () => {
@@ -79,9 +133,12 @@ describe('canChangeRate', () => {
   it('is a Constant feed run, the active one', () => {
     expect(canChangeRate(status(), run214)).toBe(true);
   });
-  it('is not another curve, a calibration, another run or no run', () => {
-    const linear = { ...run214, curve: { start: 9, end: 9, params: { kind: 'linear' } } };
-    expect(canChangeRate(status(), linear)).toBe(false);
+  it('is a linear run in its hold, where the daemon gives bounds', () => {
+    expect(canChangeRate(status(), linear)).toBe(true);
+    // still inside its curve: the daemon gives no bounds
+    expect(canChangeRate(status({ rate_bounds: null }), linear)).toBe(false);
+  });
+  it('is not a calibration, another run or no run', () => {
     expect(canChangeRate(status({ kind: 'calibration' }), run214)).toBe(false);
     expect(canChangeRate(status({ run_id: 213 }), run214)).toBe(false);
     expect(canChangeRate({ active: null }, run214)).toBe(false);
@@ -140,5 +197,37 @@ describe('runAgainSeed', () => {
   it('puts the chosen rate in a constant curve', () => {
     const seed = { name: 'x', kind: 'constant', start: 5, end: 5, value: 5, duration_h: 24 };
     expect(runAgainSeed(seed, 3)).toEqual({ name: 'x', kind: 'constant', start: 3, end: 3, value: 3, duration_h: 24 });
+  });
+});
+
+// A Physio exponential: its `end` is New run's hidden field (50), never what
+// the daemon drives; the status frame's `curve_value` is (12.3, clamped).
+const physio = {
+  ...run214,
+  curve: { mode: 'physio', start: 1, end: 50, params: { kind: 'exponential', mu_per_hour: 0.1 } },
+  setpoint_changes: [],
+};
+
+describe('the rate now, from the status frame', () => {
+  it('starts a non-constant run on the value the daemon drives, not curve.end', () => {
+    expect(rateSteps(physio, 12.3)[0]).toMatchObject({ value: 12.3, elapsedS: physio.duration_s, atStart: false });
+    expect(rateSteps(physio)[0].value).toBe(50);
+  });
+  it('gives the Change rate dialog the rate driven', () => {
+    const n = changeRateNow(physio, 12.3);
+    expect(n.current).toBe(12.3);
+    expect(n.steps).toHaveLength(1);
+    expect(checkRate(12.3, [0, 100], n.current)).toBe('The rate is already 12.300 ml/min.');
+    expect(checkRate(50, [0, 100], n.current)).toBeNull();
+  });
+  it('keeps the last change as the current step once one was made', () => {
+    const changed = { ...physio, setpoint_changes: [{ elapsed_s: 90000, value: 3, wall_time: at(27, 16, 20) }] };
+    const n = changeRateNow(changed, 3);
+    expect(n.current).toBe(3);
+    expect(n.steps.map((s) => s.value)).toEqual([50, 3]);
+  });
+  it('falls back to the steps without a curve value (an older daemon)', () => {
+    expect(changeRateNow(run214, undefined).current).toBe(4);
+    expect(changeRateNow(run214, null).current).toBe(4);
   });
 });

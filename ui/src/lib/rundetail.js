@@ -49,18 +49,53 @@ export function verdict(report) {
   const pts = report?.points ?? [];
   const last = pts.at(-1);
   if (!last) return null;
-  const [, requested, delivered] = last;
+  const resets = report.resets ?? [];
+  const [lastT, requested, delivered] = last;
+  // a rate change writes off the feed owed (`resets`): the gap is judged
+  // from the last step, requested and delivered stay the plain totals
+  const gap = delivered - requested + resetAt(resets, lastT);
   const wrongSide = requested > 2 && delivered < -0.25 * requested;
   const pct = requested > 0 ? (100 * delivered) / requested : null;
-  const onTarget = pct != null && Math.abs(delivered - requested) <= TOLERANCE * requested;
+  const onTarget = pct != null && Math.abs(gap) <= TOLERANCE * requested;
   // worst gap after the start-up, weighed points only
   let worst = null;
   for (const [t, r, d] of pts) {
     if (t < SETTLE_S || r <= 0 || inSpans(t, report.estimated)) continue;
-    const share = Math.abs(d - r) / r;
+    const share = Math.abs(d - r + resetAt(resets, t)) / r;
     if (worst == null || share > worst) worst = share;
   }
-  return { requested, delivered, gap: delivered - requested, pct, onTarget, wrongSide, worstPct: worst == null ? null : 100 * worst };
+  const resetMl = resets.reduce((a, [, ml]) => a + ml, 0);
+  // with write-offs the gap restarts at each change: judged per rate step
+  const perStep = resets.length > 0;
+  return { requested, delivered, gap, resetMl, perStep, pct, onTarget, wrongSide, worstPct: worst == null ? null : 100 * worst };
+}
+
+/** The verdict's sentence after "On target." / "Off target.". */
+export function verdictSentence(v) {
+  if (v.onTarget && v.worstPct != null) {
+    const within = `Delivered stayed within ${num(Math.max(v.worstPct, 0.1), 1)} % of the request`;
+    return v.perStep ? `${within} within each rate step, after the first 15 min.` : `${within} after the first 15 min.`;
+  }
+  if (v.onTarget) return `Delivered within ±${TOLERANCE * 100} % of the request.`;
+  return `Delivered ${num(Math.abs(v.gap), 1)} mL ${v.gap < 0 ? 'short of' : 'over'} the request.`;
+}
+
+/** The feed the rate changes wrote off, with its sign ("+1.0 mL", "−0.3 mL":
+ *  a run ahead at a change writes off a negative amount); null without any. */
+export function writtenOff(resets) {
+  if (!resets?.length) return null;
+  const ml = resets.reduce((a, [, x]) => a + x, 0);
+  const r = Number(num(ml, 1));
+  return `${r > 0 ? '+' : r < 0 ? '−' : ''}${num(Math.abs(ml), 1)} mL`;
+}
+
+/** The feed written off by the rate changes up to run time `t` (mL): the sum
+ *  of `resets` (`[[elapsed_s, ml]]`, positive = the run was behind) at or
+ *  before `t`. 0 without any (a run with no change, or an older report). */
+export function resetAt(resets, t) {
+  let sum = 0;
+  for (const [rt, ml] of resets ?? []) if (rt <= t) sum += ml;
+  return sum;
 }
 
 /** The 5 min average of the cumulative gap, delivered − requested (mL), for
@@ -69,8 +104,8 @@ export function verdict(report) {
  *  average keeps the trend. An estimated stretch (a refill) is not weighed:
  *  it is drawn straight from the weighed point before it to the one after
  *  (its raw estimate zigzagged into a scribble once dashed), flagged. */
-export function gapSeries(points, spans, windowS = 300) {
-  const raw = (points ?? []).map(([t, r, d]) => [t, d - r, inSpans(t, spans)]);
+export function gapSeries(points, spans, windowS = 300, resets = []) {
+  const raw = (points ?? []).map(([t, r, d]) => [t, d - r + resetAt(resets, t), inSpans(t, spans)]);
   const weighed = raw.filter((p) => !p[2]);
   const out = [];
   let lo = 0;
@@ -355,14 +390,16 @@ export function regulationFigures(events) {
   return { correction: c, ratio: k };
 }
 
-/** The largest weighed gap ahead and behind (mL, raw, refills left out). */
-export function gapExtremes(points, spans) {
+/** The largest weighed gap ahead and behind (mL, raw, refills left out),
+ *  each judged from its rate step (`resets`, see `resetAt`). */
+export function gapExtremes(points, spans, resets = []) {
   let ahead = 0;
   let behind = 0;
   for (const [t, r, d] of points ?? []) {
     if (inSpans(t, spans)) continue;
-    ahead = Math.max(ahead, d - r);
-    behind = Math.min(behind, d - r);
+    const g = d - r + resetAt(resets, t);
+    ahead = Math.max(ahead, g);
+    behind = Math.min(behind, g);
   }
   return { ahead, behind };
 }

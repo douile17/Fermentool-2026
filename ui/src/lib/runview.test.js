@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deliveryFigures, flowWindowS, holdBand, inAbout, nextRefill, refillMarkAt, refillDueInS, refillProgress, runState, stateTitle, weighedFlow } from './runview.js';
+import { deliveryFigures, flowWindowS, holdBand, inAbout, nextRefill, rateNow, refillMarkAt, refillDueInS, refillProgress, runState, stateTitle, weighedFlow } from './runview.js';
 
 describe('weighedFlow', () => {
   // Run 184's curve: 13 -> 10 mL/min over 1 h, a point every 2 s.
@@ -197,6 +197,23 @@ describe('holdBand', () => {
   });
 });
 
+describe('the held rate in the hold', () => {
+  const cycle = { phase: 'idle', halted: false, low_g: 4000, high_g: 5200 };
+  const nowMs = Date.parse('2026-10-22T14:30:00Z');
+  it('runState names the held rate after a change, the curve end value otherwise', () => {
+    const s = { active: { run_id: 1 } };
+    expect(runState(s, true, true).title).toBe('Curve done, holding its end value');
+    expect(runState(s, true, true, '2.500 ml/min')).toMatchObject({ word: 'Holding', title: 'Curve done, holding 2.500 ml/min' });
+    expect(runState(s, true, false, '2.500 ml/min').title).toBe('Running normally');
+  });
+  it('holdBand says it with no refill waiting, and with one', () => {
+    expect(holdBand({ cycle: null, inS: null, nowMs, holdS: 4800 }, '2.500 ml/min').next.sub).toBe('curve done 1 h 20 ago, holding 2.500 ml/min');
+    expect(holdBand({ cycle: null, inS: null, nowMs, holdS: 4800 }).next.sub).toBe('curve done 1 h 20 ago, pump still feeding');
+    const b = holdBand({ cycle, inS: 600, nowMs, holdS: 4800 }, '2.500 ml/min');
+    expect(b.detail).toBe('Done 1 h 20 ago, holding 2.500 ml/min. Stop records the run as completed.');
+  });
+});
+
 describe('refillMarkAt', () => {
   it('inside the curve, at its time', () => {
     expect(refillMarkAt({ t: 3600, label: 'refill 14:00' }, 7200)).toEqual({ t: 3600, label: 'refill 14:00', edge: false });
@@ -207,5 +224,22 @@ describe('refillMarkAt', () => {
   it('nothing without a time', () => {
     expect(refillMarkAt(null, 7200)).toBeNull();
     expect(refillMarkAt({ t: 0, label: 'x' }, 7200)).toBeNull();
+  });
+});
+
+describe('rateNow', () => {
+  // exponential 1 to 8 ml/min over 30 min, changed in its hold to 3.0
+  const planned = [[0, 1], [900, 2.83], [1800, 8]];
+  const active = { duration_s: 1800, curve_value: 3, last_target: 3.3 };
+  it('says the hold rate the daemon drives past the curve', () => {
+    expect(rateNow(active, planned, 2000)).toBe(3);
+  });
+  it('follows the planned curve within it', () => {
+    expect(rateNow(active, planned, 450)).toBeCloseTo(1.915, 9);
+  });
+  it('is today value without a curve value (an older daemon)', () => {
+    expect(rateNow({ duration_s: 1800, last_target: 8.2 }, planned, 2000)).toBe(8);
+    expect(rateNow({ duration_s: 1800, last_target: 8.2 }, [], 2000)).toBe(8.2);
+    expect(rateNow(null, planned, 2000)).toBeNull();
   });
 });

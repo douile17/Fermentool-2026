@@ -689,6 +689,11 @@ async fn create_run(State(s): State<AppState>, Json(mut body): Json<serde_json::
 }
 
 async fn start_run(s: &AppState, mut cfg: RunConfig) -> ApiResult<(StatusCode, serde_json::Value)> {
+    // Overrides are only ever built by the engine from the rate changes it
+    // recorded: a new run starts on its curve alone.
+    if !cfg.curve.overrides.is_empty() {
+        return Err(ApiError::Bad("a new run cannot carry rate changes (overrides)".into()));
+    }
     // A dosing run names who it belongs to, so its alerts reach them and no
     // one else: required once anyone is set up for notifications. The name
     // is stored as configured (its case), a calibration burst goes without.
@@ -724,7 +729,8 @@ struct RateBody {
     value: f64,
 }
 
-/// Change the rate of the active Constant run. Refusals come back as for a
+/// Change the rate of the active run: a Constant one, or any curve once it
+/// holds its end value. Refusals come back as for a
 /// start (`{ error, code, hint }`).
 async fn set_active_rate(State(s): State<AppState>, Json(b): Json<RateBody>) -> ApiResult<Response> {
     let (from, to) = s
@@ -2355,6 +2361,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_run_with_overrides_is_refused() {
+        // Overrides are the engine's, built from the changes it recorded.
+        let app = router(test_state());
+        let mut curve = linear_curve();
+        curve["overrides"] = json!([{ "at_seconds": 4000, "value": 2 }]);
+        let start = post_json(
+            "/api/runs",
+            json!({
+                "name": "t", "control_var": "rpm", "direction": "cw",
+                "pump_addr": 1, "curve": curve
+            }),
+        );
+        let res = app.clone().oneshot(start).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = app.oneshot(get("/api/status")).await.unwrap();
+        assert!(body_json(res).await["active"].is_null());
+    }
+
+    #[tokio::test]
     async fn run_lifecycle_over_http() {
         let app = router(test_state());
 
@@ -3607,5 +3632,71 @@ mod tests {
         assert!(wait_async(Duration::from_secs(5), || cam.state() == crate::camera::CameraState::Off).await);
         cam.shutdown();
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn tracking_lists_the_write_off_of_each_rate_change() {
+        use crate::store::{ControlVar, Direction, NewRun, NewTick, RunKind};
+        let db = test_db();
+        let store = Store::open(&db).unwrap();
+        let started: jiff::Timestamp = "2026-09-01T09:00:00Z".parse().unwrap();
+        let id = store
+            .insert_run(&NewRun {
+                name: "dosing".into(),
+                started_at: started,
+                control_var: ControlVar::MlMin,
+                direction: Direction::Cw,
+                tick_interval_s: 1,
+                pump_addr: 1,
+                app_version: "test".into(),
+                curve: CurveSpec::constant(5.0, Duration::from_secs(600)),
+                gravimetric_trim: true,
+                kind: RunKind::Dosing,
+                tubing_calibration_id: None,
+                responsible: None,
+                density_g_per_ml: Some(1.0),
+                auto_refill: false,
+                refill_draw_g: None,
+                pump_model: "labq".into(),
+                pump_head: None,
+            })
+            .unwrap();
+        for seq in 0..120 {
+            store
+                .append_tick(&NewTick {
+                    run_id: id,
+                    seq,
+                    wall_time: started + jiff::SignedDuration::from_secs(seq),
+                    elapsed_s: seq as f64,
+                    target: 5.0,
+                    written_ok: true,
+                    readback: None,
+                    note: None,
+                    weight_g: Some(1000.0 - seq as f64),
+                    delivered_g: Some(seq as f64 * 0.08),
+                    delivered_estimated: false,
+                })
+                .unwrap();
+        }
+        store
+            .add_setpoint_change(id, 60.0, 2.0, started + jiff::SignedDuration::from_secs(60))
+            .unwrap();
+        store.set_change_reset(id, 60.0, 0.5).unwrap();
+        // ahead at a change: a negative write-off, listed with its sign;
+        // an exact 0 (a change superseded before it measured) is not listed
+        store
+            .add_setpoint_change(id, 90.0, 3.0, started + jiff::SignedDuration::from_secs(90))
+            .unwrap();
+        store.set_change_reset(id, 90.0, -0.25).unwrap();
+        store
+            .add_setpoint_change(id, 100.0, 4.0, started + jiff::SignedDuration::from_secs(100))
+            .unwrap();
+        store.set_change_reset(id, 100.0, 0.0).unwrap();
+        drop(store);
+        let app = router(test_state_at(&db));
+        let res = app.oneshot(get(&format!("/api/runs/{id}/tracking"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["resets"], json!([[60.0, 0.5], [90.0, -0.25]]));
     }
 }

@@ -74,7 +74,8 @@ control path.)
 Prerequisites: [Rust (stable, via rustup)](https://rustup.rs) and Node.js ≥ 18.
 
 ```sh
-# Rust crates + tests
+# Rust crates + tests (the desktop shell, src-tauri, is left out: it needs
+# the sidecars of copy-sidecar.ps1; `cargo tauri build` builds it)
 cargo test
 
 # Run the daemon. With no config it writes <data-dir>/config.toml and uses the

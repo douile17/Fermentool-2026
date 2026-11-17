@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   alarmCount, atRun, runTimeAt, blindLegend, curveChips, curveLine, gapExtremes, gapScale, gapSeries, grouped, journalLines, pumpLine, recentLines,
-  refillRows, regulationFigures, verdict, whenLine,
+  refillRows, regulationFigures, resetAt, verdict, verdictSentence, whenLine, writtenOff,
 } from './rundetail.js';
 
 // Local times, whatever the machine's zone: the UI shows the PC's clock.
@@ -157,6 +157,50 @@ describe('gapExtremes', () => {
   it('finds the largest weighed gap ahead and behind', () => {
     expect(gapExtremes([[0, 0, 0], [10, 10, 10.5], [20, 20, 19.7], [30, 30, 40]], [[25, 35]])).toEqual({ ahead: 0.5, behind: expect.closeTo(-0.3, 9) });
   });
+  it('judges each point from its last rate step, the feed written off at a change', () => {
+    // 1 mL behind at 1800 s, written off there: 0 after it, and still 1 mL behind before it
+    const pts = [[900, 10, 9], [1800, 20, 19], [2700, 30, 29]];
+    expect(gapExtremes(pts, [], [[1800, 1]])).toEqual({ ahead: 0, behind: expect.closeTo(-1, 9) });
+    expect(gapExtremes(pts, [], [[900, 1]])).toEqual({ ahead: 0, behind: 0 });
+  });
+});
+
+describe('resetAt', () => {
+  it('sums the write-offs at or before t, none without a list', () => {
+    const r = [[1800, 1], [5000, -0.5]];
+    expect(resetAt(r, 1799)).toBe(0);
+    expect(resetAt(r, 1800)).toBe(1);
+    expect(resetAt(r, 6000)).toBeCloseTo(0.5, 9);
+    expect(resetAt(undefined, 10)).toBe(0);
+    expect(resetAt([], 10)).toBe(0);
+  });
+});
+
+describe('rate step write-offs in the verdict and the gap chart', () => {
+  const pts = [[1000, 100, 99.5], [1800, 180, 179], [2700, 270, 269.5]];
+  it('rebases the gap after a reset, the totals untouched', () => {
+    const v = verdict({ points: pts, estimated: [], resets: [[1800, 1.0]] });
+    expect(v.resetMl).toBe(1);
+    expect(v.requested).toBe(270);
+    expect(v.delivered).toBe(269.5);
+    expect(v.gap).toBeCloseTo(0.5, 9);
+    // the 1 mL gap at 1800 s reads 0 after the reset
+    const s = gapSeries(pts, [], 1, [[1800, 1.0]]);
+    expect(s[1][1]).toBeCloseTo(0, 9);
+    expect(s[0][1]).toBeCloseTo(-0.5, 9);
+  });
+  it('without resets gives exactly today numbers', () => {
+    const v = verdict({ points: pts, estimated: [] });
+    expect(v.resetMl).toBe(0);
+    expect(v.gap).toBeCloseTo(-0.5, 9);
+    expect(gapSeries(pts, [], 1)).toEqual(gapSeries(pts, [], 1, []));
+    expect(verdict({ points: pts, estimated: [], resets: [] })).toEqual(v);
+  });
+  it('a gap written off is not the worst gap', () => {
+    const p = [[1000, 100, 99], [2000, 200, 199]];
+    expect(verdict({ points: p, estimated: [], resets: [[900, 1]] }).worstPct).toBe(0);
+    expect(verdict({ points: p, estimated: [] }).worstPct).toBeCloseTo(1, 9);
+  });
 });
 
 describe('refillRows', () => {
@@ -307,5 +351,37 @@ describe('recentLines', () => {
   it('numbers the last refill from the whole journal, newest first', () => {
     const l = recentLines(events194, run194, 3);
     expect(l.map((x) => x.title)).toEqual(['Stopped', 'Curve done', 'Refill 3']);
+  });
+});
+
+describe('writtenOff', () => {
+  it('says the feed written off at rate changes with its sign', () => {
+    expect(writtenOff([[1800, 1.04]])).toBe('+1.0 mL');
+    expect(writtenOff([[1800, -0.3]])).toBe('−0.3 mL');
+    expect(writtenOff([[1800, 0.5], [3600, -0.5]])).toBe('0.0 mL');
+  });
+  it('is null without a change that wrote anything off', () => {
+    expect(writtenOff([])).toBeNull();
+    expect(writtenOff(undefined)).toBeNull();
+  });
+});
+
+describe('verdictSentence', () => {
+  const pts = [[1000, 100, 99.5], [2000, 200, 199.4]];
+  it('judges each rate step when the run has write-offs', () => {
+    const v = verdict({ points: pts, estimated: [], resets: [[1500, 0.2]] });
+    expect(verdictSentence(v)).toBe('Delivered stayed within 0.5 % of the request within each rate step, after the first 15 min.');
+  });
+  it('says it as before without', () => {
+    const v = verdict({ points: pts, estimated: [] });
+    expect(verdictSentence(v)).toBe('Delivered stayed within 0.5 % of the request after the first 15 min.');
+  });
+  it('says the gap when off target', () => {
+    const v = verdict({ points: [[2000, 200, 190]], estimated: [] });
+    expect(verdictSentence(v)).toBe('Delivered 10.0 mL short of the request.');
+  });
+  it('says the tolerance when on target before 15 min', () => {
+    const v = verdict({ points: [[600, 100, 100.5]], estimated: [] });
+    expect(verdictSentence(v)).toBe('Delivered within ±2 % of the request.');
   });
 });

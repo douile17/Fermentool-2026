@@ -836,6 +836,10 @@ mod tests {
         let m = message_for(&event("setpoint_change", Some("5.000 -> 3.000 ml/min")), &run).unwrap();
         assert_eq!(m.tone, Tone::Info);
         assert_eq!(m.title, "Rate changed to 3.000 ml/min");
+        let m = message_for(&event("setpoint_change", Some("8.000 -> 3.000 ml/min, in the hold")), &run).unwrap();
+        assert_eq!(m.tone, Tone::Info);
+        assert!(m.title.contains("in the hold"), "{}", m.title);
+        assert!(m.title.contains("3.000 ml/min"), "{}", m.title);
         // A detail it cannot read still says what happened, without a dangling "to".
         for d in [None, Some(""), Some("3.000 ml/min"), Some("5.000 -> ")] {
             assert_eq!(message_for(&event("setpoint_change", d), &run).unwrap().title, "Rate changed", "{d:?}");
