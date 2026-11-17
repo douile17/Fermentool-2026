@@ -1,4 +1,5 @@
 <script>
+  import { saveOrSay } from '../lib/savefile.js';
   import { untrack } from 'svelte';
   // Tubing calibration: three timed bursts at one setpoint, each weighed,
   // recorded as one calibration per tubing lot and diameters. A balance
@@ -753,12 +754,7 @@
       ].map(cell).join(','),
     );
     const blob = new Blob([[cols.join(','), ...lines].join('\n') + '\n'], { type: 'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'tubing-calibrations.csv';
-    a.click();
-    // Not at once: some browsers drop a download whose URL is gone before it starts.
-    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    saveOrSay('tubing-calibrations.csv', blob);
   }
 
   const cvBad = (cv) => cv > CV_WARN_PCT;

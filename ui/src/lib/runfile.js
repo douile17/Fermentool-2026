@@ -3,6 +3,7 @@
 // travel; nothing in here is trusted until `readSettings` has checked it.
 
 import { MAX_STEPS } from './steps.js';
+import { saveOrSay } from './savefile.js';
 
 const TAG = 'fermentool-run-settings';
 const VERSION = 1;
@@ -53,13 +54,7 @@ export function downloadSettings(settings) {
   const picked = {};
   for (const k of Object.keys(FIELDS)) if (k in settings) picked[k] = settings[k];
   const body = { format: TAG, version: VERSION, exported_at: new Date().toISOString(), settings: picked };
-  const url = URL.createObjectURL(new Blob([JSON.stringify(body, null, 2)], { type: 'application/json' }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName(picked.name);
-  a.click();
-  // Not at once: some browsers drop a download whose URL is gone before it starts.
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  return saveOrSay(fileName(picked.name), new Blob([JSON.stringify(body, null, 2)], { type: 'application/json' }));
 }
 
 /** Parse an exported file's text: the known, valid fields only, or throws. */

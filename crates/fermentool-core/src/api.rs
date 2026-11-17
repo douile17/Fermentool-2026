@@ -173,6 +173,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/timelapses/{id}/images", get(timelapse_images))
         .route("/api/timelapses/images/{id}/{which}", get(timelapse_image_file))
         .route("/api/timelapses/images/{id}/show", post(timelapse_image_show))
+        .route("/api/timelapses/images/{id}/open", post(timelapse_image_open))
+        // a run's ticks as CSV reach ~20 MB over 100 h: past axum's 2 MB default
+        .route(
+            "/api/files/save",
+            post(save_download).layer(axum::extract::DefaultBodyLimit::max(SAVE_MAX_BYTES)),
+        )
         .route("/api/camera/frame.jpg", get(camera_frame))
         .route("/api/camera/live", get(camera_live))
         .route("/api/notify/test", post(notify_test))
@@ -352,6 +358,25 @@ fn about_location(which: &str, a: &About, config: &std::path::Path) -> Option<(P
     }
 }
 
+/// The web pages Settings > About links to, by name, never a URL from the
+/// request: the daemon opens them in the default browser, so a link works
+/// in the desktop window too (its webview opens no new tab).
+fn about_page(which: &str) -> Option<String> {
+    // `mail:<n>`: the n-th author's address ("Name <mail>"), in the mail app
+    if let Some(n) = which.strip_prefix("mail:") {
+        let author = env!("CARGO_PKG_AUTHORS").split(':').nth(n.parse().ok()?)?;
+        let mail = author.split_once('<')?.1.strip_suffix('>')?;
+        return Some(format!("mailto:{mail}"));
+    }
+    match which {
+        "homepage" => Some(env!("CARGO_PKG_HOMEPAGE")),
+        "icons" => Some("https://www.figma.com/community/file/1166831539721848736"),
+        "icons_license" => Some("https://creativecommons.org/licenses/by/4.0/"),
+        _ => None,
+    }
+    .map(str::to_string)
+}
+
 #[derive(Deserialize)]
 struct OpenReq {
     which: String,
@@ -360,6 +385,10 @@ struct OpenReq {
 /// Opens one of those locations in the PC's file manager (Explorer), on the
 /// desktop of the user the daemon runs as: Settings > About's "Open" buttons.
 async fn open_location(State(s): State<AppState>, Json(req): Json<OpenReq>) -> ApiResult<Response> {
+    if let Some(url) = about_page(&req.which) {
+        open_with_windows(&url).map_err(|e| ApiError::Conflict(format!("could not open the browser: {e}")))?;
+        return Ok(Json(json!({ "opened": url })).into_response());
+    }
     let (path, select) = about_location(&req.which, &s.about, &s.config_path)
         .ok_or_else(|| ApiError::Bad(format!("unknown location `{}`", req.which)))?;
     if !path.exists() {
@@ -383,6 +412,19 @@ fn open_in_file_manager(path: &std::path::Path, select: bool) -> std::io::Result
         c.raw_arg(format!("\"{}\"", path.display()));
     }
     c.spawn().map(|_| ())
+}
+
+/// A file in its default app (an image in Photos) or a web page in the
+/// default browser, as a double click would: Explorer hands it on.
+#[cfg(windows)]
+fn open_with_windows(target: impl std::fmt::Display) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("explorer.exe").raw_arg(format!("\"{target}\"")).spawn().map(|_| ())
+}
+
+#[cfg(not(windows))]
+fn open_with_windows(target: impl std::fmt::Display) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open").arg(target.to_string()).spawn().map(|_| ())
 }
 
 #[cfg(not(windows))]
@@ -1744,6 +1786,84 @@ async fn timelapse_image_show(State(s): State<AppState>, Path(id): Path<i64>) ->
     Ok(Json(json!({ "opened": true })).into_response())
 }
 
+/// `POST /api/timelapses/images/{id}/open`: the image in Windows' default
+/// viewer, opened by the daemon (the desktop window opens no new tab).
+async fn timelapse_image_open(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let path = image_path(&s, id, false).await?;
+    if !path.exists() {
+        return Err(ApiError::NotFound);
+    }
+    open_with_windows(path.display()).map_err(|e| ApiError::Conflict(format!("could not open the image: {e}")))?;
+    Ok(Json(json!({ "opened": true })).into_response())
+}
+
+/// The largest file the desktop window hands over to save.
+const SAVE_MAX_BYTES: usize = 200 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct SaveQuery {
+    name: String,
+}
+
+/// A file name the page asked to save as, kept if plain: letters, digits,
+/// space, `_ . - ( )`, a known extension, no folder, at most 120 characters.
+fn safe_download_name(name: &str) -> Option<&str> {
+    let ok_chars = name.chars().all(|c| c.is_ascii_alphanumeric() || " _.-()".contains(c));
+    let ext_ok = [".xlsx", ".csv", ".json"].iter().any(|e| name.to_ascii_lowercase().ends_with(e));
+    (ok_chars && ext_ok && !name.starts_with(['.', ' ']) && name.len() <= 120).then_some(name)
+}
+
+/// `dir/name`, or `name (2).ext`, `(3)`… when it is taken, as a browser does.
+fn unused_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) => (&name[..i], &name[i..]),
+        None => (name, ""),
+    };
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .expect("a free name")
+}
+
+/// The user's Downloads folder, the data dir if there is none.
+fn downloads_dir(s: &AppState) -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(|h| PathBuf::from(h).join("Downloads"))
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(|| s.about.data_dir.clone())
+}
+
+/// `POST /api/files/save?name=`: the desktop window's downloads (its webview
+/// saves none): the body goes into Downloads under that name, and Explorer
+/// opens with it picked.
+async fn save_download(
+    State(s): State<AppState>,
+    Query(q): Query<SaveQuery>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let name = safe_download_name(&q.name)
+        .ok_or_else(|| ApiError::Bad(format!("`{}` is not a file name to save", q.name)))?
+        .to_string();
+    let dir = downloads_dir(&s);
+    let path = tokio::task::spawn_blocking(move || -> std::io::Result<PathBuf> {
+        let path = unused_path(&dir, &name);
+        std::fs::write(&path, &body)?;
+        Ok(path)
+    })
+    .await
+    .map_err(|e| ApiError::Conflict(e.to_string()))?
+    .map_err(|e| ApiError::Conflict(format!("could not save the file: {e}")))?;
+    if let Err(e) = open_in_file_manager(&path, true) {
+        tracing::warn!("saved {} but Explorer did not open: {e}", path.display());
+    }
+    let saved = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    Ok(Json(json!({ "saved": saved })).into_response())
+}
+
 /// The data dir new timelapses go under when `captures_dir` is empty.
 fn captures_root(s: &AppState, dir: &str) -> std::path::PathBuf {
     crate::timelapse::files::captures_root(dir, &s.about.data_dir)
@@ -1956,6 +2076,52 @@ mod tests {
         assert_eq!(about_location("config", &a, cfg), Some(("D:/data/config.toml".into(), true)));
         assert_eq!(about_location("C:/Windows", &a, cfg), None);
         assert_eq!(about_location("../data", &a, cfg), None);
+    }
+
+    #[test]
+    fn a_download_keeps_a_plain_name_only() {
+        for ok in ["step-profile-template-rpm.xlsx", "Run 12-run12.csv", "a_b.fermentool-run.json", "tubing-calibrations (1).CSV"] {
+            assert_eq!(safe_download_name(ok), Some(ok), "{ok}");
+        }
+        let long = format!("{}.csv", "a".repeat(120));
+        for bad in ["..\\x.csv", "../x.csv", "C:x.csv", "a/b.csv", ".csv", "run.exe", "run.csv.bat", "é.csv", long.as_str()] {
+            assert_eq!(safe_download_name(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_taken_download_name_is_numbered() {
+        let dir = std::env::temp_dir().join(format!("fermentool-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unused_path(&dir, "t.xlsx"), dir.join("t.xlsx"));
+        std::fs::write(dir.join("t.xlsx"), b"1").unwrap();
+        assert_eq!(unused_path(&dir, "t.xlsx"), dir.join("t (2).xlsx"));
+        std::fs::write(dir.join("t (2).xlsx"), b"2").unwrap();
+        assert_eq!(unused_path(&dir, "t.xlsx"), dir.join("t (3).xlsx"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saving_a_download_refuses_a_path() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/files/save?name=..%2F..%2Fevil.csv")
+            .body(axum::body::Body::from("x"))
+            .unwrap();
+        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn about_pages_are_named_never_given() {
+        assert_eq!(about_page("homepage").as_deref(), Some("https://www.delvigne-lab.com"));
+        assert!(about_page("icons").is_some_and(|u| u.starts_with("https://www.figma.com/")));
+        assert!(about_page("icons_license").is_some_and(|u| u.starts_with("https://creativecommons.org/")));
+        assert!(about_page("mail:0").is_some_and(|u| u.starts_with("mailto:") && u.contains('@') && !u.contains('>')));
+        assert_eq!(about_page("mail:9"), None, "no tenth author");
+        assert_eq!(about_page("mail:x"), None);
+        assert_eq!(about_page("https://example.com"), None, "a URL from the request opens nothing");
     }
 
     #[tokio::test]
@@ -3282,6 +3448,8 @@ mod tests {
         }
         let res = app.clone().oneshot(post_json("/api/timelapses/images/999/show", json!({}))).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "show: an unknown image opens nothing");
+        let res = app.clone().oneshot(post_json("/api/timelapses/images/999/open", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "open: an unknown image opens nothing");
         let res = app.oneshot(get("/api/timelapses/images/..%2F..%2Fconfig.toml/full.jpg")).await.unwrap();
         assert!(matches!(res.status(), StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND), "{}", res.status());
     }

@@ -2,6 +2,7 @@
   import { timelapseSeed } from '../lib/timelapse.js';
   import { app } from '../lib/state.svelte.js';
   import { get, post, del } from '../lib/api.js';
+  import { plainName, saveOrSay } from '../lib/savefile.js';
   import { num, shortTime, stampY, unitFor, digitsFor, ranFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
   import GapChart from '../components/GapChart.svelte';
@@ -360,13 +361,7 @@
       ]);
     }
     const csv = rows.map((r) => r.map(cell).join(',')).join('\n') + '\n';
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${run.name}-run${run.id}.csv`;
-    a.click();
-    // Not at once: some browsers drop a download whose URL is gone before it starts.
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    saveOrSay(`${plainName(run.name)}-run${run.id}.csv`, new Blob([csv], { type: 'text/csv' }));
   }
 </script>
 

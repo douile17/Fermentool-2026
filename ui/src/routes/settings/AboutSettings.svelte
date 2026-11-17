@@ -50,6 +50,18 @@
     opening = null;
   }
 
+  // A web page by its name: the daemon opens it in the default browser (the
+  // desktop window opens no new tab). Daemon unreachable: the link's own way.
+  async function page(e, key) {
+    e.preventDefault();
+    const href = e.currentTarget.href;
+    try {
+      await post('/api/about/open', { which: key });
+    } catch {
+      window.open(href, '_blank', 'noopener');
+    }
+  }
+
   // What the data folder holds, each by its own name in it ("config.toml"),
   // or its whole path when a setting moved it elsewhere.
   const files = $derived(
@@ -83,13 +95,13 @@
       <dd>
         {#each authors as a, i}
           {#if i}<br />{/if}
-          {a.name}{#if a.mail}, <a href="mailto:{a.mail}">{a.mail}</a>{/if}
+          {a.name}{#if a.mail}, <a href="mailto:{a.mail}" onclick={(e) => page(e, `mail:${i}`)}>{a.mail}</a>{/if}
         {/each}
       </dd>
 
       {#if about.homepage}
         <dt>Website</dt>
-        <dd><a href={about.homepage} target="_blank" rel="noopener">{about.homepage.replace(/^https?:\/\//, '')}</a></dd>
+        <dd><a href={about.homepage} onclick={(e) => page(e, 'homepage')}>{about.homepage.replace(/^https?:\/\//, '')}</a></dd>
       {/if}
 
       <dt>Licence</dt>
@@ -98,8 +110,8 @@
       <!-- CC BY 4.0 asks for this credit -->
       <dt>Icons</dt>
       <dd>
-        <a href="https://www.figma.com/community/file/1166831539721848736" target="_blank" rel="noopener">Solar</a>
-        by 480 Design, <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>
+        <a href="https://www.figma.com/community/file/1166831539721848736" onclick={(e) => page(e, 'icons')}>Solar</a>
+        by 480 Design, <a href="https://creativecommons.org/licenses/by/4.0/" onclick={(e) => page(e, 'icons_license')}>CC BY 4.0</a>
       </dd>
 
       <dt>Daemon running for</dt>

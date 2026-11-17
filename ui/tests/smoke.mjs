@@ -5,6 +5,11 @@
 //
 //   npm run smoke                       (daemon on http://127.0.0.1:8730)
 //   SMOKE_URL=http://127.0.0.1:8731 npm run smoke
+//   SMOKE_CDP=9444 npm run smoke        (the desktop window instead of Edge)
+//
+// SMOKE_CDP walks the compiled desktop window, started with
+// WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9444: its
+// page is http://tauri.localhost, the daemon still SMOKE_URL.
 //
 // Needs Edge or Chrome. Exits 1 on the first failed check, or on any page
 // error (an exception in the page fails the run even if every check passed).
@@ -14,6 +19,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:8730';
+const CDP = process.env.SMOKE_CDP ? Number(process.env.SMOKE_CDP) : null;
+// where the pages are: the daemon itself, or the desktop window's bundle
+const APP = CDP ? 'http://tauri.localhost' : URL;
 const BROWSERS = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -46,20 +54,23 @@ try {
 const idle = !status.active;
 
 // --- a throwaway browser
-const exe = BROWSERS.find((p) => existsSync(p));
+const exe = CDP ? 'desktop window' : BROWSERS.find((p) => existsSync(p));
 if (!exe) {
   console.error('FAIL  no Edge or Chrome found');
   process.exit(1);
 }
-const port = 9300 + Math.floor(Math.random() * 500);
-const profile = mkdtempSync(join(tmpdir(), 'ft-smoke-'));
-const browser = spawn(exe, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, '--window-size=1400,1000', 'about:blank'], { stdio: 'ignore' });
+const port = CDP ?? 9300 + Math.floor(Math.random() * 500);
+const profile = CDP ? null : mkdtempSync(join(tmpdir(), 'ft-smoke-'));
+// the desktop window is the user's: attached to, never started nor closed
+const browser = CDP
+  ? { kill() {} }
+  : spawn(exe, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, '--window-size=1400,1000', 'about:blank'], { stdio: 'ignore' });
 let ws;
 function finish(code) {
   try { ws?.close(); } catch { /* closing anyway */ }
   browser.kill();
   setTimeout(() => {
-    try { rmSync(profile, { recursive: true, force: true }); } catch { /* the browser may hold it a moment */ }
+    try { if (profile) rmSync(profile, { recursive: true, force: true }); } catch { /* the browser may hold it a moment */ }
     process.exit(code);
   }, 500);
   throw new Error('__finished');
@@ -91,7 +102,7 @@ const stepOn = () => js(`document.querySelector('.step.on .step-l')?.textContent
 try {
   await cmd('Runtime.enable');
   await cmd('Page.enable');
-  await cmd('Page.navigate', { url: URL });
+  await cmd('Page.navigate', { url: APP });
   await sleep(2500);
   check('the app loads', await js(`!!document.querySelector('.tab')`));
   // No "runs dry" time: the balance weighs the bottle and its tubing too,
@@ -362,7 +373,7 @@ try {
   };
   await cmd('Page.navigate', { url: 'about:blank' });
   await sleep(300);
-  await cmd('Page.navigate', { url: `${URL}/#settings/camera` });
+  await cmd('Page.navigate', { url: `${APP}/#settings/camera` });
   await sleep(2500);
   check('#settings/camera opens the Camera section', (await js(`document.querySelector('.side button.on')?.textContent.trim()`)) === 'Camera');
   check('it says the camera state in a word, with its Connect or Disconnect', await js(`/^(Connected|Connecting…|Camera in use|Camera not answering|Not connected|Camera helper missing)$/.test(document.querySelector('.settings-pane .head .word')?.textContent.trim() ?? '') && document.querySelectorAll('.settings-pane .head button').length === 1`));
@@ -396,7 +407,7 @@ try {
   await cmd('Page.navigate', { url: 'about:blank' });
   await sleep(300);
   check('leaving Settings, Camera closes its live preview (viewers back)', await viewersBack(), `viewers ${await camViewers()}, before ${viewersBefore}`);
-  await cmd('Page.navigate', { url: `${URL}/#camera` });
+  await cmd('Page.navigate', { url: `${APP}/#camera` });
   await sleep(2500);
   check('#camera opens the Camera page', (await js(`document.querySelector('.nav-item.active')?.textContent.trim()`)) === 'Camera' && (await js(`document.querySelector('h1')?.textContent.trim()`)) === 'Camera');
   const shown = await answers(`!!document.querySelector('.camera .pic, .camera .empty')`);
@@ -410,6 +421,14 @@ try {
     check('the Take a picture icon is centred, apart from its words', await js(`(() => { const b = [...document.querySelectorAll('.camera .under button')].find((x) => x.textContent.includes('Take a picture')); const i = b?.querySelector('svg')?.getBoundingClientRect(); if (!i) return false; const r = b.getBoundingClientRect(); const n = [...b.childNodes].find((x) => x.nodeType === 3 && x.textContent.trim()); if (!n) return false; const t = document.createRange(); t.selectNode(n); const w = t.getBoundingClientRect(); const d = (i.top + i.bottom) / 2 - (w.top + w.bottom) / 2; return Math.abs((i.top + i.bottom) / 2 - (r.top + r.bottom) / 2) <= 2 && d >= 0.5 && d <= 2 && w.left - i.right >= 4; })()`));
   }
   check('the Camera page never says burst', await js(`!/burst/i.test(document.querySelector('main')?.innerText ?? '')`));
+  // The desktop window's webview opens no new tab: an image or a web page
+  // is opened by the daemon (2026-11-17), never by a target=_blank link.
+  check('the Camera page has no link opening a new tab', await js(`!document.querySelector('main a[target="_blank"]')`));
+  await cmd('Page.navigate', { url: 'about:blank' });
+  await sleep(300);
+  await cmd('Page.navigate', { url: `${APP}/#settings/about` });
+  await sleep(2500);
+  check('About opens, its links open no new tab', await js(`document.querySelector('.side button.on')?.textContent.trim() === 'About' && !!document.querySelector('.settings-pane a[href^="https://"]') && !document.querySelector('a[target="_blank"]')`));
 
   // --- Tubing calibration last: it is only looked at, its draft untouched
   await click('button', 'Feeding profile');

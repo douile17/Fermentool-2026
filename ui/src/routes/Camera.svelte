@@ -116,11 +116,13 @@
   let picMsg = $state(null);
   let picErr = $state(null);
   let flashId = $state(null);
-  // Show in folder: the daemon opens Explorer on this PC, the image picked.
-  async function showInFolder() {
+  // Open (Windows' image viewer) and Show in folder (Explorer, the image
+  // picked): the daemon opens them on this PC, so they work in the desktop
+  // window too, whose webview opens no new tab.
+  async function imageAction(id, what) {
     picErr = null;
     try {
-      await post(`/api/timelapses/images/${flashId}/show`);
+      await post(`/api/timelapses/images/${id}/${what}`);
     } catch (e) {
       picErr = e.message;
     }
@@ -197,8 +199,8 @@
       {#if picErr}<p class="pic-err">{picErr}</p>{:else if picMsg}
         <p class="saved" id="cam-saved">
           <span class="said"><Icon name="check" size={16} />{picMsg}</span>
-          <a class="btn btn-ghost act" href={`${BASE}/api/timelapses/images/${flashId}/full.jpg`} target="_blank" rel="noopener"><Icon name="gallery" size={16} />Open</a>
-          <button class="btn-ghost act" type="button" onclick={showInFolder}><Icon name="folder" size={16} />Show in folder</button>
+          <button class="btn-ghost act" type="button" onclick={() => imageAction(flashId, 'open')}>Open</button>
+          <button class="btn-ghost act" type="button" onclick={() => imageAction(flashId, 'show')}>Show in folder</button>
         </p>
       {/if}
     </section>
@@ -209,9 +211,9 @@
         <ul>
           {#each latest as img (img.id)}
             <li class:flash={img.id === flashId}>
-              <a href={`${BASE}/api/timelapses/images/${img.id}/full.jpg`} target="_blank" rel="noopener">
+              <button class="thumb" type="button" onclick={() => imageAction(img.id, 'open')} title="Open">
                 <img src={`${BASE}/api/timelapses/images/${img.id}/thumb.jpg`} alt={`Image at ${runClock(img.elapsed_s)}`} loading="lazy" />
-              </a>
+              </button>
               <span>{runClock(img.elapsed_s)}{img.slot == null ? ', by hand' : ''}</span>
             </li>
           {/each}
@@ -242,6 +244,7 @@
   .strip ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--s-3); }
   .strip li { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
   .strip img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--video-bg); display: block; }
+  .thumb { padding: 0; border: 0; background: none; display: block; width: 100%; border-radius: 6px; }
   .strip li.flash img { outline: 2px solid var(--green-500); outline-offset: 2px; }
   .pic {
     position: relative; overflow: hidden; border-radius: var(--radius-ctl);

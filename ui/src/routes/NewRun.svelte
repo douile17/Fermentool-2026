@@ -1,4 +1,5 @@
 <script>
+  import { saveOrSay } from '../lib/savefile.js';
   import { app } from '../lib/state.svelte.js';
   import { get, post } from '../lib/api.js';
   import { num, dur, vol, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
@@ -18,7 +19,7 @@
   import { segThumb } from '../lib/segthumb.js';
   import { MAX_STEPS, parseStepRows, readCsv, runDurationS, spanLabel, stepAt, stepLasts, stepsCheck, stepsCurve, templateSheets } from '../lib/steps.js';
   import { readXlsx, writeXlsx } from '../lib/xlsx.js';
-  import { newestOnly, profileReady } from '../lib/preview.js';
+  import { newestOnly, previewWanted, profileReady } from '../lib/preview.js';
   import { bytesText, countText, estimate, INTERVAL_CHOICES, intervalChoice, intervalWords, tlSummary } from '../lib/timelapse.js';
   import { liveShown } from '../lib/camera.js';
   import LiveImg from '../components/LiveImg.svelte';
@@ -354,7 +355,7 @@
   const previewReq = newestOnly();
   $effect(() => {
     const id = previewReq.begin();
-    if (stepsErr) {
+    if (!previewWanted({ stepsErr, durationS })) {
       clearTimeout(debounce);
       preview = [];
       previewErr = stepsErr;
@@ -501,14 +502,10 @@
     }
   }
   function downloadTemplate() {
-    const url = URL.createObjectURL(
+    saveOrSay(
+      `step-profile-template-${f.control_var === 'rpm' ? 'rpm' : 'ml-min'}.xlsx`,
       new Blob([writeXlsx(templateSheets(unit))], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
     );
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `step-profile-template-${f.control_var === 'rpm' ? 'rpm' : 'ml-min'}.xlsx`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
   function addStep() {
     // an hour after the last one, at its rate, to be changed

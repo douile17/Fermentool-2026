@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { newestOnly, profileReady } from './preview.js';
+import { newestOnly, previewWanted, profileReady } from './preview.js';
 
 describe('newestOnly', () => {
   it('keeps only the answer to the latest request', () => {
@@ -23,5 +23,13 @@ describe('profileReady', () => {
     expect(profileReady({ ...drawn, preview: [] })).toBe(false);
     expect(profileReady({ ...drawn, durationS: 0 })).toBe(false);
     expect(profileReady({ ...drawn, previewErr: 'bad' })).toBe(false);
+  });
+});
+
+describe('previewWanted', () => {
+  it('asks only with a duration and steps that hold', () => {
+    expect(previewWanted({ durationS: 0 })).toBe(false);
+    expect(previewWanted({ durationS: 3600, stepsErr: 'Step 2 starts before step 1' })).toBe(false);
+    expect(previewWanted({ durationS: 3600 })).toBe(true);
   });
 });
