@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "src-tauri"]
+# A bare `cargo test` / `cargo build` leaves the desktop shell out: its build
+# script needs the sidecars that only `copy-sidecar.ps1` puts in
+# `src-tauri/binaries`, and failed every test run on a PC without them.
+# `cargo tauri build` (run in src-tauri) still builds it; `--workspace`
+# includes it.
+default-members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.7"
