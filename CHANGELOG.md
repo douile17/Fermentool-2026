@@ -160,6 +160,10 @@ corrections de l'audit du 9).
   s'applique sur l'image en direct et s'enregistre au clic, sans bouton
   Save, avec Undo ; les réglages sont remis à chaque connexion de la
   caméra. La vue en direct se règle à 5, 10 ou 15 images par seconde.
+- « Take a picture » dit dans quel dossier l'image est allée (le nom de la
+  timelapse, ou « Pictures » et le jour), avec « Open » (l'image dans un
+  onglet) et « Show in folder » (l'Explorateur sur le dossier, l'image
+  sélectionnée) (16 novembre). Son icône est centrée sur le texte.
 
 ### Correction après un refill (2 novembre)
 

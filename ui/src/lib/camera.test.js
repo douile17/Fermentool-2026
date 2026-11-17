@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   cameraLine,
+  pictureSaved,
   camerasFound,
   changeText,
   controlChanged,
@@ -290,5 +291,16 @@ describe('throttle', () => {
     vi.advanceTimersByTime(500);
     expect(sent).toEqual([1, 3, 4]);
     vi.useRealTimers();
+  });
+});
+
+describe('pictureSaved', () => {
+  // "Saved in today's pictures." said nothing of where (2026-11-16)
+  it("names the picture's folder", () => {
+    expect(pictureSaved('Pictures 2026-11-16')).toBe('Saved in Pictures 2026-11-16.');
+    expect(pictureSaved('Night')).toBe('Saved in Night.');
+  });
+  it('says saved without a folder', () => {
+    expect(pictureSaved(null)).toBe('Saved.');
   });
 });

@@ -1,7 +1,7 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import { BASE, get, post } from '../lib/api.js';
-  import { cameraLine, liveShown, noPictureSince, runClock } from '../lib/camera.js';
+  import { cameraLine, liveShown, noPictureSince, pictureSaved, runClock } from '../lib/camera.js';
   import Icon from '../components/Icon.svelte';
   import LiveImg from '../components/LiveImg.svelte';
   import TimelapseCard from '../components/TimelapseCard.svelte';
@@ -116,6 +116,16 @@
   let picMsg = $state(null);
   let picErr = $state(null);
   let flashId = $state(null);
+  // Show in folder: the daemon opens Explorer on this PC, the image picked.
+  async function showInFolder() {
+    picErr = null;
+    try {
+      await post(`/api/timelapses/images/${flashId}/show`);
+    } catch (e) {
+      picErr = e.message;
+    }
+  }
+
   async function takePicture() {
     taking = true;
     picErr = null;
@@ -123,7 +133,7 @@
     try {
       const r = await post('/api/camera/picture');
       flashId = r.image_id;
-      if (!tl) picMsg = "Saved in today's pictures.";
+      picMsg = pictureSaved(r.folder);
       loadTimelapse();
     } catch (e) {
       picErr = e.message;
@@ -177,14 +187,20 @@
           <span class="name"><span class="nw">{cam.device}</span>{#if size} · <span class="nw">{size}</span>{/if}</span>
         {/if}
         <span class="gap"></span>
-        <button class="btn-ghost" type="button" onclick={takePicture} disabled={taking || cam.state !== 'connected'}>
+        <button class="btn-ghost shot" type="button" onclick={takePicture} disabled={taking || cam.state !== 'connected'}>
           <Icon name="camera" size={16} />{taking ? 'Taking…' : 'Take a picture'}
         </button>
         <button class="btn-ghost full" type="button" onclick={fullScreen} disabled={!showLive} aria-label="Full screen" title="Full screen">
           <Icon name="full-screen" size={18} />
         </button>
       </div>
-      {#if picErr}<p class="pic-err">{picErr}</p>{:else if picMsg}<p class="muted">{picMsg}</p>{/if}
+      {#if picErr}<p class="pic-err">{picErr}</p>{:else if picMsg}
+        <p class="saved" id="cam-saved">
+          <span class="said"><Icon name="check" size={16} />{picMsg}</span>
+          <a class="btn btn-ghost act" href={`${BASE}/api/timelapses/images/${flashId}/full.jpg`} target="_blank" rel="noopener"><Icon name="gallery" size={16} />Open</a>
+          <button class="btn-ghost act" type="button" onclick={showInFolder}><Icon name="folder" size={16} />Show in folder</button>
+        </p>
+      {/if}
     </section>
 
     {#if latest.length}
@@ -218,6 +234,10 @@
   .side { flex: 1 1 280px; min-width: 0; }
   .card.live { padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-4); }
   .pic-err { color: var(--danger-ink); margin: 0; }
+  .saved { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+  .said { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--muted); margin-right: var(--s-2); }
+  /* the picture's two ways out, ghost buttons like Take a picture, smaller */
+  .act { height: 32px; padding: 0 var(--s-3); display: inline-flex; align-items: center; gap: var(--s-2); font-size: 13px; color: var(--ink); text-decoration: none; }
   .strip h2 { margin: 0 0 var(--s-3); font-size: 16px; }
   .strip ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--s-3); }
   .strip li { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
@@ -250,6 +270,10 @@
   .name { color: var(--muted); }
   .nw { white-space: nowrap; }
   .gap { flex: 1 1 auto; }
+  /* the icon centred on the words beside it, not sat on their baseline */
+  .shot { height: 40px; display: inline-flex; align-items: center; gap: var(--s-2); }
+  /* 1 px lower: the words read at their lowercase middle, under the line box's */
+  .shot :global(svg) { position: relative; top: 1px; }
   .full { width: 40px; height: 40px; padding: 0; display: inline-grid; place-items: center; }
 
   .band {

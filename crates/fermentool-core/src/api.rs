@@ -172,6 +172,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/timelapses/current/interval", post(timelapse_interval))
         .route("/api/timelapses/{id}/images", get(timelapse_images))
         .route("/api/timelapses/images/{id}/{which}", get(timelapse_image_file))
+        .route("/api/timelapses/images/{id}/show", post(timelapse_image_show))
         .route("/api/camera/frame.jpg", get(camera_frame))
         .route("/api/camera/live", get(camera_live))
         .route("/api/notify/test", post(notify_test))
@@ -1659,7 +1660,17 @@ async fn timelapse_interval(State(s): State<AppState>, Json(req): Json<IntervalR
 /// or today's pictures.
 async fn camera_picture(State(s): State<AppState>) -> ApiResult<Response> {
     let id = timelapse_blocking(&s, |tl| tl.take_picture()).await?;
-    Ok(Json(json!({ "image_id": id })).into_response())
+    // the folder's name (a timelapse's, or "Pictures <day>"), never its path
+    let folder = s
+        .db
+        .call(move |db| -> Result<Option<String>, crate::store::StoreError> {
+            let Some(img) = db.image(id)? else { return Ok(None) };
+            Ok(db.timelapse(img.timelapse_id)?.map(|t| t.name))
+        })
+        .await?
+        .ok()
+        .flatten();
+    Ok(Json(json!({ "image_id": id, "folder": folder })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1698,8 +1709,18 @@ async fn timelapse_image_file(State(s): State<AppState>, Path((id, which)): Path
         "thumb.jpg" => true,
         _ => return Err(ApiError::NotFound),
     };
-    let path = s
-        .db
+    let path = image_path(&s, id, thumb).await?;
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .map_err(|_| ApiError::NotFound)?;
+    Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "max-age=31536000, immutable")], bytes)
+        .into_response())
+}
+
+/// An image's file, found from its row only (never a path from a request).
+async fn image_path(s: &AppState, id: i64, thumb: bool) -> ApiResult<std::path::PathBuf> {
+    s.db
         .call(move |db| -> Result<Option<std::path::PathBuf>, crate::store::StoreError> {
             let Some(img) = db.image(id)? else { return Ok(None) };
             let Some(t) = db.timelapse(img.timelapse_id)? else { return Ok(None) };
@@ -1708,13 +1729,19 @@ async fn timelapse_image_file(State(s): State<AppState>, Path((id, which)): Path
         })
         .await?
         .map_err(|e| ApiError::Conflict(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
-        .await
-        .map_err(|e| ApiError::Conflict(e.to_string()))?
-        .map_err(|_| ApiError::NotFound)?;
-    Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "max-age=31536000, immutable")], bytes)
-        .into_response())
+        .ok_or(ApiError::NotFound)
+}
+
+/// `POST /api/timelapses/images/{id}/show`: Explorer opens the image's
+/// folder with the image picked (the Camera page's "Show in folder").
+async fn timelapse_image_show(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let path = image_path(&s, id, false).await?;
+    if !path.exists() {
+        return Err(ApiError::NotFound);
+    }
+    open_in_file_manager(&path, true)
+        .map_err(|e| ApiError::Conflict(format!("could not open the file manager: {e}")))?;
+    Ok(Json(json!({ "opened": true })).into_response())
 }
 
 /// The data dir new timelapses go under when `captures_dir` is empty.
@@ -3235,7 +3262,10 @@ mod tests {
         let res = app.clone().oneshot(post_json("/api/timelapses/current/pause", json!({}))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let res = app.clone().oneshot(post_json("/api/camera/picture", json!({}))).await.unwrap();
-        assert!(body_json(res).await["image_id"].is_i64());
+        let pic = body_json(res).await;
+        assert!(pic["image_id"].is_i64());
+        // the page says where it went: the folder's name, never a path
+        assert_eq!(pic["folder"], "Night", "{pic}");
         let res = app.clone().oneshot(post_json("/api/timelapses/current/stop", json!({}))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let cur = body_json(app.clone().oneshot(get("/api/timelapses/current")).await.unwrap()).await;
@@ -3250,6 +3280,8 @@ mod tests {
         for path in ["/api/timelapses/images/999/full.jpg", "/api/timelapses/images/1/other.jpg"] {
             assert_eq!(app.clone().oneshot(get(path)).await.unwrap().status(), StatusCode::NOT_FOUND, "{path}");
         }
+        let res = app.clone().oneshot(post_json("/api/timelapses/images/999/show", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "show: an unknown image opens nothing");
         let res = app.oneshot(get("/api/timelapses/images/..%2F..%2Fconfig.toml/full.jpg")).await.unwrap();
         assert!(matches!(res.status(), StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND), "{}", res.status());
     }

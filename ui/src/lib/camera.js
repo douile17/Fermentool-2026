@@ -243,3 +243,9 @@ export function throttle(send, ms) {
     },
   };
 }
+
+/** Where Take a picture put the image, said by its folder's name (a
+ *  timelapse's, or "Pictures <day>"); the daemon never sends a path. */
+export function pictureSaved(folder) {
+  return folder ? `Saved in ${folder}.` : 'Saved.';
+}
