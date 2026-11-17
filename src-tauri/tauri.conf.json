@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8730 ws://127.0.0.1:8730; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8730 ws://127.0.0.1:8730; img-src 'self' data: http://127.0.0.1:8730; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
@@ -33,7 +33,7 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/fermentool-core"],
+    "externalBin": ["binaries/fermentool-core", "binaries/fermentool-camera"],
     "resources": {
       "installer/fermentool-task.xml": "fermentool-task.xml",
       "installer/setup-task.ps1": "setup-task.ps1",

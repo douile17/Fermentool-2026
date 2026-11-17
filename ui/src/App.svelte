@@ -6,6 +6,7 @@
   import History from './routes/History.svelte';
   import Settings from './routes/Settings.svelte';
   import TubingCalibration from './routes/TubingCalibration.svelte';
+  import Camera from './routes/Camera.svelte';
   import LeaveConfirm from './components/LeaveConfirm.svelte';
   import PumpHead from './components/PumpHead.svelte';
   import Icon from './components/Icon.svelte';
@@ -17,6 +18,18 @@
   import { runState, stateTitle } from './lib/runview.js';
   import { num, unitFor, digitsFor } from './lib/fmt.js';
   import StateIcon from './components/StateIcon.svelte';
+  import { parseHash } from './lib/route.js';
+  import { SECTIONS } from './routes/settings/sections.js';
+
+  // A deep link (#settings/pumps, #history) opens that page at start.
+  {
+    const deep = parseHash(location.hash, SECTIONS.map((x) => x.id));
+    if (deep) {
+      app.route = deep.route;
+      if (deep.tab) app.tab = deep.tab;
+      if (deep.section) app.settingsSection = deep.section;
+    }
+  }
 
   const pumpLink = $derived(linkState(app.status, app.connected));
 
@@ -127,7 +140,9 @@
     return { label: runRs.word, sub: runRs.title };
   });
   const PAGE_TITLES = { overview: 'Overview', history: 'History', calibration: 'Tubing calibration', new: 'New run' };
-  const pageTitle = $derived(app.route === 'settings' ? 'Settings' : (PAGE_TITLES[app.tab] ?? 'Feeding profile'));
+  const pageTitle = $derived(
+    app.route === 'settings' ? 'Settings' : app.route === 'camera' ? 'Camera' : (PAGE_TITLES[app.tab] ?? 'Feeding profile'),
+  );
 
   // The Overview's band says it already, in full.
   const onOverview = $derived(app.route === 'pump' && app.tab === 'overview');
@@ -340,6 +355,13 @@
       >
         <span class="ic pump-ic" aria-hidden="true"><PumpHead size={18} spin={running} frac={running ? 0.4 : 0} direction={app.status?.active?.direction ?? 'cw'} solid /></span>Feeding profile
       </button>
+      <button
+        class="nav-item"
+        class:active={app.route === 'camera'}
+        onclick={() => go(() => (app.route = 'camera'))}
+      >
+        <span class="ic cam-ic" aria-hidden="true"><Icon name="camera" size={18} /></span>Camera
+      </button>
     </nav>
 
     <button
@@ -395,7 +417,7 @@
     <!-- One page title for screen readers; the tabs already say it on screen. -->
     <h1 class="sr-only">{pageTitle}</h1>
     <div class="wrap">
-      <ConnBar />
+      <ConnBar onopen={() => go(() => { app.route = 'settings'; app.settingsSection = 'pumps'; })} />
 
       {#if runPill && !onOverview}
         <div class="run-bar {runRs.tone}" role={runRs.tone === 'bad' ? 'alert' : 'status'}>
@@ -419,6 +441,8 @@
 
       {#if app.route === 'settings'}
         <div class="page-enter"><Settings /></div>
+      {:else if app.route === 'camera'}
+        <div class="page-enter"><Camera /></div>
       {:else}
         <div
           class="tabs"
@@ -523,6 +547,10 @@
      green hub and rollers on a teal body read as a mismatched outline). */
   .nav-item.running .pump-ic { opacity: 1; }
   .nav-item .gear-ic {
+    width: 18px; height: 18px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .nav-item .cam-ic {
     width: 18px; height: 18px;
     display: inline-flex; align-items: center; justify-content: center;
   }

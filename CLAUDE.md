@@ -86,7 +86,9 @@ else to install:
 - **Deliverable exe:** `cargo build --release -p fermentool-core` →
   `target/release/fermentool-core.exe`. Self-contained (UI embedded via
   rust-embed), windowless (`windows_subsystem = "windows"`), opens the browser
-  on launch.
+  on launch. The camera needs its helper beside it: `cargo build --release
+  -p fermentool-camera --features capture` → `target/release/fermentool-camera.exe`
+  (without it, Settings says "Camera helper missing").
 - **Rule: a `cargo build` success is not "done".** After building, always run
   the exe and smoke-test it (`curl 127.0.0.1:8730/api/status`, then a clean
   `POST /api/shutdown`) before calling it working. Kill any daemon still
@@ -235,6 +237,19 @@ seconds to load with the balance off). Hence:
   calibration draft never go through the control thread. Only what needs the
   live engine (start/stop, delete a run, status, scale/serial changes) does.
   Every connection has a 5 s `busy_timeout`.
+
+**Timing lines (`timing.rs`).** Once a minute the daemon logs, per metric, a
+`timing` line (`count`, `p50_ms`, `p99_ms`, `max_ms`) in the daily log:
+`setpoint_late` (a setpoint slot's lateness against the 150 ms schedule, recorded even when nothing is written; read it with `tick`, a slow tick pushes the next slot, which then reads 0 late), `tick`
+(duration of `engine.tick`), `scale_age` (age of the reading the engine takes)
+and `scale_poll` (duration of one balance poll). `setpoint_late` and `tick`
+only during a run. They are pushes into a mutex-guarded buffer, nothing more on
+the control thread, and the mutex is never held across I/O. To compare two
+periods (before and after a heavier neighbour, the camera):
+`python scripts/timing_report.py <log> [<log>...] --a FROM TO --b FROM TO`,
+local ISO times; it prints the median over each range's minutes, the worst
+minute, and PASS/FAIL per metric (B.p99 <= A.p99 + max(10 %, 20 ms)). Both ranges need the balance answering throughout: a silent
+balance keeps `scale_age` fresh while `scale_poll` sits at ~1.5 s.
 
 ## Crash-resume clock anchor
 
@@ -538,9 +553,11 @@ template only targets group chats), which is why ntfy is the default.
   `WriteConsoleW` and froze the control thread.
 - Deploy: re-check `/api/status`, stop an active run through the API only when
   the user asked for the deploy, `POST /api/shutdown`, `cargo build
-  --release`, start the exe, check `/api/status` and that the served bundle
-  contains the change; tell the user to Ctrl+F5 (an open tab keeps the old UI
-  in memory).
+  --release -p fermentool-core` and `cargo build --release -p
+  fermentool-camera --features capture` (the camera helper, next to the
+  daemon in `target\release`), start the exe, check `/api/status` and that
+  the served bundle contains the change; tell the user to Ctrl+F5 (an open
+  tab keeps the old UI in memory).
 - **During an active run, run heavy work at low priority**, so Windows
   serves the daemon first: `cmd /c '"...vcvars64.bat" >nul 2>&1 && start "" /b
   /low /wait cargo test ...'` (same for `cargo build`, `npm run build`, Vite,
@@ -585,6 +602,106 @@ a run, switching off the refill pump stops the feed following its curve**
      there, a silent pump can be named again (the distinction in `link.js`).
 - `docs/wiring.md` lists the FTDI USB-RS485-WE as an isolated adapter; as far
   as known it is not galvanically isolated. To check and correct.
+
+## Camera (2026-11-02)
+
+Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
+`docs/superpowers/plans/2026-11-02-camera-*.md`.
+- The webcam is read by a helper process, `fermentool-camera.exe` (shipped
+  next to the daemon, below-normal priority, JPEG frames over a pipe
+  protocol on stdin/stdout). The daemon owns it: it starts and stops it, and
+  the helper never outlives it (a Windows job object kills it with the
+  daemon, and it exits on stdin EOF).
+- **No camera call on the control thread, ever.** Same rule as the serial
+  port: the pump and the balance come first, a webcam must never delay them.
+- **The helper reads the webcam through Media Foundation directly**
+  (`mf_backend.rs`: a synchronous source reader, RGB32 out, converted by
+  Media Foundation). nokhwa was dropped on 2026-11-05: the "HUE HD Camera"
+  crashed it in `FrameServerClient.dll` 3 to 5 s after every open (seen in
+  the Windows event log, Application, event 1000), while the Windows
+  Camera app showed it fine; nokhwa also never released a webcam and
+  crashed when dropping one. Test a camera outside the daemon by driving
+  the helper over its pipe (`Open`, then `Grab` 5 times a second).
+- **The helper process is the unit of release.** The daemon quits and
+  respawns the helper to let go of a webcam (a rule from the nokhwa days,
+  kept: an exiting process frees the device whatever the driver does).
+  A webcam in use by another app shows up as HRESULT 0xC00D3704 at the first
+  frame, not at open.
+- **Build the helper with the daemon**: `cargo build --release -p
+  fermentool-camera --features capture`, so `fermentool-camera.exe` sits
+  next to `fermentool-core.exe` in `target\release` (the daemon looks for it
+  there; a deploy of `fermentool-core` alone reports "Camera helper missing").
+  The installer ships it as a sidecar (`copy-sidecar.ps1`).
+- The live view grabs only while a viewer is counted (`LIVE_FPS` 15; 5 until 2026-11-05: 4 min at
+  15 left the balance reads as they were, `scale_poll` p99 58 to 74 ms
+  against 65 to 82 at 5 and 41 to 69 with no viewer). Every
+  live `<img>` is `components/LiveImg.svelte` (`liveSrc`), so an unmounted
+  view closes its stream, and it is mounted only while the page is visible
+  (`liveShown(cam, visible)`): a hidden tab stops the grabbing.
+- A finished stream keeps its last picture without an error: the page says
+  Live only from the daemon's side (`liveState`, from `viewers` and
+  `frame_at` of `GET /api/camera`), says "Not live" otherwise and asks the
+  stream again once the daemon answers.
+- **Picture controls** (2026-11-05): `IAMCameraControl` (exposure, focus)
+  and `IAMVideoProcAmp` (brightness, contrast, saturation, sharpness, white
+  balance, gain, power line 13) cast from the media source (`Knobs`,
+  `mf_backend.rs`); protocol `Controls` / `SetControl`, `Open { controls }`.
+  Only what the camera reports is listed: the HUE has no exposure nor white
+  balance, the Integrated Webcam has both with auto. **The HUE accepts and
+  reads back every control but its picture never changes** (measured
+  2026-11-05: saturation 1 to 128, brightness -64 to 64, at once and after a
+  reopen, no effect beyond the scene's own drift), while the Integrated
+  Webcam reacts fully (saturation 0 grey, brightness 64 near white): a
+  control that "does nothing" is the camera's firmware, check it on another
+  camera before suspecting the code. **In auto, `Get`
+  returns the last fixed value, not the camera's choice**: the UI says only
+  "Auto" there. The driver keeps a value across processes; the daemon still
+  sets the saved ones at each open (`[camera.controls."<device>"]`, by
+  control name; `CameraWant::controls`, kept for a reopen by
+  `remember`). New controls for the same camera never respawn the helper
+  (`same_camera`). Routes `GET /api/camera/controls`, `POST
+  /api/camera/control` (set on the camera first, then saved; `save: false`
+  while a slider moves), `POST /api/camera/controls/reset`, `POST
+  /api/camera/fps` (`[camera] live_fps`, 1 to 15).
+- Settings > Camera has no Save: every click connects or sets the camera
+  and saves at once, the line under the card says it with Undo (an undo
+  per change, `restorePlan`). The controls sit beside the live picture.
+- **Timelapses (plan C, 2026-11-05)**: `crates/fermentool-core/src/timelapse/`.
+  A `timelapse` thread owns its own `Store` connection and the captures
+  folder; it follows the run through `RunView`s fed from the status
+  broadcast (`follow_status`), **never the control thread**, and asks the
+  camera for stills (`Request::Still`, JPEG 95 + a 320 px thumbnail, 5
+  frames dropped first). Run-linked: started by `POST /api/runs`'s
+  `timelapse: {interval_min}` after the run starts (a failure never fails
+  the start, `timelapse_error`), images only while the run is driven, none
+  while it awaits Resume (not missed), ended at the first status without
+  the run once it has been seen driven (Stop ends it within a second);
+  before that, only after `run_gone_grace` (3 s: a status queued from
+  before the start must not end it). Standalone: from the Camera page, resumed after a restart. Slot k due
+  `anchor + (k - anchor_slot) * interval` (`schedule.rs`, 2 s grace in
+  fractions of a second); `last_slot` is stored, so a restart counts the
+  slots it missed once. Camera lost: slots missed, `camera_lost` /
+  `camera_recovered`; disk under 200 MB or folder gone: paused `disk` /
+  `folder`, rechecked every 30 s, resumed alone (never missed). Never
+  notified. **Each image keeps, in `timelapse_images` and the folder's
+  `images.csv`, the camera, its controls (JSON), run elapsed, setpoint and
+  unit, delivered ml, weight and trim c**: the images are meant to train a
+  model later. Migration 0017 (`timelapses.run_id` has no REFERENCES: it
+  would block deleting a run). Files are served by image id only
+  (`/api/timelapses/images/{id}/full.jpg|thumb.jpg`). Deleting a run
+  deletes its images; Reset history all but the one recording.
+  `[camera] interval_min` (New run's default) and `captures_dir` (empty:
+  `%APPDATA%\Fermentool\captures`). Plan D: player, Timelapses tab,
+  History section, exports, rename/delete, Browse….
+- Another program holding the webcam (at Open or at a grab) is `in_use`,
+  retried every 15 s, then doubling to 120 s after 10 in a row.
+- The Tauri window's CSP lists the daemon's origin in `img-src` (the live
+  view is a cross-origin `<img>` there); `lib/tauricsp.test.js` checks it.
+- Where to look: `crates/fermentool-core/src/camera.rs`, the camera routes in
+  `api.rs`, `crates/fermentool-camera`, `ui/src/lib/camera.js`.
+- The timing comparison (`scripts/timing_report.py`, camera on vs the
+  baseline) is the acceptance gate: p99 of each metric within 10 % (or
+  20 ms) of the baseline.
 
 ## Curve engine (`crates/fermentool-curves`)
 

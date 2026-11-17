@@ -25,6 +25,7 @@ use crate::engine::{
 };
 #[cfg(test)]
 use crate::store::RunRow;
+use crate::timing::{self, Metric};
 use crate::store::{EventLevel, NewEvent, RunKind, RunStatus};
 use crate::transport::{SwapTransport, TransportKind};
 
@@ -371,6 +372,7 @@ fn control_loop<T: Transport + SwapTransport>(
     let auto_resume = &mut auto_resume_flag;
     loop {
         let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Step {
+                timing::flush_if_due(Instant::now());
                 // Keep the monotonic run epoch in sync with what the engine is running.
                 match engine.active_status() {
                     Some(a) if run_epoch.map(|(_, _, _, id)| id) != Some(a.run_id) => {
@@ -514,6 +516,7 @@ fn control_loop<T: Transport + SwapTransport>(
                             burst_end_fired = run_epoch.map(|e| e.3);
                         }
                         let now = run_now(run_epoch, &mut clock_stepped);
+                        let tick_started = Instant::now();
                         let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             match engine.tick(now) {
                                 Ok(TickOutcome::Finished { seq, target }) => {
@@ -528,6 +531,7 @@ fn control_loop<T: Transport + SwapTransport>(
                                 }
                             }
                         }));
+                        timing::record(Metric::Tick, tick_started.elapsed().as_secs_f64() * 1000.0);
                         match done {
                             Ok(true) => {
                                 let _ = events.send(current_status(engine, grace));
@@ -544,6 +548,10 @@ fn control_loop<T: Transport + SwapTransport>(
                     }
 
                     if Instant::now() >= write_due {
+                        timing::record(
+                            Metric::SetpointLate,
+                            Instant::now().saturating_duration_since(write_due).as_secs_f64() * 1000.0,
+                        );
                         let now = run_now(run_epoch, &mut clock_stepped);
                         let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             engine.apply_setpoint(now)

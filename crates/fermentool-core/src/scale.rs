@@ -130,6 +130,7 @@ impl PolledScale {
                 while !worker.stop.load(Ordering::SeqCst) {
                     let started = Instant::now();
                     let reply = port.transaction(SICS_IMMEDIATE);
+                    crate::timing::record(crate::timing::Metric::ScalePoll, started.elapsed().as_secs_f64() * 1000.0);
                     *worker.latest.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), reply));
                     // Sleep out the interval in short steps, so a dropped link
                     // lets go of its COM port promptly.
@@ -163,8 +164,15 @@ impl Transport for PolledScale {
             return Err(TransportError::Io("the polled scale only answers weight queries".into()));
         }
         match &*self.shared.latest.lock().unwrap_or_else(|p| p.into_inner()) {
-            Some((at, reply)) if at.elapsed() <= SCALE_MAX_AGE => reply.clone(),
-            Some(_) => Err(TransportError::Io("balance poll thread stuck".into())),
+            Some((at, reply)) if at.elapsed() <= SCALE_MAX_AGE => {
+                crate::timing::record(crate::timing::Metric::ScaleAge, at.elapsed().as_secs_f64() * 1000.0);
+                reply.clone()
+            }
+            Some((at, _)) => {
+                // Keep recording while it grows: the stuck-thread signal.
+                crate::timing::record(crate::timing::Metric::ScaleAge, at.elapsed().as_secs_f64() * 1000.0);
+                Err(TransportError::Io("balance poll thread stuck".into()))
+            }
             // Opened, first answer not in yet.
             None => Err(TransportError::Timeout),
         }
@@ -483,6 +491,35 @@ mod tests {
             Some((Instant::now() - SCALE_MAX_AGE - Duration::from_millis(1), Ok(b"S S 1.0 g\r\n".to_vec())));
         // Not the last weight, and not a mere timeout either: reopen it.
         assert!(matches!(s.transaction(SICS_IMMEDIATE), Err(TransportError::Io(_))));
+    }
+
+    #[test]
+    fn a_served_reading_records_its_age() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut s = fake(Duration::ZERO, &dropped).unwrap();
+        assert!(wait_until(|| s.transaction(SICS_IMMEDIATE).is_ok()));
+        s.shared.stop.store(true, Ordering::SeqCst);
+        assert!(wait_until(|| dropped.load(Ordering::SeqCst)));
+        *s.shared.latest.lock().unwrap() =
+            Some((Instant::now() - Duration::from_millis(300), Ok(b"S S 1.0 g\r\n".to_vec())));
+        assert!(s.transaction(SICS_IMMEDIATE).is_ok());
+        // The state is global and other tests share it: some sample, not the only one.
+        assert!(crate::timing::peek(crate::timing::Metric::ScaleAge).iter().any(|&ms| ms >= 300.0));
+    }
+
+    #[test]
+    fn a_stale_reading_still_records_its_age() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut s = fake(Duration::ZERO, &dropped).unwrap();
+        assert!(wait_until(|| s.transaction(SICS_IMMEDIATE).is_ok()));
+        s.shared.stop.store(true, Ordering::SeqCst);
+        assert!(wait_until(|| dropped.load(Ordering::SeqCst)));
+        let age = SCALE_MAX_AGE + Duration::from_millis(700);
+        *s.shared.latest.lock().unwrap() = Some((Instant::now() - age, Ok(b"S S 1.0 g
+".to_vec())));
+        assert!(matches!(s.transaction(SICS_IMMEDIATE), Err(TransportError::Io(_))));
+        let ms = age.as_secs_f64() * 1000.0;
+        assert!(crate::timing::peek(crate::timing::Metric::ScaleAge).iter().any(|&v| v >= ms));
     }
 
     #[test]

@@ -122,6 +122,45 @@ corrections de l'audit du 9).
   a pu s'arrêter pendant la panne). Les 3 minutes après une manipulation
   apparaissent en pointillé gris comme le refill lui-même.
 
+### Caméra, vue en direct (3 novembre)
+
+- Une page Caméra montre l'image de la webcam en direct (15 images par
+  seconde, seulement tant qu'une fenêtre la regarde), et Settings, Caméra
+  choisit la webcam. L'image est prise par un petit programme à part,
+  `fermentool-camera.exe`, livré dans l'installateur à côté du daemon, à
+  priorité réduite : il s'arrête avec le daemon et ne touche jamais à la
+  pompe ni à la balance. Webcam déjà ouverte par une autre application :
+  la bande le dit (« Camera in use »).
+- La « HUE HD Camera » marche (5 novembre) : avec la bibliothèque caméra
+  d'avant (nokhwa), le programme caméra plantait 3 à 5 s après chaque
+  ouverture, d'où une image qui se déconnectait et revenait sans arrêt,
+  alors que l'application Caméra de Windows la montrait bien. Il lit
+  maintenant la webcam par Media Foundation directement.
+- Timelapses (5 novembre) : une image toutes les N minutes, prise par le
+  daemon, même fenêtre fermée. Avec un run (« Timelapse » dans New run,
+  Check and start : elle démarre et s'arrête avec le run, Run again la
+  reprend) ou seule depuis la page Caméra (nom, intervalle, arrêt après N h).
+  La page Caméra montre la timelapse en cours (Pause, changer l'intervalle,
+  Stop), les 8 dernières images et « Take a picture ». Chaque image est un
+  JPEG de qualité 95 avec sa miniature, rangée dans un dossier par
+  timelapse (Settings, Caméra : « Images kept in », par défaut
+  `%APPDATA%\Fermentool\captures`), avec un `images.csv` qui note pour
+  chaque image la caméra et ses réglages, le temps de run, la consigne, le
+  volume livré, le poids de la balance et le facteur de correction, prêt
+  pour entraîner un modèle. Caméra débranchée : les images manquées sont
+  comptées, la timelapse reprend seule, le run n'est jamais touché. Disque
+  sous 200 Mo ou dossier introuvable : la timelapse se met en pause et
+  reprend seule. Supprimer un run supprime ses images. Le lecteur, les
+  exports .zip et .mp4 et l'onglet Timelapses viendront ensuite.
+- Réglages de l'image dans Settings, Caméra (5 novembre) : exposition,
+  balance des blancs, luminosité, contraste, saturation, netteté, gain et
+  anti-scintillement (50/60 Hz), seulement ceux que la caméra possède, avec
+  « Auto » quand elle en a un. « Lock the picture » fige d'un clic
+  l'exposition et la couleur (utile avant une timelapse). Chaque réglage
+  s'applique sur l'image en direct et s'enregistre au clic, sans bouton
+  Save, avec Undo ; les réglages sont remis à chaque connexion de la
+  caméra. La vue en direct se règle à 5, 10 ou 15 images par seconde.
+
 ### Correction après un refill (2 novembre)
 
 - Plus de pic de correction après un refill. Pendant les ~2 minutes qui

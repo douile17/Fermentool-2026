@@ -114,7 +114,7 @@ try {
     // --- New run: steps turn green as their fields are filled, not before
     check('New run opens', await click('button', 'New run'));
     await sleep(1200);
-    check('a fresh New run has no green step', (await greens()) === '----', await greens());
+    check('a fresh New run has no green step', (await greens()) === '-----', await greens());
     await type('#nr-name input', 'smoke');
     if (await js(`!!document.querySelector('#nr-resp select')`)) {
       await js(`(() => { const s = document.querySelector('#nr-resp select'); const o = [...s.options].find((x) => !x.disabled); s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
@@ -192,9 +192,23 @@ try {
     await js(`document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
     await click('.shape', 'Linear');
     await sleep(900);
+    // the Timelapse step (2026-11-06): its switch and interval buttons with a camera, the way to Settings without
+    await click('.step', 'Timelapse');
+    await sleep(600);
+    check('Timelapse turns green once seen', (await greens())[3] === 'G', await greens());
+    check('the Timelapse step has its switch or the way to Settings', await js(`!!document.querySelector('.tl-switch input[type=checkbox]') || !!document.querySelector('.panel a[href="#settings/camera"]')`));
+    if (await js(`!!document.querySelector('[aria-label="One image every"]')`)) {
+      await click('[aria-label="One image every"] button', 'Custom');
+      await sleep(300);
+      check('Custom opens its minutes field', await js(`!!document.querySelector('.tl-custom input')`));
+      await click('[aria-label="One image every"] button', '5 min');
+      await sleep(300);
+      check('a preset closes the Custom field', await js(`!document.querySelector('.tl-custom input')`));
+    }
     await click('.step', 'Check and start');
     await sleep(600);
     check('Check and start shows the curve and a Start button', await js(`!!document.querySelector('.go .preview svg') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Start run'))`));
+    check('Check and start sums the timelapse up in one line', await js(`(() => { const dt = [...document.querySelectorAll('.recap dt')].find((d) => d.textContent.trim() === 'Timelapse'); const t = dt?.nextElementSibling?.textContent.trim() ?? ''; return /^(every \\d|off$|no camera$)/.test(t); })()`));
 
     // --- History: Run again opens New run on its check (broke once)
     check('History opens', await click('.tab', 'History'));
@@ -329,9 +343,78 @@ try {
   check('at 900 px, Pumps shows the three models of each pump', (await click('.side button', 'Pumps')) && (await sleep(1200), await js(`(() => { const pane = document.querySelector('.settings-pane').getBoundingClientRect(); const b = [...document.querySelectorAll('.settings-pane .seg button')]; return b.length >= 6 && b.every((x) => { const r = x.getBoundingClientRect(); return r.width > 30 && r.right <= pane.right + 1; }); })()`)));
   check('at 900 px, Settings fits the window', await fits());
 
+  // --- Camera (2026-11-03): looked at only, never Connect, Disconnect nor
+  // Save. Both reached by their deep link, as a bookmark would.
+  const camCfg = async () => JSON.stringify((await (await fetch(`${URL}/api/config`)).json()).camera ?? null);
+  const camBefore = await camCfg();
+  const answers = (expr) => Promise.race([js(expr), sleep(3000).then(() => 'frozen')]);
+  // A live view left must close its stream: the daemon's viewer count back
+  // to what it was before (another open tab may hold one), within 5 s.
+  const camViewers = async () => (await (await fetch(`${URL}/api/camera`)).json()).viewers;
+  const viewersBefore = await camViewers();
+  check('GET /api/camera counts the live viewers', Number.isInteger(viewersBefore), String(viewersBefore));
+  const viewersBack = async () => {
+    for (let i = 0; i < 25; i++) {
+      if ((await camViewers()) <= viewersBefore) return true;
+      await sleep(200);
+    }
+    return false;
+  };
+  await cmd('Page.navigate', { url: 'about:blank' });
+  await sleep(300);
+  await cmd('Page.navigate', { url: `${URL}/#settings/camera` });
+  await sleep(2500);
+  check('#settings/camera opens the Camera section', (await js(`document.querySelector('.side button.on')?.textContent.trim()`)) === 'Camera');
+  check('it says the camera state in a word, with its Connect or Disconnect', await js(`/^(Connected|Connecting…|Camera in use|Camera not answering|Not connected|Camera helper missing)$/.test(document.querySelector('.settings-pane .head .word')?.textContent.trim() ?? '') && document.querySelectorAll('.settings-pane .head button').length === 1`));
+  check('it has the camera select and the picture sizes', await js(`!!document.querySelector('.settings-pane select[aria-label="Camera"]') && document.querySelectorAll('.settings-pane .seg[aria-label="Picture size"] button').length >= 1`));
+  // a webcam plugged in after a first list stayed out of the select until
+  // "Look again": the section asks Windows again at each opening (2026-11-03)
+  const plugged = (await (await fetch(`${URL}/api/camera/devices?refresh=1`)).json()).length;
+  const offered = await js(`document.querySelectorAll('.settings-pane select[aria-label="Camera"] option[value]:not([value=""])').length`);
+  check('the camera select lists every camera plugged in now', offered >= plugged, `${offered} offered, ${plugged} plugged`);
+  // Every click there connects or sets the camera and saves (2026-11-05, no
+  // Save): looked at only, nothing clicked.
+  check('Camera has no Save button (each change applies and saves at once)', await js(`!document.querySelector('.settings-pane button.save')`));
+  const placed = await answers(`(() => { const s = document.querySelector('.settings-pane .seg[aria-label="Picture size"]'); return !!s && s.classList.contains('thumbed') && parseFloat(s.style.getPropertyValue('--thumb-w')) > 0; })()`);
+  check('the picture size choice answers, its tint placed', placed === true, String(placed));
+  check('the live view offers 5, 10 and 15 a second, one picked', await js(`(() => { const b = [...document.querySelectorAll('.settings-pane .seg[aria-label="Live view, pictures a second"] button')]; return b.map((x) => x.textContent.trim()).join() === '5,10,15' && b.filter((x) => x.classList.contains('on')).length === 1; })()`));
+  if ((await (await fetch(`${URL}/api/camera`)).json()).state === 'connected') {
+    await sleep(1500);
+    const ctl = await (await fetch(`${URL}/api/camera/controls`)).json();
+    const rows = await js(`document.querySelectorAll('.settings-pane .ctls .ctl').length`);
+    check('Picture shows one row per control the camera has', rows === (ctl.controls ?? []).length, `${rows} rows, ${(ctl.controls ?? []).length} controls`);
+    check('each Picture row has its slider or its choice', await js(`[...document.querySelectorAll('.settings-pane .ctls .ctl')].every((r) => r.querySelector('input[type="range"], .seg') && r.querySelector('.name')?.textContent.trim())`));
+  } else {
+    console.log('skip  the Picture rows: no camera connected');
+  }
+  {
+    const saved = JSON.parse(camBefore) ?? {};
+    const shown = await js(`[document.querySelector('.settings-pane input[aria-label="Timelapse every (minutes)"]')?.value, document.querySelector('.settings-pane input[aria-label="Images kept in"]')?.value]`);
+    check('Timelapse shows its interval and folder as saved', shown?.[0] === String(saved.interval_min ?? 5) && shown?.[1] === (saved.captures_dir ?? ''), JSON.stringify(shown));
+  }
+  check('nothing about the camera saved', (await camCfg()) === camBefore);
+  await cmd('Page.navigate', { url: 'about:blank' });
+  await sleep(300);
+  check('leaving Settings, Camera closes its live preview (viewers back)', await viewersBack(), `viewers ${await camViewers()}, before ${viewersBefore}`);
+  await cmd('Page.navigate', { url: `${URL}/#camera` });
+  await sleep(2500);
+  check('#camera opens the Camera page', (await js(`document.querySelector('.nav-item.active')?.textContent.trim()`)) === 'Camera' && (await js(`document.querySelector('h1')?.textContent.trim()`)) === 'Camera');
+  const shown = await answers(`!!document.querySelector('.camera .pic, .camera .empty')`);
+  check('the Camera page answers, with its picture or its empty state', shown === true, String(shown));
+  if (await js(`!!document.querySelector('.camera .pic')`)) {
+    await sleep(1500);
+    check('the Timelapse card answers in one of its states', await js(`(() => { const c = document.querySelector('.camera section.tl'); return !!c && (!!c.querySelector('.rec .word') || [...c.querySelectorAll('button')].some((b) => b.textContent.includes('Start timelapse')) || /A run is going/.test(c.textContent)); })()`));
+    check('Take a picture is offered beside Full screen', await js(`[...document.querySelectorAll('.camera .under button')].some((b) => b.textContent.includes('Take a picture'))`));
+    // its icon sat on the words' baseline, touching them, then 1.5 px above
+    // their lowercase middle (2026-11-16): a hair under the line box's middle
+    check('the Take a picture icon is centred, apart from its words', await js(`(() => { const b = [...document.querySelectorAll('.camera .under button')].find((x) => x.textContent.includes('Take a picture')); const i = b?.querySelector('svg')?.getBoundingClientRect(); if (!i) return false; const r = b.getBoundingClientRect(); const n = [...b.childNodes].find((x) => x.nodeType === 3 && x.textContent.trim()); if (!n) return false; const t = document.createRange(); t.selectNode(n); const w = t.getBoundingClientRect(); const d = (i.top + i.bottom) / 2 - (w.top + w.bottom) / 2; return Math.abs((i.top + i.bottom) / 2 - (r.top + r.bottom) / 2) <= 2 && d >= 0.5 && d <= 2 && w.left - i.right >= 4; })()`));
+  }
+  check('the Camera page never says burst', await js(`!/burst/i.test(document.querySelector('main')?.innerText ?? '')`));
+
   // --- Tubing calibration last: it is only looked at, its draft untouched
   await click('button', 'Feeding profile');
   await sleep(500);
+  check('leaving the Camera page closes its live view (viewers back)', await viewersBack(), `viewers ${await camViewers()}, before ${viewersBefore}`);
   check('Tubing calibration opens', await click('.tab', 'Tubing calibration'));
   await sleep(1800);
   check('the calibration shows its four steps', (await js(`document.querySelectorAll('.steps .step').length`)) === 4);

@@ -41,6 +41,12 @@
   --fill-line: #b6dbe2;
   --warn-bg: #fdf1e3;
   --warn-line: #f2d2a8;
+  /* the camera's picture: a dark box in every theme, white words on a
+     dark tag over it (the picture under them is any colour) */
+  --video-bg: #182124;
+  --video-tag: rgba(18, 41, 46, 0.72);
+  --video-ink: #ffffff;
+  --video-muted: #a9bdbc;
 
   --radius: 14px;
   --radius-ctl: 9px;
@@ -95,6 +101,10 @@
     --fill-line: #2e5866;
     --warn-bg: #45351f;
     --warn-line: #6a5130;
+    --video-bg: #182124;
+    --video-tag: rgba(18, 41, 46, 0.72);
+    --video-ink: #ffffff;
+    --video-muted: #a9bdbc;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
     --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.4);
   }
@@ -132,6 +142,10 @@
   --fill-line: #2e5866;
   --warn-bg: #45351f;
   --warn-line: #6a5130;
+  --video-bg: #182124;
+  --video-tag: rgba(18, 41, 46, 0.72);
+  --video-ink: #ffffff;
+  --video-muted: #a9bdbc;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.4);
 }

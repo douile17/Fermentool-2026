@@ -1,6 +1,6 @@
-# Build the UI and the fermentool-core daemon, then stage the daemon exe where
-# Tauri expects the sidecar (name suffixed with the target triple). Run this
-# before `cargo tauri dev` or `cargo tauri build`.
+# Build the UI, the fermentool-core daemon and the fermentool-camera helper, then
+# stage both exes where Tauri expects the sidecars (name suffixed with the target
+# triple). Run this before `cargo tauri dev` or `cargo tauri build`.
 #
 # Native tools (npm, cargo) write their normal progress to stderr. Windows
 # PowerShell 5.1 turns that into errors under "Stop", so failures are checked
@@ -23,17 +23,23 @@ Invoke-Step "building ui/dist" { npm --prefix "$root\ui" run build }
 Invoke-Step "building fermentool-core ($triple, release, static CRT)" {
     cargo build --release -p fermentool-core --target $triple
 }
-
-$src = Join-Path $root "target\$triple\release\fermentool-core.exe"
-$dstDir = Join-Path $srcTauri "binaries"
-$dst = Join-Path $dstDir "fermentool-core-$triple.exe"
-
-# A fresh PC has no Visual C++ Redistributable: the sidecar must not need it
-# (see .cargo/config.toml, +crt-static).
-if (Select-String -Path $src -Pattern "VCRUNTIME140" -SimpleMatch -Quiet) {
-    throw "fermentool-core.exe still depends on VCRUNTIME140.dll: check .cargo/config.toml"
+Invoke-Step "building fermentool-camera ($triple, release, capture)" {
+    cargo build --release -p fermentool-camera --features capture --target $triple
 }
 
+$dstDir = Join-Path $srcTauri "binaries"
 New-Item -ItemType Directory -Force $dstDir | Out-Null
-Copy-Item -Force $src $dst
-Write-Host "==> sidecar staged: $dst"
+
+# Both exes are staged with the target triple in their name; Tauri installs
+# them next to fermentool.exe without it. A fresh PC has no Visual C++
+# Redistributable: neither may need it (see .cargo/config.toml, +crt-static).
+foreach ($name in @("fermentool-core", "fermentool-camera")) {
+    $src = Join-Path $root "target\$triple\release\$name.exe"
+    $dst = Join-Path $dstDir "$name-$triple.exe"
+    if (-not (Test-Path $src)) { throw "$name.exe was not built: $src" }
+    if (Select-String -Path $src -Pattern "VCRUNTIME140" -SimpleMatch -Quiet) {
+        throw "$name.exe still depends on VCRUNTIME140.dll: check .cargo/config.toml"
+    }
+    Copy-Item -Force $src $dst
+    Write-Host "==> sidecar staged: $dst"
+}

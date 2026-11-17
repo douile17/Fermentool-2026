@@ -12,6 +12,8 @@ l'utilisateur courant, dans `%LOCALAPPDATA%\Fermentool` :
 
 - `fermentool.exe` : la fenêtre (Tauri) avec l'interface intégrée ;
 - `fermentool-core.exe` : le daemon qui pilote la pompe et lit la balance ;
+- `fermentool-camera.exe` : l'assistant de la caméra (vue en direct), lancé
+  et arrêté par le daemon, lié en statique lui aussi ;
 - une tâche planifiée `Fermentool` qui lance le daemon à l'ouverture de
   session et le relance s'il plante (sans droits administrateur : un port
   COM n'en demande pas).
@@ -67,9 +69,9 @@ Sur le PC de développement (Rust, Node, `cargo tauri` installés).
    ```powershell
    .\src-tauri\scripts\copy-sidecar.ps1
    ```
-   Le script construit `ui/dist`, compile le daemon en release et le place dans
-   `src-tauri/binaries/`. Il s'arrête si le daemon dépend encore de
-   `VCRUNTIME140.dll`.
+   Le script construit `ui/dist`, compile le daemon et l'assistant caméra
+   (`--features capture`) en release et les place dans `src-tauri/binaries/`.
+   Il s'arrête si l'un des deux dépend encore de `VCRUNTIME140.dll`.
 5. **Installateur** :
    ```sh
    cargo tauri build

@@ -64,6 +64,13 @@ Per the LabV manual, the RS485 pins on the pump's DB9 are:
 To be filled from the pump (connector, pins and any signal ground not yet
 checked on a real unit).
 
+## Webcam
+
+- Plug the webcam into another USB controller than the RS-485 and balance
+  adapters when possible (another root port on the PC, not a hub shared with
+  them): a camera streams a lot of USB traffic and a shared controller can
+  delay the serial adapters.
+
 ## Pump serial settings
 
 - Protocol: MODBUS-RTU, **8E1**, baud 9600 (configurable on the pump).

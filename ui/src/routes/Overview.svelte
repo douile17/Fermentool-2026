@@ -496,6 +496,12 @@
   </div>
 {:else}
   <div class="ov">
+    {#if app.timelapseNote}
+      <p class="tl-note" role="status">
+        The run started without its timelapse: {app.timelapseNote}
+        <button type="button" class="tl-x" aria-label="Dismiss" onclick={() => (app.timelapseNote = null)}><Icon name="x" size={14} /></button>
+      </p>
+    {/if}
     <!-- 1. Is everything all right, and what do I do next? -->
     <section class="band {rs.tone}" role={rs.tone === 'bad' ? 'alert' : undefined} aria-label="Run state">
       <div class="band-state">
@@ -856,6 +862,8 @@
 
   /* --- live run: one question per zone, colour only when it needs you --- */
   .ov { display: flex; flex-direction: column; gap: var(--s-4); }
+  .tl-note { margin: 0; display: flex; align-items: center; gap: var(--s-2); color: var(--warn-ink); font-size: 13px; }
+  .tl-x { border: none; background: none; padding: 2px; color: var(--muted); cursor: pointer; display: grid; }
   .k { font-size: 12.5px; color: var(--muted); margin: 0; }
   .mono-num { font-variant-numeric: tabular-nums; }
 

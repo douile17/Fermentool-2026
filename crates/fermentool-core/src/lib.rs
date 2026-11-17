@@ -3,14 +3,18 @@
 //! The binary (`src/main.rs`) wires these together:
 //! [`config`] → [`store`] + [`engine`] on a [`control`] thread → the [`api`]
 //! HTTP server, with [`notify`] following the journal on a thread of its own.
+//! [`timing`] logs per-minute summaries of the loops' timing.
 
 pub mod api;
+pub mod camera;
 pub mod config;
 pub mod control;
 pub mod engine;
 pub mod notify;
 pub mod scale;
 pub mod store;
+pub mod timelapse;
+pub mod timing;
 pub mod tracking;
 pub mod trim;
 pub mod transport;

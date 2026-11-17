@@ -3,8 +3,10 @@
 //! Every field has a default, so a missing or partial file still loads. On first
 //! run the file is written out with the defaults.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use fermentool_camera::protocol::{Control, ControlValue};
 use fermentool_modbus::{PumpKind, PumpModel, PumpTarget};
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +57,114 @@ pub struct Config {
     pub refill: RefillConfig,
     pub notify: NotifyConfig,
     pub display: DisplayConfig,
+    /// `[camera]`: absent until a camera is first connected from Settings.
+    pub camera: Option<CameraConfig>,
+}
+
+/// The picture sizes the camera offers (the helper's test pattern and the
+/// UI list the same three).
+pub const CAMERA_SIZES: [(u32, u32); 3] = [(640, 480), (1280, 720), (1920, 1080)];
+
+/// `[camera]`: which webcam to connect to, and whether the daemon connects
+/// it at start (Disconnect keeps the device and turns `enabled` off, like the
+/// balance's Disconnect keeps its port).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CameraConfig {
+    /// The device's name as the helper lists it.
+    pub device: String,
+    /// Which one of the devices of that name (two identical webcams).
+    pub device_index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub enabled: bool,
+    /// Start the helper with `--test-pattern` (a synthetic picture, no
+    /// webcam). Read at daemon start.
+    pub test_pattern: bool,
+    /// Pictures a second while someone watches the live view.
+    pub live_fps: u32,
+    /// A new run's timelapse: one image this often, minutes (New run's default).
+    pub interval_min: u32,
+    /// Where new timelapses go; empty: the data dir's `captures`. A
+    /// timelapse keeps the folder it started in.
+    pub captures_dir: String,
+    /// The picture controls set from Settings, per camera name, then per
+    /// control name (`exposure`, `white_balance`...): set again at each
+    /// connect, since a webcam unplugged or a PC restarted may go back to its
+    /// own. A control left alone is not listed.
+    pub controls: BTreeMap<String, BTreeMap<String, SavedControl>>,
+}
+
+/// A picture control as saved: its value, or auto (then `value` is the one
+/// it goes back to without).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedControl {
+    pub value: i32,
+    #[serde(default)]
+    pub auto: bool,
+}
+
+/// Live view pictures a second: the lowest and the highest accepted.
+pub const CAMERA_FPS: std::ops::RangeInclusive<u32> = 1..=15;
+
+/// A timelapse's interval, minutes: the lowest and the highest accepted.
+pub const TIMELAPSE_MINUTES: std::ops::RangeInclusive<u32> = 1..=1440;
+
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self {
+            device: String::new(),
+            device_index: 0,
+            width: 1280,
+            height: 720,
+            enabled: true,
+            test_pattern: false,
+            live_fps: 15,
+            interval_min: 5,
+            captures_dir: String::new(),
+            controls: BTreeMap::new(),
+        }
+    }
+}
+
+impl CameraConfig {
+    pub fn problem(&self) -> Option<String> {
+        self.size_problem().or_else(|| self.fps_problem()).or_else(|| self.interval_problem())
+    }
+
+    fn interval_problem(&self) -> Option<String> {
+        (!TIMELAPSE_MINUTES.contains(&self.interval_min)).then(|| {
+            format!(
+                "timelapse interval must be {} to {} minutes",
+                TIMELAPSE_MINUTES.start(),
+                TIMELAPSE_MINUTES.end()
+            )
+        })
+    }
+
+    fn size_problem(&self) -> Option<String> {
+        (!CAMERA_SIZES.contains(&(self.width, self.height)))
+            .then(|| "camera picture size must be 640x480, 1280x720 or 1920x1080".into())
+    }
+
+    fn fps_problem(&self) -> Option<String> {
+        (!CAMERA_FPS.contains(&self.live_fps)).then(|| {
+            format!("camera live view must be {} to {} pictures a second", CAMERA_FPS.start(), CAMERA_FPS.end())
+        })
+    }
+
+    /// The controls saved for `device`, as the helper takes them; an unknown
+    /// name (a newer or older daemon's) is left out.
+    pub fn controls_for(&self, device: &str) -> Vec<ControlValue> {
+        self.controls
+            .get(device)
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, c)| {
+                Control::from_name(name).map(|control| ControlValue { control, value: c.value, auto: c.auto })
+            })
+            .collect()
+    }
 }
 
 /// How the UI shows things, the same for everyone on this PC (the browser
@@ -394,6 +504,7 @@ impl Default for Config {
             refill: RefillConfig::default(),
             notify: NotifyConfig::default(),
             display: DisplayConfig::default(),
+            camera: None,
         }
     }
 }
@@ -626,6 +737,9 @@ impl Config {
         if let Some(p) = self.refill.problem() {
             return Err(p);
         }
+        if let Some(p) = self.camera.as_ref().and_then(CameraConfig::problem) {
+            return Err(p);
+        }
         self.notify.validate()
     }
 
@@ -695,6 +809,19 @@ impl Config {
                 "config.toml: refill.speed_rpm out of range, the refill pump's max ({max} rpm) used"
             ));
         }
+        if let Some(c) = self.camera.as_mut().filter(|c| c.size_problem().is_some()) {
+            c.width = 1280;
+            c.height = 720;
+            fixed.push("config.toml: camera size out of range, 1280x720 used".to_string());
+        }
+        if let Some(c) = self.camera.as_mut().filter(|c| c.fps_problem().is_some()) {
+            c.live_fps = 15;
+            fixed.push("config.toml: camera.live_fps out of range, 15 used".to_string());
+        }
+        if let Some(c) = self.camera.as_mut().filter(|c| c.interval_problem().is_some()) {
+            c.interval_min = 5;
+            fixed.push("config.toml: camera.interval_min out of range, 5 used".to_string());
+        }
         fixed
     }
 
@@ -711,6 +838,94 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_section_absent_is_none() {
+        let c = Config::from_toml("").unwrap();
+        assert!(c.camera.is_none());
+        // And a default config writes no [camera] section back.
+        assert!(!c.to_toml().unwrap().contains("[camera]"));
+    }
+
+    #[test]
+    fn camera_defaults_are_1280x720_enabled() {
+        let c = Config::from_toml("[camera]\ndevice = \"Integrated Webcam\"\n").unwrap();
+        let cam = c.camera.unwrap();
+        assert_eq!(cam.device, "Integrated Webcam");
+        assert_eq!((cam.device_index, cam.width, cam.height), (0, 1280, 720));
+        assert!(cam.enabled);
+        assert!(!cam.test_pattern);
+    }
+
+    #[test]
+    fn camera_odd_size_is_refused() {
+        let mut c = Config::from_toml("[camera]\ndevice = \"X\"\nwidth = 800\nheight = 600\n").unwrap();
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "camera picture size must be 640x480, 1280x720 or 1920x1080"
+        );
+        c.camera.as_mut().unwrap().width = 640;
+        c.camera.as_mut().unwrap().height = 480;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn camera_controls_round_trip_per_device() {
+        let mut c = Config::from_toml("[camera]
+device = \"Cam\"
+").unwrap();
+        let cam = c.camera.as_mut().unwrap();
+        assert_eq!(cam.live_fps, 15);
+        let mut hue = BTreeMap::new();
+        hue.insert("exposure".to_string(), SavedControl { value: -6, auto: false });
+        hue.insert("white_balance".to_string(), SavedControl { value: 4600, auto: true });
+        hue.insert("zoom".to_string(), SavedControl { value: 1, auto: false });
+        cam.controls.insert("HUE HD Camera".to_string(), hue);
+        let text = c.to_toml().unwrap();
+        let back = Config::from_toml(&text).unwrap().camera.unwrap();
+        assert_eq!(back.controls, c.camera.as_ref().unwrap().controls);
+        assert_eq!(
+            back.controls_for("HUE HD Camera"),
+            vec![
+                ControlValue { control: Control::Exposure, value: -6, auto: false },
+                ControlValue { control: Control::WhiteBalance, value: 4600, auto: true },
+            ]
+        );
+        assert!(back.controls_for("Other").is_empty());
+    }
+
+    #[test]
+    fn camera_interval_and_captures_dir_round_trip() {
+        let c = Config::from_toml("[camera]\ndevice = \"X\"\n").unwrap();
+        let cam = c.camera.as_ref().unwrap();
+        assert_eq!((cam.interval_min, cam.captures_dir.as_str()), (5, ""));
+        let c = Config::from_toml("[camera]\ndevice = \"X\"\ninterval_min = 15\ncaptures_dir = 'D:\\captures'\n").unwrap();
+        let back = Config::from_toml(&c.to_toml().unwrap()).unwrap().camera.unwrap();
+        assert_eq!((back.interval_min, back.captures_dir.as_str()), (15, "D:\\captures"));
+    }
+
+    #[test]
+    fn interval_out_of_range_is_refused_then_fixed() {
+        let mut c = Config::from_toml("[camera]\ndevice = \"X\"\ninterval_min = 0\n").unwrap();
+        assert_eq!(c.validate().unwrap_err(), "timelapse interval must be 1 to 1440 minutes");
+        assert_eq!(c.sanitize(), vec!["config.toml: camera.interval_min out of range, 5 used".to_string()]);
+        assert_eq!(c.camera.unwrap().interval_min, 5);
+    }
+
+    #[test]
+    fn camera_fps_out_of_range_is_refused_then_fixed_alone() {
+        let mut c = Config::from_toml("[camera]
+device = \"X\"
+width = 640
+height = 480
+live_fps = 60
+").unwrap();
+        assert_eq!(c.validate().unwrap_err(), "camera live view must be 1 to 15 pictures a second");
+        let fixed = c.sanitize();
+        let cam = c.camera.as_ref().unwrap();
+        assert_eq!((cam.live_fps, cam.width, cam.height), (15, 640, 480));
+        assert_eq!(fixed, vec!["config.toml: camera.live_fps out of range, 15 used".to_string()]);
+    }
 
     #[test]
     fn default_round_trips_through_toml() {

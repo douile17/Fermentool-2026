@@ -57,6 +57,15 @@ pub struct AppState {
     pub config_rev: Arc<AtomicU64>,
     /// Where this daemon keeps its files and when it started, for Settings > About.
     pub about: Arc<About>,
+    /// The camera supervisor. Its handlers never touch the control thread.
+    pub camera: crate::camera::Camera,
+    /// The `timelapse` thread (its own connection and folder).
+    pub timelapses: crate::timelapse::Timelapses,
+    /// `fermentool-camera.exe` was not found next to the daemon.
+    pub helper_missing: bool,
+    /// Set when the daemon stops: open live views end, or graceful shutdown
+    /// would wait for them forever.
+    pub stopping: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// What `GET /api/about` reports besides the build's own constants.
@@ -144,6 +153,27 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/calibrations/{id}/archive", post(archive_calibration))
         .route("/api/calibrations/{id}/restore", post(restore_calibration))
+        .route("/api/camera", get(camera_status))
+        .route("/api/camera/devices", get(camera_devices))
+        .route("/api/camera/connect", post(camera_connect))
+        .route("/api/camera/disconnect", post(camera_disconnect))
+        .route("/api/camera/controls", get(camera_controls))
+        .route("/api/camera/control", post(camera_control))
+        .route("/api/camera/controls/reset", post(camera_controls_reset))
+        .route("/api/camera/fps", post(camera_fps))
+        .route("/api/camera/picture", post(camera_picture))
+        .route("/api/camera/captures", get(captures_info).post(captures_set))
+        .route("/api/camera/interval", post(camera_interval))
+        .route("/api/timelapses", post(timelapse_start))
+        .route("/api/timelapses/current", get(timelapse_current))
+        .route("/api/timelapses/current/stop", post(timelapse_stop))
+        .route("/api/timelapses/current/pause", post(timelapse_pause))
+        .route("/api/timelapses/current/resume", post(timelapse_resume))
+        .route("/api/timelapses/current/interval", post(timelapse_interval))
+        .route("/api/timelapses/{id}/images", get(timelapse_images))
+        .route("/api/timelapses/images/{id}/{which}", get(timelapse_image_file))
+        .route("/api/camera/frame.jpg", get(camera_frame))
+        .route("/api/camera/live", get(camera_live))
         .route("/api/notify/test", post(notify_test))
         .route("/api/notify/pages", get(notify_pages))
         .route("/api/notify/ack", post(notify_ack))
@@ -578,7 +608,44 @@ async fn notify_ack(State(s): State<AppState>, Json(a): Json<NotifyAck>) -> ApiR
     Ok(Json(json!({ "acknowledged": true })).into_response())
 }
 
-async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -> ApiResult<Response> {
+#[derive(Deserialize)]
+struct RunTimelapseReq {
+    interval_min: u32,
+}
+
+/// `POST /api/runs`: the run config, plus `timelapse: {interval_min}` to
+/// record one with it. A timelapse that cannot start never fails the run:
+/// the answer carries `timelapse_error`.
+async fn create_run(State(s): State<AppState>, Json(mut body): Json<serde_json::Value>) -> ApiResult<Response> {
+    let timelapse = body.as_object_mut().and_then(|o| o.remove("timelapse")).filter(|t| !t.is_null());
+    let timelapse: Option<RunTimelapseReq> = timelapse
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| ApiError::Bad(format!("timelapse: {e}")))?;
+    if let Some(t) = &timelapse {
+        if !crate::config::TIMELAPSE_MINUTES.contains(&t.interval_min) {
+            return Err(ApiError::Bad("timelapse interval must be 1 to 1440 minutes".into()));
+        }
+    }
+    let cfg: RunConfig = serde_json::from_value(body).map_err(|e| ApiError::Bad(e.to_string()))?;
+    let (kind, name) = (cfg.kind, cfg.name.clone());
+    let (status, mut answer) = start_run(&s, cfg).await?;
+    // calibration runs never have one
+    if let (Some(t), RunKind::Dosing) = (timelapse, kind) {
+        let id = answer["run_id"].as_i64().unwrap_or_default();
+        let tl = s.timelapses.clone();
+        let started = tokio::task::spawn_blocking(move || tl.start_with_run(id, name, i64::from(t.interval_min) * 60))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(e) = started {
+            tracing::warn!(run = id, "the run started without its timelapse: {e}");
+            answer["timelapse_error"] = json!(e);
+        }
+    }
+    Ok((status, Json(answer)).into_response())
+}
+
+async fn start_run(s: &AppState, mut cfg: RunConfig) -> ApiResult<(StatusCode, serde_json::Value)> {
     // A dosing run names who it belongs to, so its alerts reach them and no
     // one else: required once anyone is set up for notifications. The name
     // is stored as configured (its case), a calibration burst goes without.
@@ -606,7 +673,7 @@ async fn create_run(State(s): State<AppState>, Json(mut cfg): Json<RunConfig>) -
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Detail)?;
-    Ok((StatusCode::CREATED, Json(json!({ "run_id": id }))).into_response())
+    Ok((StatusCode::CREATED, json!({ "run_id": id })))
 }
 
 #[derive(serde::Deserialize)]
@@ -632,6 +699,11 @@ async fn clear_history(State(s): State<AppState>) -> ApiResult<Response> {
         .await
         .map_err(|_| ApiError::Down)?
         .map_err(ApiError::Conflict)?;
+    // the captures go with the history (the one recording stays)
+    let tl = s.timelapses.clone();
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || tl.delete_all()).await {
+        tracing::warn!("captures not all deleted: {e}");
+    }
     Ok(Json(json!({ "cleared": true })).into_response())
 }
 
@@ -644,6 +716,11 @@ async fn delete_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult
         .map_err(ApiError::Conflict)?;
     if !found {
         return Err(ApiError::NotFound);
+    }
+    // its timelapse's images go with it
+    let tl = s.timelapses.clone();
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || tl.delete_for_run(id)).await {
+        tracing::warn!(run = id, "the run's timelapse not deleted: {e}");
     }
     Ok(Json(json!({ "deleted": id })).into_response())
 }
@@ -672,6 +749,9 @@ async fn get_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Re
     let effective = run.effective_curve();
     let mut body = serde_json::to_value(&run).map_err(|e| ApiError::Conflict(e.to_string()))?;
     body["effective_curve"] = serde_json::to_value(effective).map_err(|e| ApiError::Conflict(e.to_string()))?;
+    // its timelapse, for Run again and the run detail
+    let tl = s.db.call(move |db| db.timelapse_of_run(id)).await?.map_err(|e| ApiError::Conflict(e.to_string()))?;
+    body["timelapse"] = json!(tl.map(|t| json!({ "id": t.id, "interval_s": t.interval_s, "images": t.images })));
     Ok(Json(body).into_response())
 }
 
@@ -977,7 +1057,14 @@ async fn discard(State(s): State<AppState>, Json(req): Json<DiscardReq>) -> ApiR
 
 async fn shutdown(State(s): State<AppState>) -> Response {
     tracing::info!("shutdown requested via API");
+    // The webcam helper goes first, off the async workers (`shutdown` waits
+    // up to ~1.5 s for it); the daemon's exit path does it again, harmlessly.
+    let camera = s.camera.clone();
+    let _ = tokio::task::spawn_blocking(move || camera.shutdown()).await;
+    let timelapses = s.timelapses.clone();
+    let _ = tokio::task::spawn_blocking(move || timelapses.shutdown()).await;
     s.shutdown.notify_one();
+    s.stopping.send_replace(true);
     Json(json!({ "stopping": true })).into_response()
 }
 
@@ -1242,6 +1329,553 @@ async fn scale_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
     Ok(Json(json!({ "disconnected": saved.path })).into_response())
 }
 
+// ---------------------------------------------------------------------------
+// camera
+// ---------------------------------------------------------------------------
+
+/// `GET /api/camera`: the supervisor's state, whether a camera is saved, the
+/// live viewers counted and the latest picture's time (`frame_at`, null
+/// before any): with them the page tells a frozen picture from a live one.
+async fn camera_status(State(s): State<AppState>) -> ApiResult<Response> {
+    let mut v = serde_json::to_value(s.camera.state()).map_err(|e| ApiError::Conflict(e.to_string()))?;
+    if s.helper_missing {
+        // Even with no want yet: Settings must say why Connect cannot work.
+        v = json!({ "state": "no_helper" });
+    }
+    let configured = s.config.read().await.camera.as_ref().is_some_and(|c| !c.device.trim().is_empty());
+    v["configured"] = json!(configured);
+    v["viewers"] = json!(s.camera.viewers());
+    v["frame_at"] = json!(s.camera.latest().map(|f| f.at.to_string()));
+    Ok(Json(v).into_response())
+}
+
+#[derive(Deserialize)]
+struct DevicesQuery {
+    #[serde(default)]
+    refresh: Option<String>,
+}
+
+/// `GET /api/camera/devices?refresh=1`: the PC's cameras, listed by a helper
+/// of their own, on the blocking pool.
+async fn camera_devices(State(s): State<AppState>, Query(q): Query<DevicesQuery>) -> ApiResult<Response> {
+    let refresh = q.refresh.as_deref().is_some_and(|r| !matches!(r, "" | "0" | "false"));
+    let camera = s.camera.clone();
+    let list = tokio::task::spawn_blocking(move || camera.devices(refresh))
+        .await
+        .map_err(|e| ApiError::Conflict(format!("camera listing failed: {e}")))?
+        .map_err(ApiError::Conflict)?;
+    let list: Vec<_> = list
+        .into_iter()
+        .map(|d| {
+            let sizes: Vec<[u32; 2]> = d.sizes.iter().map(|&(w, h)| [w, h]).collect();
+            json!({ "name": d.name, "index": d.index, "sizes": sizes })
+        })
+        .collect();
+    Ok(Json(list).into_response())
+}
+
+#[derive(Deserialize)]
+struct CameraConnectReq {
+    device: String,
+    #[serde(default)]
+    index: u32,
+    width: u32,
+    height: u32,
+    #[serde(rename = "_rev", default)]
+    rev: Option<u64>,
+}
+
+/// `POST /api/camera/connect`: saves `[camera]` (same revision check and
+/// atomic write as `PUT /api/config`), then asks the supervisor to connect.
+/// `set_want` runs only here and in Disconnect, never on a config save.
+async fn camera_connect(State(s): State<AppState>, Json(req): Json<CameraConnectReq>) -> ApiResult<Response> {
+    if req.device.trim().is_empty() {
+        return Err(ApiError::Bad("pick a camera".into()));
+    }
+    let mut current = s.config.write().await;
+    // the rest of `[camera]` (test pattern, live view, saved controls) stays
+    let cam = crate::config::CameraConfig {
+        device: req.device.clone(),
+        device_index: req.index,
+        width: req.width,
+        height: req.height,
+        enabled: true,
+        ..current.camera.clone().unwrap_or_default()
+    };
+    if let Some(p) = cam.problem() {
+        return Err(ApiError::Bad(p));
+    }
+    if req.rev.is_some_and(|r| r != s.config_rev.load(Ordering::SeqCst)) {
+        return Err(ApiError::Conflict(
+            "the settings were changed meanwhile (another page): reload them and connect again".into(),
+        ));
+    }
+    let controls = cam.controls_for(&cam.device);
+    let mut new = current.clone();
+    new.camera = Some(cam);
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    // Still under the write lock (a channel send): two Connects at once
+    // cannot leave the file naming one camera and the supervisor another.
+    s.camera.set_want(Some(crate::camera::CameraWant {
+        device: req.device,
+        index: req.index,
+        width: req.width,
+        height: req.height,
+        controls,
+    }));
+    drop(current);
+    Ok(Json(json!({ "connecting": true })).into_response())
+}
+
+/// `POST /api/camera/disconnect`: frees the camera and keeps the device in
+/// `config.toml` with `enabled = false`, so the daemon does not connect it at
+/// the next start.
+async fn camera_disconnect(State(s): State<AppState>) -> ApiResult<Response> {
+    let mut current = s.config.write().await;
+    if current.camera.as_ref().is_some_and(|c| c.enabled) {
+        let mut new = current.clone();
+        if let Some(c) = new.camera.as_mut() {
+            c.enabled = false;
+        }
+        new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+        *current = new;
+        s.config_rev.fetch_add(1, Ordering::SeqCst);
+    }
+    // Saved first: a failed save must not leave the camera off with the file
+    // still enabled.
+    s.camera.set_want(None);
+    drop(current);
+    Ok(Json(json!({ "disconnected": true })).into_response())
+}
+
+/// A camera request on the blocking pool (it waits on the supervisor), its
+/// refusal a 409 with the camera's own words.
+async fn camera_blocking<T: Send + 'static>(
+    s: &AppState,
+    f: impl FnOnce(crate::camera::Camera) -> Result<T, String> + Send + 'static,
+) -> ApiResult<T> {
+    let camera = s.camera.clone();
+    tokio::task::spawn_blocking(move || f(camera))
+        .await
+        .map_err(|e| ApiError::Conflict(format!("camera request failed: {e}")))?
+        .map_err(ApiError::Conflict)
+}
+
+/// `GET /api/camera/controls`: the connected camera's picture controls, as
+/// it has them now (only those it has).
+async fn camera_controls(State(s): State<AppState>) -> ApiResult<Response> {
+    let controls = camera_blocking(&s, |c| c.controls()).await?;
+    Ok(Json(json!({ "controls": controls })).into_response())
+}
+
+#[derive(Deserialize)]
+struct CameraControlReq {
+    #[serde(flatten)]
+    value: fermentool_camera::protocol::ControlValue,
+    /// false while a slider moves: set on the camera, saved at its release
+    #[serde(default = "yes")]
+    save: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `POST /api/camera/control {control, value, auto, save}`: set on the
+/// camera first, then (with `save`) kept in `[camera.controls]` for this
+/// camera: a value the camera refuses is never saved.
+async fn camera_control(State(s): State<AppState>, Json(req): Json<CameraControlReq>) -> ApiResult<Response> {
+    let v = req.value;
+    let controls = camera_blocking(&s, move |c| c.set_control(v)).await?;
+    if req.save {
+        save_camera_controls(&s, |saved| {
+            saved.insert(
+                v.control.name().to_string(),
+                crate::config::SavedControl { value: v.value, auto: v.auto },
+            );
+        })
+        .await?;
+    }
+    Ok(Json(json!({ "controls": controls })).into_response())
+}
+
+/// `POST /api/camera/controls/reset`: every control back to the camera's
+/// default (auto where it has one), and none saved for this camera.
+async fn camera_controls_reset(State(s): State<AppState>) -> ApiResult<Response> {
+    let controls = camera_blocking(&s, |c| {
+        let mut now = c.controls()?;
+        for i in now.clone() {
+            let v = fermentool_camera::protocol::ControlValue { control: i.control, value: i.default, auto: i.can_auto };
+            // a refused one leaves the others reset
+            match c.set_control(v) {
+                Ok(after) => now = after,
+                Err(e) => tracing::warn!(control = i.control.name(), "camera control not reset: {e}"),
+            }
+        }
+        Ok(now)
+    })
+    .await?;
+    save_camera_controls(&s, |saved| saved.clear()).await?;
+    Ok(Json(json!({ "controls": controls })).into_response())
+}
+
+/// Changes the saved controls of the camera in `[camera]` and writes the
+/// file (same atomic write as `PUT /api/config`).
+async fn save_camera_controls(
+    s: &AppState,
+    change: impl FnOnce(&mut std::collections::BTreeMap<String, crate::config::SavedControl>),
+) -> ApiResult<()> {
+    let mut current = s.config.write().await;
+    let mut new = current.clone();
+    let Some(cam) = new.camera.as_mut() else {
+        return Err(ApiError::Conflict("no camera is saved".into()));
+    };
+    let device = cam.device.clone();
+    let saved = cam.controls.entry(device.clone()).or_default();
+    change(saved);
+    if saved.is_empty() {
+        cam.controls.remove(&device);
+    }
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct CameraFpsReq {
+    fps: u32,
+}
+
+/// `POST /api/camera/fps {fps}`: live view pictures a second, saved and
+/// used from the next picture.
+async fn camera_fps(State(s): State<AppState>, Json(req): Json<CameraFpsReq>) -> ApiResult<Response> {
+    if !crate::config::CAMERA_FPS.contains(&req.fps) {
+        let (lo, hi) = (crate::config::CAMERA_FPS.start(), crate::config::CAMERA_FPS.end());
+        return Err(ApiError::Bad(format!("live view must be {lo} to {hi} pictures a second")));
+    }
+    let mut current = s.config.write().await;
+    let mut new = current.clone();
+    new.camera.get_or_insert_with(Default::default).live_fps = req.fps;
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    s.camera.set_live_fps(req.fps);
+    Ok(Json(json!({ "fps": req.fps })).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// timelapses
+// ---------------------------------------------------------------------------
+
+/// A timelapse request on the blocking pool, its refusal a 409.
+async fn timelapse_blocking<T: Send + 'static>(
+    s: &AppState,
+    f: impl FnOnce(crate::timelapse::Timelapses) -> Result<T, String> + Send + 'static,
+) -> ApiResult<T> {
+    let tl = s.timelapses.clone();
+    tokio::task::spawn_blocking(move || f(tl))
+        .await
+        .map_err(|e| ApiError::Conflict(format!("timelapse request failed: {e}")))?
+        .map_err(ApiError::Conflict)
+}
+
+fn interval_s(minutes: u32) -> ApiResult<i64> {
+    if crate::config::TIMELAPSE_MINUTES.contains(&minutes) {
+        Ok(i64::from(minutes) * 60)
+    } else {
+        Err(ApiError::Bad("timelapse interval must be 1 to 1440 minutes".into()))
+    }
+}
+
+/// `GET /api/timelapses/current`: `{timelapse, warn_free}`, the timelapse
+/// recording or paused (`null` without one) and whether its disk is under
+/// 1 GB free.
+async fn timelapse_current(State(s): State<AppState>) -> Response {
+    let cur = s.timelapses.current();
+    let warn_free = cur
+        .as_ref()
+        .and_then(|c| c.free_bytes)
+        .is_some_and(|f| f < crate::timelapse::files::WARN_FREE_BYTES);
+    Json(json!({ "timelapse": cur, "warn_free": warn_free })).into_response()
+}
+
+#[derive(Deserialize)]
+struct TimelapseStartReq {
+    name: String,
+    interval_min: u32,
+    #[serde(default)]
+    stop_after_h: Option<f64>,
+}
+
+/// `POST /api/timelapses {name, interval_min, stop_after_h?}`: one on its
+/// own (no run going).
+async fn timelapse_start(State(s): State<AppState>, Json(req): Json<TimelapseStartReq>) -> ApiResult<Response> {
+    let every = interval_s(req.interval_min)?;
+    if req.name.trim().is_empty() {
+        return Err(ApiError::Bad("give the timelapse a name".into()));
+    }
+    let stop_after_s = match req.stop_after_h {
+        None => None,
+        Some(h) if h.is_finite() && (0.1..=1000.0).contains(&h) => Some((h * 3600.0).round() as i64),
+        Some(_) => return Err(ApiError::Bad("stop after must be 0.1 to 1000 h".into())),
+    };
+    let name = req.name.trim().to_string();
+    let id = timelapse_blocking(&s, move |tl| tl.start_standalone(name, every, stop_after_s)).await?;
+    Ok(Json(json!({ "id": id })).into_response())
+}
+
+async fn timelapse_stop(State(s): State<AppState>) -> ApiResult<Response> {
+    timelapse_blocking(&s, |tl| tl.stop()).await?;
+    Ok(Json(json!({ "stopped": true })).into_response())
+}
+
+async fn timelapse_pause(State(s): State<AppState>) -> ApiResult<Response> {
+    timelapse_blocking(&s, |tl| tl.pause()).await?;
+    Ok(Json(json!({ "paused": true })).into_response())
+}
+
+async fn timelapse_resume(State(s): State<AppState>) -> ApiResult<Response> {
+    timelapse_blocking(&s, |tl| tl.resume()).await?;
+    Ok(Json(json!({ "resumed": true })).into_response())
+}
+
+#[derive(Deserialize)]
+struct IntervalReq {
+    interval_min: u32,
+}
+
+/// `POST /api/timelapses/current/interval {interval_min}`: from the next
+/// image on.
+async fn timelapse_interval(State(s): State<AppState>, Json(req): Json<IntervalReq>) -> ApiResult<Response> {
+    let every = interval_s(req.interval_min)?;
+    timelapse_blocking(&s, move |tl| tl.set_interval(every)).await?;
+    Ok(Json(json!({ "interval_s": every })).into_response())
+}
+
+/// `POST /api/camera/picture`: one image now, into the timelapse recording
+/// or today's pictures.
+async fn camera_picture(State(s): State<AppState>) -> ApiResult<Response> {
+    let id = timelapse_blocking(&s, |tl| tl.take_picture()).await?;
+    Ok(Json(json!({ "image_id": id })).into_response())
+}
+
+#[derive(Deserialize)]
+struct ImagesQuery {
+    #[serde(default)]
+    before: Option<i64>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `GET /api/timelapses/{id}/images?before=&limit=`: newest first, no file
+/// paths (images are fetched by id).
+async fn timelapse_images(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ImagesQuery>,
+) -> ApiResult<Response> {
+    let limit = q.limit.unwrap_or(8).clamp(1, 200);
+    let rows = s
+        .db
+        .call(move |db| db.images(id, q.before, limit))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    let list: Vec<_> = rows
+        .iter()
+        .map(|i| json!({ "id": i.id, "slot": i.slot, "taken_at": i.taken_at, "elapsed_s": i.elapsed_s, "bytes": i.bytes }))
+        .collect();
+    Ok(Json(list).into_response())
+}
+
+/// `GET /api/timelapses/images/{id}/full.jpg` or `/thumb.jpg`: the file,
+/// found from the image's row only.
+async fn timelapse_image_file(State(s): State<AppState>, Path((id, which)): Path<(i64, String)>) -> ApiResult<Response> {
+    let thumb = match which.as_str() {
+        "full.jpg" => false,
+        "thumb.jpg" => true,
+        _ => return Err(ApiError::NotFound),
+    };
+    let path = s
+        .db
+        .call(move |db| -> Result<Option<std::path::PathBuf>, crate::store::StoreError> {
+            let Some(img) = db.image(id)? else { return Ok(None) };
+            let Some(t) = db.timelapse(img.timelapse_id)? else { return Ok(None) };
+            let folder = std::path::PathBuf::from(t.folder);
+            Ok(Some(if thumb { folder.join("thumbs").join(img.thumb) } else { folder.join(img.file) }))
+        })
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .map_err(|_| ApiError::NotFound)?;
+    Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "max-age=31536000, immutable")], bytes)
+        .into_response())
+}
+
+/// The data dir new timelapses go under when `captures_dir` is empty.
+fn captures_root(s: &AppState, dir: &str) -> std::path::PathBuf {
+    crate::timelapse::files::captures_root(dir, &s.about.data_dir)
+}
+
+/// `GET /api/camera/captures`: `{folder, used_bytes, free_bytes}`, the
+/// folder new timelapses go in, what the timelapses kept there take, and the
+/// free space on its disk.
+async fn captures_info(State(s): State<AppState>) -> ApiResult<Response> {
+    let dir = s.config.read().await.camera.as_ref().map(|c| c.captures_dir.clone()).unwrap_or_default();
+    let root = captures_root(&s, &dir);
+    let under = root.clone();
+    let used: i64 = s
+        .db
+        .call(move |db| db.all_timelapses())
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .iter()
+        .filter(|t| std::path::Path::new(&t.folder).starts_with(&under))
+        .map(|t| t.bytes)
+        .sum();
+    let probe = root.clone();
+    let free = tokio::task::spawn_blocking(move || crate::timelapse::files::free_bytes(&probe)).await.ok().flatten();
+    Ok(Json(json!({ "folder": root.to_string_lossy(), "used_bytes": used, "free_bytes": free })).into_response())
+}
+
+#[derive(Deserialize)]
+struct CapturesReq {
+    folder: String,
+}
+
+/// `POST /api/camera/captures {folder}`: checked writable (created if
+/// missing), then saved as `[camera] captures_dir`; empty: the default.
+async fn captures_set(State(s): State<AppState>, Json(req): Json<CapturesReq>) -> ApiResult<Response> {
+    let folder = req.folder.trim().to_string();
+    let root = captures_root(&s, &folder);
+    tokio::task::spawn_blocking(move || crate::timelapse::files::ensure_writable(&root))
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .map_err(ApiError::Conflict)?;
+    let saved = folder.clone();
+    save_camera(&s, move |c| c.captures_dir = saved).await?;
+    Ok(Json(json!({ "folder": folder })).into_response())
+}
+
+/// `POST /api/camera/interval {interval_min}`: New run's default interval.
+async fn camera_interval(State(s): State<AppState>, Json(req): Json<IntervalReq>) -> ApiResult<Response> {
+    interval_s(req.interval_min)?;
+    save_camera(&s, move |c| c.interval_min = req.interval_min).await?;
+    Ok(Json(json!({ "interval_min": req.interval_min })).into_response())
+}
+
+/// Changes `[camera]` (created when absent) and writes the file.
+async fn save_camera(s: &AppState, change: impl FnOnce(&mut crate::config::CameraConfig)) -> ApiResult<()> {
+    let mut current = s.config.write().await;
+    let mut new = current.clone();
+    change(new.camera.get_or_insert_with(Default::default));
+    new.save(&s.config_path).map_err(|e| ApiError::Bad(e.to_string()))?;
+    *current = new;
+    s.config_rev.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+/// `GET /api/camera/frame.jpg`: the latest picture.
+async fn camera_frame(State(s): State<AppState>) -> Response {
+    match s.camera.latest() {
+        Some(f) => (
+            [(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "no-store")],
+            f.jpeg.as_ref().clone(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "no picture yet" }))).into_response(),
+    }
+}
+
+/// How long the live view waits for a new picture before it repeats the last
+/// one (keeps the connection and the browser's image alive).
+const LIVE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A channel of body parts as a stream.
+struct PartStream(tokio::sync::mpsc::Receiver<bytes::Bytes>);
+
+impl futures_core::Stream for PartStream {
+    type Item = Result<bytes::Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx).map(|o| o.map(Ok))
+    }
+}
+
+fn mjpeg_part(jpeg: &[u8]) -> bytes::Bytes {
+    let mut part = Vec::with_capacity(jpeg.len() + 80);
+    part.extend_from_slice(
+        format!("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpeg.len()).as_bytes(),
+    );
+    part.extend_from_slice(jpeg);
+    part.extend_from_slice(b"\r\n");
+    part.into()
+}
+
+/// `GET /api/camera/live`: `multipart/x-mixed-replace`, one part per new
+/// picture. A task feeds the body: each wait for a picture is a
+/// `spawn_blocking` (never an async worker), and the task, which owns the
+/// `ViewerGuard`, ends the moment the body is dropped, so the viewer count
+/// (and the supervisor's grabbing) stops with the browser tab.
+async fn camera_live(State(s): State<AppState>) -> Response {
+    let camera = s.camera.clone();
+    let guard = camera.viewer();
+    let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(1);
+    let mut stop = s.stopping.subscribe();
+    tokio::spawn(async move {
+        let _guard = guard;
+        let mut last: Option<crate::camera::Frame> = None;
+        let mut seq = 0u64;
+        loop {
+            let cam = camera.clone();
+            let wait = tokio::task::spawn_blocking(move || cam.wait_frame_after(seq, LIVE_KEEPALIVE));
+            let frame = tokio::select! {
+                _ = tx.closed() => break,
+                Ok(_) = stop.wait_for(|stopped| *stopped) => break,
+                r = wait => match r {
+                    Ok(f) => f,
+                    Err(_) => break,
+                },
+            };
+            let part = match frame {
+                Some(f) => {
+                    seq = f.seq;
+                    let p = mjpeg_part(&f.jpeg);
+                    last = Some(f);
+                    p
+                }
+                // Nothing new within the bound: repeat the last picture, or
+                // keep waiting if there has been none yet.
+                None => match &last {
+                    Some(f) => mjpeg_part(&f.jpeg),
+                    None => continue,
+                },
+            };
+            tokio::select! {
+                _ = tx.closed() => break,
+                Ok(_) = stop.wait_for(|stopped| *stopped) => break,
+                sent = tx.send(part) => if sent.is_err() { break },
+            }
+        }
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        axum::body::Body::from_stream(PartStream(rx)),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1328,6 +1962,10 @@ mod tests {
             db: Arc::new(ApiDb::new(Store::open(db).unwrap())),
             config_rev: Default::default(),
             about: Default::default(),
+            camera: crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, None),
+            timelapses: test_timelapses(),
+            helper_missing: false,
+            stopping: Arc::new(tokio::sync::watch::channel(false).0),
         }
     }
 
@@ -2390,5 +3028,384 @@ mod tests {
         let app = router(test_state());
         let res = app.oneshot(get("/api/runs/1/tracking")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ----- camera -----
+
+    /// A timelapse thread on a database and a folder of its own, its camera
+    /// never connected.
+    fn test_timelapses() -> crate::timelapse::Timelapses {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ft-api-tl-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::store::Store::open(&dir.join("db.sqlite")).unwrap();
+        let camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, None);
+        crate::timelapse::Timelapses::spawn(store, camera, move || dir.join("captures"))
+    }
+
+    fn camera_want() -> crate::camera::CameraWant {
+        crate::camera::CameraWant { device: "Test pattern".into(), index: 0, width: 640, height: 480, controls: Vec::new() }
+    }
+
+    fn wait_for(max: Duration, mut f: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + max;
+        loop {
+            if f() {
+                return true;
+            }
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// For single-thread `#[tokio::test]`s: polls without blocking the runtime.
+    async fn wait_async(max: Duration, mut f: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + max;
+        while !f() {
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    }
+
+    #[tokio::test]
+    async fn no_helper_is_reported_even_without_a_want() {
+        let mut st = test_state();
+        st.helper_missing = true;
+        let v = body_json(router(st).oneshot(get("/api/camera")).await.unwrap()).await;
+        assert_eq!(v["state"], "no_helper");
+        assert_eq!(v["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_an_open_live_view() {
+        use http_body_util::BodyExt;
+        let mut st = test_state();
+        st.camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, Some(camera_want()));
+        let cam = st.camera.clone();
+        let app = router(st);
+        let res = app.clone().oneshot(get("/api/camera/live")).await.unwrap();
+        let mut body = res.into_body();
+        tokio::time::timeout(Duration::from_secs(5), body.frame()).await.unwrap().unwrap().unwrap();
+        let res = app.oneshot(post_json("/api/shutdown", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        // The body must end (None) within ~2 s, not repeat frames forever.
+        let ended = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(f) = body.frame().await {
+                f.unwrap();
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the live view outlived the shutdown");
+        assert!(wait_async(Duration::from_secs(1), || cam.viewers() == 0).await);
+    }
+
+    #[tokio::test]
+    async fn camera_off_reports_off_and_not_configured() {
+        let app = router(test_state());
+        let res = app.oneshot(get("/api/camera")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert_eq!(v["state"], "off");
+        assert_eq!(v["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn camera_status_reports_viewers_and_the_latest_frame_time() {
+        use http_body_util::BodyExt;
+        let v = body_json(router(test_state()).oneshot(get("/api/camera")).await.unwrap()).await;
+        assert_eq!(v["viewers"], 0);
+        assert!(v["frame_at"].is_null(), "{v}");
+
+        let mut st = test_state();
+        st.camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, Some(camera_want()));
+        let app = router(st);
+        let res = app.clone().oneshot(get("/api/camera/live")).await.unwrap();
+        let mut body = res.into_body();
+        tokio::time::timeout(Duration::from_secs(5), body.frame()).await.unwrap().unwrap().unwrap();
+        let v = body_json(app.clone().oneshot(get("/api/camera")).await.unwrap()).await;
+        assert_eq!(v["viewers"], 1);
+        let at: jiff::Timestamp = v["frame_at"].as_str().expect("frame_at").parse().unwrap();
+        assert!(jiff::Timestamp::now().duration_since(at).as_secs() < 5);
+        drop(body);
+    }
+
+    #[tokio::test]
+    async fn frame_404_before_any_picture() {
+        let app = router(test_state());
+        let res = app.oneshot(get("/api/camera/frame.jpg")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(res).await["error"], "no picture yet");
+    }
+
+    #[tokio::test]
+    async fn closing_the_stream_releases_the_viewer() {
+        use http_body_util::BodyExt;
+        let mut st = test_state();
+        st.camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, Some(camera_want()));
+        let cam = st.camera.clone();
+        let app = router(st);
+        let res = app.oneshot(get("/api/camera/live")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "multipart/x-mixed-replace; boundary=frame");
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(cam.viewers(), 1);
+        let mut body = res.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame()).await.unwrap().unwrap().unwrap();
+        let part = frame.into_data().unwrap();
+        assert!(part.starts_with(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "), "{part:?}");
+        assert!(part.ends_with(b"\r\n"));
+        drop(body);
+        // Async polling: the feeding task shares this test's single thread.
+        let end = std::time::Instant::now() + Duration::from_secs(1);
+        while cam.viewers() != 0 && std::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(cam.viewers(), 0, "viewer not released");
+        cam.shutdown();
+    }
+
+    /// A state whose timelapses share its journal, follow its run statuses
+    /// and use a connected fake camera; its captures go under `root`.
+    async fn timelapse_state(root: std::path::PathBuf) -> AppState {
+        let db = test_db();
+        let mut st = test_state_at(&db);
+        st.camera = crate::camera::Camera::spawn(crate::camera::fake::FakeLaunch::healthy().0, Some(camera_want()));
+        let cam = st.camera.clone();
+        assert!(
+            wait_async(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { .. })).await
+        );
+        st.timelapses =
+            crate::timelapse::Timelapses::spawn(crate::store::Store::open(&db).unwrap(), st.camera.clone(), move || root.clone());
+        crate::timelapse::follow_status(&st.events, &st.timelapses);
+        st
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ft-api-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timelapse_routes_start_stop_and_list_images() {
+        let root = scratch_dir("tlroutes");
+        let app = router(timelapse_state(root.join("captures")).await);
+        let res = app.clone().oneshot(get("/api/timelapses/current")).await.unwrap();
+        assert!(body_json(res).await["timelapse"].is_null());
+        let bad = json!({ "name": "Night", "interval_min": 0 });
+        assert_eq!(app.clone().oneshot(post_json("/api/timelapses", bad)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        let ok = json!({ "name": "Night", "interval_min": 5, "stop_after_h": 2 });
+        let res = app.clone().oneshot(post_json("/api/timelapses", ok)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let id = body_json(res).await["id"].as_i64().unwrap();
+        let mut cur = json!(null);
+        for _ in 0..50 {
+            cur = body_json(app.clone().oneshot(get("/api/timelapses/current")).await.unwrap()).await;
+            if cur["timelapse"]["images"].as_i64() == Some(1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(cur["timelapse"]["images"], 1, "{cur}");
+        assert_eq!(cur["timelapse"]["interval_s"], 300);
+        assert!(cur["timelapse"]["ends_at"].is_string());
+        assert!(cur["warn_free"].is_boolean());
+        let res = app.clone().oneshot(get(&format!("/api/timelapses/{id}/images"))).await.unwrap();
+        let list = body_json(res).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert!(list[0].get("file").is_none(), "no path leaves the daemon: {list}");
+        let image = list[0]["id"].as_i64().unwrap();
+        let full = app.clone().oneshot(get(&format!("/api/timelapses/images/{image}/full.jpg"))).await.unwrap();
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(full.headers()[header::CONTENT_TYPE], "image/jpeg");
+        use http_body_util::BodyExt;
+        assert_eq!(full.into_body().collect().await.unwrap().to_bytes().as_ref(), [0xFF, 0xD8, 95]);
+        let thumb = app.clone().oneshot(get(&format!("/api/timelapses/images/{image}/thumb.jpg"))).await.unwrap();
+        assert_eq!(thumb.into_body().collect().await.unwrap().to_bytes().as_ref(), [0xFF, 0xD8, 1]);
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/interval", json!({ "interval_min": 10 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/pause", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.clone().oneshot(post_json("/api/camera/picture", json!({}))).await.unwrap();
+        assert!(body_json(res).await["image_id"].is_i64());
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/stop", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cur = body_json(app.clone().oneshot(get("/api/timelapses/current")).await.unwrap()).await;
+        assert!(cur["timelapse"].is_null());
+        let res = app.clone().oneshot(post_json("/api/timelapses/current/stop", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn image_files_are_served_by_id_only() {
+        let app = router(test_state());
+        for path in ["/api/timelapses/images/999/full.jpg", "/api/timelapses/images/1/other.jpg"] {
+            assert_eq!(app.clone().oneshot(get(path)).await.unwrap().status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        let res = app.oneshot(get("/api/timelapses/images/..%2F..%2Fconfig.toml/full.jpg")).await.unwrap();
+        assert!(matches!(res.status(), StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND), "{}", res.status());
+    }
+
+    fn timelapse_run(interval_min: u32) -> serde_json::Value {
+        json!({ "name": "with images", "control_var": "rpm", "direction": "cw", "pump_addr": 1,
+                "curve": linear_curve(), "timelapse": { "interval_min": interval_min } })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_start_with_a_timelapse_links_it_and_deleting_the_run_deletes_it() {
+        let root = scratch_dir("tlrun");
+        let st = timelapse_state(root.join("captures")).await;
+        let tl = st.timelapses.clone();
+        let app = router(st);
+        let res = app.clone().oneshot(post_json("/api/runs", timelapse_run(5))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_json(res).await;
+        assert!(body["timelapse_error"].is_null(), "{body}");
+        let id = body["run_id"].as_i64().unwrap();
+        let cur = tl.current().unwrap();
+        assert_eq!((cur.run_id, cur.interval_s), (Some(id), 300));
+        let folder = std::path::PathBuf::from(&cur.folder);
+        assert!(folder.is_dir());
+        let run = body_json(app.clone().oneshot(get(&format!("/api/runs/{id}"))).await.unwrap()).await;
+        assert_eq!(run["timelapse"]["interval_s"], 300, "{run}");
+        app.clone().oneshot(post_json(&format!("/api/runs/{id}/stop"), json!({}))).await.unwrap();
+        assert!(wait_async(Duration::from_secs(8), || tl.current().is_none()).await, "{:?}", tl.current());
+        let res = app.clone().oneshot(Request::delete(format!("/api/runs/{id}")).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!folder.exists(), "the run's images go with it");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_timelapse_failure_never_fails_the_run_start() {
+        let root = scratch_dir("tlfail");
+        // the captures folder is a file: the timelapse cannot start
+        std::fs::write(root.join("captures"), b"x").unwrap();
+        let app = router(timelapse_state(root.join("captures")).await);
+        let res = app.clone().oneshot(post_json("/api/runs", timelapse_run(5))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_json(res).await;
+        assert!(body["timelapse_error"].as_str().unwrap().contains("cannot be written"), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn captures_folder_refuses_an_unwritable_path() {
+        let dir = scratch_dir("tlcaptures");
+        let mut st = test_state();
+        st.config_path = Arc::new(dir.join("config.toml"));
+        let cfg = Arc::clone(&st.config);
+        let app = router(st);
+        std::fs::write(dir.join("afile"), b"x").unwrap();
+        let bad = json!({ "folder": dir.join("afile").to_string_lossy() });
+        let res = app.clone().oneshot(post_json("/api/camera/captures", bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert!(body_json(res).await["error"].as_str().unwrap().starts_with("This folder cannot be written to"));
+        let good = dir.join("imgs").to_string_lossy().into_owned();
+        let res = app.clone().oneshot(post_json("/api/camera/captures", json!({ "folder": good }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(cfg.read().await.camera.as_ref().unwrap().captures_dir, good);
+        let info = body_json(app.clone().oneshot(get("/api/camera/captures")).await.unwrap()).await;
+        assert_eq!(info["folder"], json!(good));
+        assert_eq!(info["used_bytes"], 0);
+        let res = app.clone().oneshot(post_json("/api/camera/interval", json!({ "interval_min": 2000 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = app.clone().oneshot(post_json("/api/camera/interval", json!({ "interval_min": 10 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(cfg.read().await.camera.as_ref().unwrap().interval_min, 10);
+    }
+
+    #[tokio::test]
+    async fn controls_are_set_then_saved_per_camera_and_reset() {
+        let mut st = test_state();
+        let path = std::env::temp_dir().join(format!("ft-camctl-{}.toml", std::process::id()));
+        st.config_path = Arc::new(path.clone());
+        let cfg = Arc::clone(&st.config);
+        let cam = st.camera.clone();
+        let app = router(st);
+        let res = app.clone().oneshot(get("/api/camera/controls")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT, "no camera connected");
+        let ok = json!({ "device": "Test pattern", "index": 0, "width": 640, "height": 480 });
+        app.clone().oneshot(post_json("/api/camera/connect", ok.clone())).await.unwrap();
+        assert!(
+            wait_async(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { .. })).await
+        );
+        let saved = |c: &crate::config::Config| {
+            c.camera.as_ref().unwrap().controls.get("Test pattern").and_then(|m| m.get("brightness")).copied()
+        };
+
+        // dragging: on the camera, not in the file
+        let drag = json!({ "control": "brightness", "value": 7, "auto": false, "save": false });
+        let res = app.clone().oneshot(post_json("/api/camera/control", drag)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["controls"][0]["value"], 7);
+        assert_eq!(saved(&*cfg.read().await), None);
+
+        let set = json!({ "control": "brightness", "value": 12, "auto": false });
+        let res = app.clone().oneshot(post_json("/api/camera/control", set)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(saved(&*cfg.read().await), Some(crate::config::SavedControl { value: 12, auto: false }));
+
+        // refused by the camera: never saved
+        let bad = json!({ "control": "brightness", "value": 999, "auto": false });
+        let res = app.clone().oneshot(post_json("/api/camera/control", bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(saved(&*cfg.read().await).unwrap().value, 12);
+
+        // a new Connect (another size) keeps them
+        let big = json!({ "device": "Test pattern", "index": 0, "width": 1280, "height": 720 });
+        app.clone().oneshot(post_json("/api/camera/connect", big)).await.unwrap();
+        assert_eq!(saved(&*cfg.read().await).unwrap().value, 12);
+
+        assert!(
+            wait_async(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { width: 1280, .. })).await
+        );
+        let res = app.clone().oneshot(post_json("/api/camera/controls/reset", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["controls"][0]["value"], 0);
+        assert!(cfg.read().await.camera.as_ref().unwrap().controls.is_empty());
+
+        let res = app.clone().oneshot(post_json("/api/camera/fps", json!({ "fps": 60 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = app.clone().oneshot(post_json("/api/camera/fps", json!({ "fps": 5 }))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(cfg.read().await.camera.as_ref().unwrap().live_fps, 5);
+        cam.shutdown();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn connect_saves_the_section_and_refuses_an_odd_size() {
+        let mut st = test_state();
+        let path = std::env::temp_dir().join(format!("ft-cam-{}.toml", std::process::id()));
+        st.config_path = Arc::new(path.clone());
+        let cfg = Arc::clone(&st.config);
+        let cam = st.camera.clone();
+        let app = router(st);
+        let bad = json!({ "device": "Test pattern", "index": 0, "width": 800, "height": 600 });
+        let res = app.clone().oneshot(post_json("/api/camera/connect", bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(cfg.read().await.camera.is_none());
+        let ok = json!({ "device": "Test pattern", "index": 0, "width": 640, "height": 480 });
+        let res = app.clone().oneshot(post_json("/api/camera/connect", ok)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(cfg.read().await.camera.as_ref().is_some_and(|c| c.enabled && c.width == 640));
+        assert!(
+            wait_async(Duration::from_secs(5), || matches!(cam.state(), crate::camera::CameraState::Connected { .. })).await
+        );
+        let res = app.clone().oneshot(post_json("/api/camera/disconnect", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let c = cfg.read().await.camera.clone().unwrap();
+        assert!(!c.enabled);
+        assert_eq!(c.device, "Test pattern", "the device stays in config.toml");
+        assert!(wait_async(Duration::from_secs(5), || cam.state() == crate::camera::CameraState::Off).await);
+        cam.shutdown();
+        let _ = std::fs::remove_file(&path);
     }
 }

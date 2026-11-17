@@ -547,6 +547,9 @@ pub struct HoldingStatus {
 pub struct ActiveStatus {
     pub run_id: i64,
     pub started_at: Timestamp,
+    /// The run's elapsed time at its last journal tick (the guarded run
+    /// clock's), at most a tick old.
+    pub elapsed_s: f64,
     pub duration_s: i64,
     pub control_var: ControlVar,
     /// Always [`TICK_INTERVAL`] in seconds, kept in the payload for display.
@@ -1573,6 +1576,7 @@ impl<T: Transport> Engine<T> {
         self.active.as_ref().map(|a| ActiveStatus {
             run_id: a.id,
             started_at: a.started_at,
+            elapsed_s: a.vol_elapsed_s,
             duration_s: a.duration_s,
             control_var: a.control_var,
             tick_interval_s: TICK_INTERVAL.as_secs() as u32,

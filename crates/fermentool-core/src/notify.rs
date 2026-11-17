@@ -802,6 +802,18 @@ mod tests {
     }
 
     #[test]
+    fn timelapse_events_are_never_notified() {
+        // a camera or disk problem is never a run problem (camera spec)
+        let run = run_row(RunStatus::Running);
+        for kind in
+            ["timelapse_start", "timelapse_end", "camera_lost", "camera_recovered", "timelapse_paused", "timelapse_resumed"]
+        {
+            assert!(message_for(&event(kind, Some("disk")), &run).is_none(), "{kind}");
+            assert!(family_of(kind).is_none(), "{kind}");
+        }
+    }
+
+    #[test]
     fn the_events_that_matter_become_messages() {
         let run = run_row(RunStatus::Running);
         let m = message_for(&event("alarm_feed_stopped", None), &run).unwrap();

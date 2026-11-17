@@ -1,4 +1,5 @@
 <script>
+  import { timelapseSeed } from '../lib/timelapse.js';
   import { app } from '../lib/state.svelte.js';
   import { get, post, del } from '../lib/api.js';
   import { num, shortTime, stampY, unitFor, digitsFor, ranFor } from '../lib/fmt.js';
@@ -185,6 +186,7 @@
       // New run drops it if it no longer fits (an ml/min calibration needs the trim).
       tubing_calibration_id: run.tubing_calibration_id ?? null,
       ...(run.responsible ? { responsible: run.responsible } : {}),
+      ...timelapseSeed(run),
     };
   }
 
