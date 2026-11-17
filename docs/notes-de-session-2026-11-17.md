@@ -59,7 +59,7 @@ de gramme par refill, de l'ordre de la résolution de la balance. Les deux
 scripts restent dans `scripts/` pour refaire le test si le montage change
 (autre tube, débit très différent).
 
-## 5. Démarrage sur le k appris (branche `feat/seed-from-last-k`)
+## 5. Démarrage sur le k appris (`feat/seed-from-last-k`, fusionnée le 17)
 
 Vu pendant le test : la calibration 17 (27 octobre) donnait 4.8 % de moins
 que la pompe réelle. Les 2 min avant le premier ratio ont donc délivré
@@ -74,3 +74,23 @@ l'écart avec le c0 de la calibration dépasse 15 % (tube changé ou remonté :
 « Correction from the last run ».
 
 Ce qui reste : le premier run sur un tube neuf démarre toujours sur le c0.
+
+Le run 266 a tourné sur l'ancien daemon : aucun k n'est encore enregistré.
+Le prochain run régulé sur la calibration 17 partira du c0 et enregistrera
+son k ; c'est le suivant qui démarrera à environ x0.95.
+
+## 6. Branches et banc, 17 novembre après-midi
+
+- `feat/camera` (vue en direct, réglages, timelapses) fusionnée dans
+  `steps-raw-audit` (merge du 16 terminé), avec « Show in folder » après
+  « Take a picture », puis `feat/seed-from-last-k` par-dessus. Tests Rust
+  (546 dans le daemon), `npm run check` et `npm test` passés, poussé,
+  déployé. `npm run smoke` pas relancé. `steps-raw-audit` n'est pas encore
+  dans `main`.
+- `cargo test` sur tout le workspace échoue sur `fermentool-tauri` tant que
+  `copy-sidecar.ps1` n'a pas mis `fermentool-camera` dans
+  `src-tauri/binaries` : lancer `--exclude fermentool-tauri`, ou le script
+  d'abord.
+- Nouveau câble RS-485 : les pompes sont maintenant sur **COM10** (COM8
+  avec l'ancien). Balances : COM7 (flacon), COM9 (réception, test seulement).
+  Les deux pompes testées à la main (amorçage 2 s, Test du refill 3 s) : OK.

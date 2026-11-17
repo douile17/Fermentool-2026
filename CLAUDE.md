@@ -578,8 +578,10 @@ template only targets group chats), which is why ntfy is the default.
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
 - The session logs, findings on the hardware and the to-do list:
-  `docs/notes-de-session-*.md` (latest: `2026-11-09`, its section 5 is the
-  open list, with section 4 of `2026-11-06`). User-facing changes: `CHANGELOG.md`.
+  `docs/notes-de-session-*.md` (latest: `2026-11-17`, the refill test with
+  a second balance and the bench state; the open list is still section 5 of
+  `2026-11-09`, with section 4 of `2026-11-06`). User-facing changes:
+  `CHANGELOG.md`.
 
 ## RS-485 bus: one pump switched off silences the other (2026-10-23)
 
@@ -698,7 +700,9 @@ Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
   unit, delivered ml, weight and trim c**: the images are meant to train a
   model later. Migration 0017 (`timelapses.run_id` has no REFERENCES: it
   would block deleting a run). Files are served by image id only
-  (`/api/timelapses/images/{id}/full.jpg|thumb.jpg`). Deleting a run
+  (`/api/timelapses/images/{id}/full.jpg|thumb.jpg`; `POST .../{id}/show`
+  opens Explorer on it, "Show in folder" after Take a picture, whose reply
+  names the folder, never a path). Deleting a run
   deletes its images; Reset history all but the one recording.
   `[camera] interval_min` (New run's default) and `captures_dir` (empty:
   `%APPDATA%\Fermentool\captures`). Plan D: player, Timelapses tab,
