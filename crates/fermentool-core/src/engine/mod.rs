@@ -832,6 +832,22 @@ const TRIM_STATE_KEY: &str = "trim_state";
 /// none, empty when nothing is pending.
 const STOP_PENDING_KEY: &str = "stop_pending";
 
+/// `app_state` key of the pump ratio learned on each tubing calibration: a
+/// JSON object, calibration id to [`LearnedK`]. The next run on that
+/// calibration starts from it ([`tracking::seed_from_learned`]).
+const LEARNED_K_KEY: &str = "trim_learned_k";
+
+/// How often, at most, a run records its learned ratio (s of run time).
+const LEARNED_K_SAVE_S: f64 = 60.0;
+
+/// The settled pump ratio a run measured on a tubing calibration.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct LearnedK {
+    k: f64,
+    run_id: i64,
+    at: Timestamp,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedTrim {
     trim_c: f64,
@@ -920,6 +936,9 @@ struct Tracker {
     /// twice (one flapping at the tolerance wrote off 24 g of a 2.4 g seep).
     discounted_g: f64,
     discounted_until_t: f64,
+    /// Run time the learned ratio was last recorded ([`LEARNED_K_KEY`]).
+    #[serde(skip)]
+    learned_saved_t: Option<f64>,
 }
 
 impl Tracker {
@@ -1224,6 +1243,32 @@ impl<T: Transport> Engine<T> {
     /// same mechanism `set_holding` uses, so a converged trim doesn't reset to
     /// `1.0` on a restart. Cheap enough to call from `scale_tick` on every
     /// actual change (at most once per adaptive window in steady state).
+    fn learned_ks(&self) -> std::collections::BTreeMap<String, LearnedK> {
+        self.store
+            .get_state(LEARNED_K_KEY)
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// The pump ratio last learned on tubing calibration `cal_id`.
+    fn learned_k(&self, cal_id: i64) -> Option<LearnedK> {
+        self.learned_ks().remove(&cal_id.to_string())
+    }
+
+    /// Record `k`, the settled ratio the active run regulates on, for its
+    /// tubing calibration (none: nothing to record).
+    fn save_learned_k(&self, run_id: i64, k: f64, now: Timestamp) {
+        let Ok(Some(run)) = self.store.run(run_id) else { return };
+        let Some(cal_id) = run.tubing_calibration_id else { return };
+        let mut all = self.learned_ks();
+        all.insert(cal_id.to_string(), LearnedK { k, run_id, at: now });
+        if let Ok(json) = serde_json::to_string(&all) {
+            let _ = self.store.set_state(LEARNED_K_KEY, &json);
+        }
+    }
+
     fn save_trim_state(&self) {
         let p = PersistedTrim {
             trim_c: self.trim_c,
@@ -1832,6 +1877,18 @@ impl<T: Transport> Engine<T> {
                 ControlVar::Rpm => rpm_to_ml = Some(usable_ml_per_rpm(cal)?),
             }
         }
+        // A previous run on this calibration learned what the pump really
+        // delivers: start there, not the 2 min at the calibration's error
+        // the first ratio takes (run 266: 0.9 mL over at a 4.8 % error).
+        let mut seeded_from = None;
+        if let (true, Some(cal)) = (cfg.gravimetric_trim && cfg.kind == RunKind::Dosing, &calibration) {
+            if let Some(l) = self.learned_k(cal.id) {
+                if let Some(c) = tracking::seed_from_learned(seed_c, Some(l.k), self.trim_bounds()) {
+                    seeded_from = Some((c, l));
+                    seed_c = c;
+                }
+            }
+        }
         if let Some(r) = drive {
             // The tube's ceiling at full speed, without the trim's headroom.
             let peak = spec.peak_value();
@@ -1909,6 +1966,18 @@ impl<T: Transport> Engine<T> {
             kind: "start".into(),
             detail: Some(format!("first setpoint {first:.3}")),
         });
+        if let Some((c, l)) = &seeded_from {
+            let _ = self.store.log_event(&NewEvent {
+                run_id: Some(id),
+                wall_time: now,
+                level: EventLevel::Info,
+                kind: "trim_seed".into(),
+                detail: Some(format!(
+                    "correction starts at x{c:.3}, the pump ratio {:.3} run {} learned on this tubing",
+                    l.k, l.run_id
+                )),
+            });
+        }
 
         // A fresh run gets a fresh gravimetric-trim window: the previous run's
         // refill baseline is meaningless against this run's own `started_at`,
@@ -2749,6 +2818,8 @@ impl<T: Transport> Engine<T> {
         // pump ratio is first measured. Journalled once each, as events, so
         // they survive a restart and show in History.
         let mut trim_events: Vec<(&str, String)> = Vec::new();
+        // The settled ratio to record for the run's calibration, if due.
+        let mut learned: Option<f64> = None;
         let c_before = self.trim_c;
         // An alarm that clears by itself: the pump delivers within bounds
         // again (bottle refilled, tube put back). Judged on the recent window
@@ -2930,6 +3001,18 @@ impl<T: Transport> Engine<T> {
                     }
                 }
                 tr.k = Some(r.k);
+                // Only a ratio weighed at this speed, nothing straying: the
+                // ratio frozen over a refill, or one past the bounds, says
+                // nothing about the tube.
+                if r.settled
+                    && ratio_measured
+                    && tr.k_jump.is_none()
+                    && !tracking::needs_alarm(r.k, bounds)
+                    && tr.learned_saved_t.is_none_or(|s| t - s >= LEARNED_K_SAVE_S)
+                {
+                    tr.learned_saved_t = Some(t);
+                    learned = Some(r.k);
+                }
                 if tracking::needs_alarm(k, bounds) {
                     tr.saturated_updates += 1;
                     tr.saturated_since_t.get_or_insert(t);
@@ -2977,6 +3060,9 @@ impl<T: Transport> Engine<T> {
                     kind: kind.into(),
                     detail: Some(detail),
                 });
+            }
+            if let (Some(k), None) = (learned, &raise) {
+                self.save_learned_k(run_id, k, now);
             }
         }
         if let Some((kind, onset_t, detail)) = raise {
@@ -4557,6 +4643,47 @@ mod tests {
             w -= k * rate / 60.0 * e.trim_c();
         }
         (e, id)
+    }
+
+    /// A 10 mL/min Constant run on tubing calibration `cal` (c0 1.0), from
+    /// `from` s for `secs` s, on a pump delivering `k`: the run's id.
+    fn run_on_tube(e: &mut Engine<SimPump>, cal: i64, k: f64, from: i64, secs: i64) -> i64 {
+        let cfg = RunConfig {
+            curve: CurveSpec::constant(10.0, Duration::from_secs(36_000)),
+            tubing_calibration_id: Some(cal),
+            ..trim_cfg()
+        };
+        let id = e.start_run(cfg, at(from)).unwrap();
+        let mut w = 4_500.0;
+        for i in from..from + secs {
+            let noise = 0.1 * ((i * 7_919 % 3) - 1) as f64;
+            e.attach_scale_for_test(Box::new(ScriptedScale::new(&[((w + noise) * 10.0).round() / 10.0])));
+            e.scale_tick(at(i));
+            w -= k * 10.0 / 60.0 * e.trim_c();
+        }
+        id
+    }
+
+    #[test]
+    fn a_run_starts_from_the_ratio_the_last_run_learned_on_its_tube() {
+        // Run 266: a three-week-old calibration, the pump 4.8 % over. c
+        // started at 1.0 and fed 0.9 mL too much before the first ratio.
+        let mut e = engine();
+        e.attach_scale(Some(Box::new(ScriptedScale::new(&[]))), scale_cfg("sim-scale"));
+        let cal = seed_calibration(&e.store, ControlVar::MlMin, 10.0, 50.0);
+        let first = run_on_tube(&mut e, cal, 1.048, 0, 1_200);
+        assert!(event_times(&e, first, "trim_seed").is_empty(), "nothing learned before the first run");
+        e.stop_run(at(1_200)).unwrap();
+
+        let second = run_on_tube(&mut e, cal, 1.048, 1_300, 0);
+        assert!((e.trim_c() - 1.0 / 1.048).abs() < 0.003, "c starts at {}", e.trim_c());
+        assert_eq!(event_times(&e, second, "trim_seed").len(), 1);
+        e.stop_run(at(1_300)).unwrap();
+
+        // another tube's calibration learned nothing: its own c0
+        let other = seed_calibration(&e.store, ControlVar::MlMin, 10.0, 50.0);
+        run_on_tube(&mut e, other, 1.048, 1_400, 0);
+        assert_eq!(e.trim_c(), 1.0);
     }
 
     #[test]

@@ -215,6 +215,7 @@ const TITLES = {
   crash_detected: 'Daemon restarted',
   stop: 'Stopped',
   curve_done: 'Curve done',
+  trim_seed: 'Correction from the last run',
   trim_start: 'Balance correction on',
   trim_ratio: 'Pump ratio measured',
   trim_limit: 'Correction limit changed',
@@ -309,6 +310,11 @@ export function journalLines(events, run) {
         continue;
       }
       push(e.wall_time, TITLES.trim_ratio, ratio ?? det, tone);
+      continue;
+    }
+    if (e.kind === 'trim_seed') {
+      const m = det.match(/x([\d.]+), the pump ratio ([\d.]+) run (\d+)/);
+      push(e.wall_time, TITLES.trim_seed, m ? `correction ×${m[1]}, pump ratio ${m[2]} of run ${m[3]}` : det, tone);
       continue;
     }
     if (e.kind === 'trim_start') {

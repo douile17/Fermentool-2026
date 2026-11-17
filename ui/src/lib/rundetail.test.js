@@ -47,6 +47,15 @@ describe('journalLines', () => {
     expect(lines[2]).toMatchObject({ time: '4 h 45', tone: 'refill', detail: '28 min at 55 rpm, 3 656.8 → 4 655.1 g' });
   });
 
+  it('says where a correction carried from the last run comes from', () => {
+    const run = { started_at: '2026-11-17T10:00:00Z', control_var: 'ml_min', status: 'stopped' };
+    const seed = journalLines([
+      { id: 1, kind: 'start', wall_time: '2026-11-17T10:00:00Z', detail: 'first setpoint 11.450' },
+      { id: 2, kind: 'trim_seed', wall_time: '2026-11-17T10:00:00Z', detail: 'correction starts at x0.954, the pump ratio 1.048 run 266 learned on this tubing' },
+    ], run);
+    expect(seed[1]).toMatchObject({ title: 'Correction from the last run', detail: 'correction ×0.954, pump ratio 1.048 of run 266' });
+  });
+
   it('counts the experiment time, not the time of day', () => {
     expect(lines[0].time).toBe('0');
     expect(lines[1].time).toBe('2 min');
