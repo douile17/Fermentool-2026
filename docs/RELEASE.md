@@ -77,14 +77,33 @@ Sur le PC de développement (Rust, Node, `cargo tauri` installés).
    cargo tauri build
    ```
    Résultat : `target\release\bundle\nsis\Fermentool_<version>_x64-setup.exe`.
-6. **Contrôle avant de livrer** (obligatoire) : lancer
+6. **Interface dans la vraie fenêtre** (obligatoire si l'interface a
+   changé) : la fenêtre n'est pas un navigateur, un lien qui ouvre un
+   onglet ou un téléchargement qui marche dans Edge peut n'y rien faire.
+   Lancer la fenêtre avec le débogage à distance, puis le smoke test
+   dedans (PowerShell, depuis la racine) :
+   ```powershell
+   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9444"
+   Start-Process target\release\fermentool.exe
+   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+   cmd /c 'cd /d C:\Users\Drew\Documents\Fermentool\Fermentool-2026\ui && set SMOKE_CDP=9444&& npm run smoke'
+   ```
+   Tous les contrôles doivent passer. Essayer à la main ce que le smoke test
+   ne fait pas : Template (New run, Steps) arrive dans Téléchargements,
+   Take a picture puis Open et Show in folder. Fermer la fenêtre ensuite.
+7. **Contrôle avant de livrer** (obligatoire) : lancer
    `target\release\fermentool.exe`, vérifier que
    `http://127.0.0.1:8730/api/status` répond avec la bonne `app_version`, tuer
    `fermentool.exe` dans le Gestionnaire des tâches, vérifier que
    `fermentool-core.exe` et `/api/status` sont toujours là, puis arrêter le
    daemon (`POST /api/shutdown`). Pour ne pas toucher à la configuration réelle,
    faire ce contrôle avec `APPDATA` pointé vers un dossier de test.
-7. **Commiter** le changement de version et **taguer** (`git tag vx.y.z`).
+8. **Commiter** le changement de version et **taguer** (`git tag vx.y.z`).
+
+À savoir : **l'interface de la fenêtre est compilée dans `fermentool.exe`**.
+Redéployer le daemon seul met à jour l'interface du navigateur, pas celle de
+l'application installée : une modification d'interface n'arrive sur un PC
+que par un nouvel installateur.
 
 ## Installer sur un autre PC
 

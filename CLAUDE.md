@@ -106,6 +106,32 @@ else to install:
   `docs/IMPLEMENTATION_PLAN.md` §9's "no core changes" is relaxed to exactly
   one `CorsLayer` in `api.rs` + the `BASE` constant in `ui/src/lib/api.js`
   (the bundled UI is now a separate origin from the API).
+- **The desktop window is not a browser** (checked in the real window,
+  2026-11-17). WebView2 there opens no new tab (`target="_blank"`,
+  `window.open`) and saves no blob download (`<a download>`): both do
+  nothing, silently. File input dialogs, `alert`, the clipboard and
+  element fullscreen do work. So **everything that opens or saves goes
+  through the daemon**, which acts on the PC itself:
+  `POST /api/files/save?name=` (saved to Downloads, Explorer shows it;
+  `lib/savefile.js` `saveFile`, browser path kept for `npm run dev`),
+  `POST /api/about/open {which}` (named pages only, never a URL from the
+  page), `POST /api/timelapses/images/{id}/open|show`. A new link, export
+  or "open" button uses these, never `target="_blank"` or a blob link; the
+  smoke test fails on a `target="_blank"` on Camera and About.
+- **The window's UI is compiled into `fermentool.exe`** (`ui/dist` at build
+  time). Deploying the daemon updates the browser UI, never the window's:
+  a UI change reaches the desktop app only through a new installer (or a
+  rebuilt `fermentool.exe`). Ctrl+F5 does nothing there.
+- **Check a UI change in the real window before an export**, not only in
+  Edge: `cargo build --release -p fermentool-tauri --features
+  custom-protocol` (needs `src-tauri/binaries/fermentool-camera-x86_64-pc-windows-msvc.exe`
+  staged, `copy-sidecar.ps1` does it, or copy `target\release\fermentool-camera.exe`
+  there), start `target\release\fermentool.exe` with
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9444`, then
+  from `ui/`: `set SMOKE_CDP=9444&& npm run smoke`. The smoke test then
+  drives the window itself (`http://tauri.localhost`) instead of headless
+  Edge, and leaves it open. Close it afterwards (a window with a debug port
+  must not stay on the bench PC).
 
 ## Conventions
 
