@@ -7,6 +7,20 @@ depuis la branche `steps-raw-audit` (le 0.1.6 du 6 novembre venait de
 l'arbre de travail non commité et ne contenait pas la consigne brute ni les
 corrections de l'audit du 9).
 
+### Démarrage sur le ratio appris (17 novembre)
+
+- Un run régulé démarre sur le ratio de pompe que le dernier run a mesuré
+  avec la même calibration de tuyau, au lieu du c0 de la calibration : une
+  calibration de trois semaines, 4.8 % à côté, donnait 0.9 mL de trop
+  avant la première mesure (run 266). Si ce ratio s'écarte de plus de 15 %
+  de la calibration (tuyau changé ou remonté), le run repart du c0. Le
+  journal le dit : « Correction from the last run ».
+- Test des remplissages avec une seconde balance sous le récipient (run
+  266, 3 remplissages) : l'estimation pendant un remplissage est à 0.24 g
+  au pire sur 63 g ; la moyenne des ratios avant et après ne gagne que
+  0.08 g, elle n'est pas retenue. Scripts `scripts/receiver_log.py` et
+  `scripts/refill_k_check.py`, compte rendu `docs/notes-de-session-2026-11-17.md`.
+
 ### Revue CodeRabbit (16 novembre)
 
 - Un crash pendant que la balance est muette ne compte plus le temps

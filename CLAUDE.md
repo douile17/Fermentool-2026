@@ -287,11 +287,21 @@ the pump at their duration (their weighing window). `HoldingStatus` /
 
 ## Gravimetric trim: regulation and alarms (`tracking.rs`, `engine::scale_tick`)
 
-- c starts at the tubing calibration's `c0` (`Tracker::c_seed`). Before the
+- c starts at the tubing calibration's `c0` (`Tracker::c_seed`), or at
+  `1/k` of the settled ratio the last run learned on that calibration
+  (`tracking::seed_from_learned`, `app_state` key `trim_learned_k`, saved
+  at most once a minute, never a ratio frozen over a refill, straying or
+  out of bounds; event `trim_seed`). Past `SEED_K_TOLERANCE` (15 %) from
+  the calibration it is another tube: c0 (2026-11-17, run 266). Before the
   delivery ratio exists, `next_c_early` pays back the cumulative deficit
   around the seed (0.3 g dead band); a deficit past noise (10 balance steps
   and 5 %) uses `early_ratio` (a slope, so the ~2 s start-up lag does not read
   as a short pump) at full speed.
+- **The refill stretch stays counted with the `k` from before it**
+  (2026-11-17, run 266, a second balance under the receiver): 0.24 g at
+  worst on 63 g; the mean of `k` before and after gained 0.08 g a refill,
+  not kept. `scripts/receiver_log.py` + `scripts/refill_k_check.py` to
+  measure it again.
 - Ratio window: 50 balance steps / 120 s first, then 200 steps / 300 s
   ("settled") with 0.5 % steps instead of 2 %. A 5 g window kept for a whole
   run made c hunt ±10 % (run 19); the settled window fixed it. Every
