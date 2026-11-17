@@ -211,6 +211,22 @@ pub fn ratio_after_refill(measured: Option<Ratio>, k_before: Option<f64>, frozen
     }
 }
 
+/// How far c may start from what the tubing calibration says when it starts
+/// from the ratio a previous run learned on that calibration: further, the
+/// tube was most likely changed or remounted (±6 % between mountings on this
+/// bench), and the calibration is the better guess.
+pub const SEED_K_TOLERANCE: f64 = 0.15;
+
+/// The c a run starts at when a previous run on the same tubing calibration
+/// learned the pump ratio `learned_k`: `1/k`, the c that run regulated on,
+/// within the bounds. `None` (start at `base_seed`, the calibration's) when
+/// no ratio was learned, or it lies more than [`SEED_K_TOLERANCE`] away.
+pub fn seed_from_learned(base_seed: f64, learned_k: Option<f64>, bounds: Bounds) -> Option<f64> {
+    let k = learned_k.filter(|k| k.is_finite() && *k > 0.0)?;
+    let c = 1.0 / k;
+    ((c / base_seed - 1.0).abs() <= SEED_K_TOLERANCE).then(|| bounds.clamp(c))
+}
+
 /// Bound the point history to `cap`: the newer half stays at full density,
 /// the older half is evenly thinned. The span back to the first point is
 /// kept, so a slow feed still reaches the window's minimum mass.
@@ -598,6 +614,26 @@ mod tests {
         let k = early_ratio(&pts, 0.1).expect("25 s and 3.75 g of history");
         assert!((k - 0.78).abs() < 0.05, "got {k}");
         assert_eq!(early_ratio(&pts[..10], 0.1), None, "under 20 s");
+    }
+
+    #[test]
+    fn a_run_starts_from_the_ratio_learned_on_its_calibration() {
+        let b = Bounds::from_limit_pct(25.0);
+        // run 266: calibration 17 seeds 1.0, the pump ran 4.8 % over
+        let c = seed_from_learned(1.0, Some(1.048), b).unwrap();
+        assert!((c - 1.0 / 1.048).abs() < 1e-12);
+        // an ml/min calibration's own c0 is the reference
+        assert!(seed_from_learned(0.95, Some(1.10), b).is_some());
+        // nothing learned, or nonsense: the calibration's
+        assert_eq!(seed_from_learned(1.0, None, b), None);
+        assert_eq!(seed_from_learned(1.0, Some(0.0), b), None);
+        assert_eq!(seed_from_learned(1.0, Some(f64::NAN), b), None);
+        // too far from the calibration: another tube, most likely
+        assert_eq!(seed_from_learned(1.0, Some(1.25), b), None);
+        assert_eq!(seed_from_learned(1.0, Some(0.80), b), None);
+        // within the tolerance but past a narrow limit: clamped
+        let narrow = Bounds::from_limit_pct(5.0);
+        assert_eq!(seed_from_learned(1.0, Some(1.12), narrow), Some(narrow.min));
     }
 
     #[test]
