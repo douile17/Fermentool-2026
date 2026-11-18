@@ -41,6 +41,11 @@ Normal operation is **quiet**. A colour, a tint, a moving thing must mean
   go there, with a test.
 - Pictures move **only while something happens**, and freeze when the daemon
   is silent: a frozen page must look frozen. Respect `prefers-reduced-motion`.
+- **No motion that never ends, and none on routine clicks** (audit of 3
+  November, applied 18 November): no fade between tabs or pages, no sheen on
+  a progress bar, no shake and no endless glow on a warning. A warning that
+  needs the eye again pulses once (`.blocked.nudged`). It is a desktop app
+  used many times an hour, not a page visited once.
 - One moving pump per screen. A second one beside the feed rate was removed.
 - The state is shown in **one place per page**: the Overview band; on other
   pages a thin bar above the tabs. **Never a pill inside the nav menu** (it

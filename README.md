@@ -6,10 +6,10 @@ follows a chosen **time profile**, linear, exponential fed-batch, sigmoid,
 steps, constant or custom, over runs that average ~100 h, with **crash-safe
 journalling** and **time-correct resume** after any interruption.
 
-> Status: **in use on the bench, version 0.1.6** (Windows installer, see
+> Status: **in use on the bench, version 0.1.8** (Windows installer, see
 > [`docs/RELEASE.md`](docs/RELEASE.md)). The daemon serves the Svelte UI at
 > **http://127.0.0.1:8730**: Overview, New run, History, Tubing calibration,
-> Settings. User-facing changes: [`CHANGELOG.md`](CHANGELOG.md). Full design:
+> Camera, Settings. User-facing changes: [`CHANGELOG.md`](CHANGELOG.md). Full design:
 > [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) · visual
 > language: [`docs/DESIGN.md`](docs/DESIGN.md) · agent notes:
 > [`CLAUDE.md`](CLAUDE.md).

@@ -118,6 +118,16 @@ else to install:
   page), `POST /api/timelapses/images/{id}/open|show`. A new link, export
   or "open" button uses these, never `target="_blank"` or a blob link; the
   smoke test fails on a `target="_blank"` on Camera and About.
+- **The window behaves as an application** (`lib/desktop.js`, only when
+  `__TAURI_INTERNALS__` is there, tested): no browser menu on a right click
+  (kept in a field and on selected text), F5 and Ctrl+R do nothing, no image
+  dragged out, nav and buttons not selectable (`html.desktop` in `app.css`).
+  It opens maximized (`main.rs`, `w.maximize()` before `show()`); the
+  minimum stays 900 x 600, and History's run detail is checked there by the
+  smoke test.
+- **`copy-sidecar.ps1` fails at its `npm ci` while VS Code is open on the
+  repo** (it holds rolldown's `.node` binding): close VS Code, or run the
+  script's steps by hand with `npm install` (0.1.8 was built so).
 - **The window's UI is compiled into `fermentool.exe`** (`ui/dist` at build
   time). Deploying the daemon updates the browser UI, never the window's:
   a UI change reaches the desktop app only through a new installer (or a
@@ -604,9 +614,9 @@ template only targets group chats), which is why ntfy is the default.
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
 - The session logs, findings on the hardware and the to-do list:
-  `docs/notes-de-session-*.md` (latest: `2026-11-17`, the refill test with
-  a second balance and the bench state; the open list is still section 5 of
-  `2026-11-09`, with section 4 of `2026-11-06`). User-facing changes:
+  `docs/notes-de-session-*.md` (latest: `2026-11-18`, the 0.1.8 export,
+  the rate-change-reset merge left open and **the whole open list**, which
+  replaces section 5 of `2026-11-09` and section 4 of `2026-11-06`). User-facing changes:
   `CHANGELOG.md`.
 
 ## RS-485 bus: one pump switched off silences the other (2026-10-23)
