@@ -715,8 +715,8 @@ npm run smoke    # parcourt l'application déployée dans Edge sans tête, ne ch
 
 - Installer 0.1.8 sur un PC vierge : fenêtre agrandie, pompe, balance.
 - **Changer le débit en fin de n'importe quelle courbe**, avec remise à zéro de
-  la correction à chaque changement (branche locale `feat/rate-change-reset`,
-  fusion dans `merge/rate-change-reset`). Deux tests du moteur échouent une
+  la correction à chaque changement (archivée sur GitHub le 18 novembre,
+  branches `feat/rate-change-reset` et `merge/rate-change-reset`, plus en local). Deux tests du moteur échouent une
   fois fusionné : `the_regulation_rides_a_change` (c plonge de 1.3 % ~140 s
   après un changement 6 → 3 ml/min, à la première fenêtre courte du ratio ; la
   branche seule plonge de 0.5 %) et
@@ -724,7 +724,9 @@ npm run smoke    # parcourt l'application déployée dans Edge sans tête, ne ch
   rattrapage dans c que le retard de pesée de 3 min cache maintenant). Essayé
   sans succès : geler le ratio comme après un remplissage, écarter les 5 s
   après le changement. À trancher : comment la remise à zéro et le ratio de
-  référence appris se combinent.
+  référence appris se combinent. **En attente** (décidé le 18 novembre) : le
+  débit se change rarement à la main ; un accélérostat est une rampe, que la
+  courbe Linear fait déjà.
 - Sur un vrai run à plus de 4 ml/min : pas de fausse alarme « Pump ratio moved
   too fast » sur plusieurs heures, le ratio suit l'usure, pas de pic de c au
   remplissage suivant.
@@ -756,6 +758,12 @@ npm run smoke    # parcourt l'application déployée dans Edge sans tête, ne ch
   nouveau segment journalisé, pour garder `value_at` pure.
 - **Accès depuis le téléphone** (acquitter, arrêter) : par un relais à nous
   (o2switch) ou le NAS, pas AnyDesk ni Cloudflare.
+- **Calculateur d'accélérostat**, comme celui du F₀ : le taux de dilution monte
+  en continu, D(t) = D₀ + a·t, à volume constant, donc F(t) = V·(D₀ + a·t),
+  une rampe Linear (Start = V·D₀, End = V·(D₀ + a·durée)). Le calculateur
+  prendrait V, D₀, a et la durée, et remplirait Start et End. Fermentool ne
+  pilote que l'alimentation : le volume constant (débordement ou soutirage)
+  reste au montage.
 - **Calibration à plusieurs vitesses** (le ratio d'un tuyau varie avec la
   vitesse) : reportée le 23 octobre.
 - Avertir quand F₀ est sous le débit minimal que la pompe tient (il faut
