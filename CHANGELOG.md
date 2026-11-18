@@ -7,6 +7,24 @@ depuis la branche `steps-raw-audit` (le 0.1.6 du 6 novembre venait de
 l'arbre de travail non commité et ne contenait pas la consigne brute ni les
 corrections de l'audit du 9).
 
+### Fenêtre d'application (18 novembre)
+
+- La fenêtre Fermentool s'ouvre agrandie (barre de titre et barre des
+  tâches gardées).
+- Dans la fenêtre : plus de menu du navigateur au clic droit (gardé dans un
+  champ et sur un texte sélectionné), F5 et Ctrl+R ne rechargent plus, les
+  images ne se glissent plus hors de la fenêtre, les menus et boutons ne se
+  sélectionnent plus par un glissé.
+- History : le détail d'un run prend toute la hauteur de la fenêtre, et son
+  en-tête se resserre dans une fenêtre basse (600 px).
+- Choix du tuyau : le nom complet passe à la ligne au lieu d'être coupé (le
+  lot, à la fin, distingue deux tuyaux) et s'affiche au survol.
+- Moins d'animation : plus de fondu au changement d'onglet, plus de reflet
+  sur la barre de remplissage, plus de secousse ni de halo sans fin sur le
+  bandeau « Balance disconnected » de la calibration.
+- Journal : « Curve done » dit la valeur que la courbe tient (12.000), plus
+  la consigne corrigée envoyée à la pompe (11.363 sur le run 266).
+
 ### Démarrage sur le ratio appris (17 novembre)
 
 - Un run régulé démarre sur le ratio de pompe que le dernier run a mesuré

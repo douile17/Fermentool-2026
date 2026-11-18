@@ -72,6 +72,11 @@ copie de travail, et c'est elle qui tourne sur le banc.
   vérification sur un vrai run à plus de 4 ml/min, limites du refill).
 - Le détail d'un run dans History n'a pas été repris à 900 px.
 - C: : 3,3 Go libres ; `target\debug` pèse 4,4 Go.
+- **Résolu le 18 novembre, rien à corriger** : test au run 267 (2.000 ml/min
+  sans régulation, Stop). Le daemon n'envoie que « stop » ; la LabQ affiche
+  ensuite la vitesse moteur de sa dernière consigne, 43.3 rpm, qu'elle a
+  calculée elle-même avec sa table tête/tuyau (registres lus après l'arrêt :
+  vitesse 43.3 rpm, débit 2.0018 ml/min, marche 0). Le texte d'origine :
 - **Stop en fin de run : une valeur rpm ou ml/min « un peu random »
   s'affiche** (vu par l'utilisateur le 9 novembre, runs 263/264 sans
   régulation, en ml/min). Pas grave, à corriger plus tard. À préciser
