@@ -7,7 +7,7 @@
 //! stopped within seconds; a last one when the run ends; and a 3 s Test from
 //! Settings to check the address and the direction. Outside such a run
 //! nothing is sent to it. The automatic cycle comes later
-//! (`docs/superpowers/specs/2026-10-02-auto-refill-design.md`, step 3).
+//! (`docs/FERMENTOOL.md` §5).
 //!
 //! Everything goes through the feed pump's `Pump` and its watchdog transport
 //! ([`Pump::with_target_of`], the refill pump's own model and head), on the

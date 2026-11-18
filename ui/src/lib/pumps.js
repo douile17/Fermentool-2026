@@ -1,6 +1,6 @@
 // Settings > Pumps: one serial cable (RS-485), every LabQ on it at its own
 // MODBUS address. What the page says about the cable and each pump, from
-// the status frame; colour only for a problem (docs/DESIGN.md).
+// the status frame; colour only for a problem (docs/FERMENTOOL.md §13).
 
 /** The pump models on the cable (mirrors the daemon's `PumpModel`), all
  *  fixed per model, no setting: `maxRpm` the top speed, `maxAddress` the

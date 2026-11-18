@@ -3,7 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import pkg from './package.json' with { type: 'json' };
 
 // Production build lands in `ui/dist/`; at milestone 8 the daemon embeds it with
-// rust-embed via `#[folder = "../../ui/dist"]` (docs/IMPLEMENTATION_PLAN.md §5 & §7).
+// rust-embed via `#[folder = "../../ui/dist"]` (docs/FERMENTOOL.md §12).
 export default defineConfig({
   plugins: [svelte()],
   // The bundle's own version, so Settings > About can tell a tab still

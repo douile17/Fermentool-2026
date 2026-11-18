@@ -4,7 +4,7 @@
 //! `ticks` is the append-only per-tick log, `events` is the human-readable
 //! timeline, `app_state` holds odd singletons. WAL + `synchronous = FULL` so an
 //! abrupt power loss cannot corrupt the file
-//! (`docs/IMPLEMENTATION_PLAN.md` §4.6, §4.7).
+//! (`docs/FERMENTOOL.md` §9, §12).
 
 use std::path::Path;
 

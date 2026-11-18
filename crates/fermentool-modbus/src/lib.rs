@@ -4,7 +4,7 @@
 //! Layers, bottom to top:
 //!
 //! * [`crc16`] / [`with_crc`] / [`f32_be`], wire primitives, checked byte-for-byte
-//!   against the vendor examples in `LabQ Series MODBUS protocol.md`.
+//!   against the vendor examples in `docs/protocoles/LabQ Series MODBUS protocol.md`.
 //! * [`frame`], pure request builders and response parsers (`Vec<u8>` in/out,
 //!   no I/O).
 //! * [`Transport`], a blocking request→response byte channel. Implemented by
@@ -15,7 +15,7 @@
 //!
 //! The control path is deliberately **synchronous**: one transaction every few
 //! seconds, run on a dedicated thread, is simpler and steadier for a 100 h job
-//! than an async stack (`docs/IMPLEMENTATION_PLAN.md` §4.3).
+//! than an async stack (`docs/FERMENTOOL.md` §12).
 
 /// LabQ holding-register addresses (decimal). The tests and the simulator use
 /// these; the daemon drives a pump through its [`RegisterMap`] instead.

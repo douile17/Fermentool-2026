@@ -40,7 +40,7 @@ depuis `main` (tag `v0.1.8`) : tout ce qui suit, jusqu'au profil Steps.
   266, 3 remplissages) : l'estimation pendant un remplissage est à 0.24 g
   au pire sur 63 g ; la moyenne des ratios avant et après ne gagne que
   0.08 g, elle n'est pas retenue. Scripts `scripts/receiver_log.py` et
-  `scripts/refill_k_check.py`, compte rendu `docs/notes-de-session-2026-11-17.md`.
+  `scripts/refill_k_check.py`, compte rendu dans l'historique git (notes du 17 novembre).
 
 ### Revue CodeRabbit (16 novembre)
 
@@ -361,7 +361,7 @@ depuis `main` (tag `v0.1.8`) : tout ce qui suit, jusqu'au profil Steps.
   retient le modèle et la tête de sa pompe.
 - Alimentation et remplissage peuvent être deux têtes d'un même PDS II (même
   adresse, têtes différentes).
-- Les protocoles LabV et PDS II sont dans le dépôt ; `docs/wiring.md` donne le
+- Les protocoles LabV et PDS II sont dans le dépôt ; `docs/FERMENTOOL.md` §10 donne le
   DB9 du LabV (broche 7 = masse du RS-485, 8 = B, 9 = A).
 
 **À vérifier sur le matériel** (une LabV, puis un PDS II ; rien n'a encore été
@@ -683,5 +683,5 @@ Remplace les builds 0.2.0 et 0.2.1, retirés (installateur de 220 Mo inutile).
   seulement s'il manque.
 - Une mise à jour arrête proprement le daemon avant de remplacer les fichiers,
   et refuse de s'installer pendant un run.
-- Procédure d'export : `docs/RELEASE.md`. Plan de test :
-  `docs/test-plan-gravimetric-trim.md`.
+- Procédure d'export : `docs/FERMENTOOL.md` §14. Le plan de test de la
+  0.1.3 est dans l'historique git.

@@ -3,7 +3,7 @@
 //! A [`CurveSpec`] maps elapsed time to a pump setpoint (rpm or ml/min). It is a
 //! pure function of elapsed time, feed it the real wall-clock elapsed after a
 //! restart and it returns exactly where the pump should be, which is what makes
-//! crash-resume correct (`docs/IMPLEMENTATION_PLAN.md` §4.4, §4.7).
+//! crash-resume correct (`docs/FERMENTOOL.md` §3, §9).
 //!
 //! Shapes: [`CurveKind::Linear`], [`CurveKind::Exponential`] (fed-batch),
 //! [`CurveKind::Sigmoid`] (logistic), [`CurveKind::Step`],

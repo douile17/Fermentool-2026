@@ -1,7 +1,13 @@
 # CLAUDE.md
 
-Agent notes for working in this repo. Architecture and setup are in `README.md`;
-full design in `docs/IMPLEMENTATION_PLAN.md` and `docs/DESIGN.md`.
+Agent notes for working in this repo. **The one reference document is
+`docs/FERMENTOOL.md`** (French): features, architecture, API, `config.toml`,
+UI rules (§13), install and export (§14), open list (§16). Beside it only
+`README.md`, this file, `CHANGELOG.md` and the vendor protocols in
+`docs/protocoles/`. Plans, specs, session notes and the audit were merged
+into it and deleted on 2026-11-18 (git history, tag `v0.1.8`). **Write new
+findings and to-dos into `docs/FERMENTOOL.md`** (user-facing changes into
+`CHANGELOG.md`), never into a new notes, plan or spec file.
 
 ## What this is
 
@@ -23,7 +29,7 @@ UI (`ui/`): `npm run dev` (proxies `/api` to :8730). **After any change under
 `ui/src/`, run `npm run build` from `ui/`, the daemon embeds `ui/dist/`.** Do
 this without being asked.
 
-**Before any UI change, read `docs/DESIGN.md`**: the settled design direction
+**Before any UI change, read `docs/FERMENTOOL.md` §13**: the settled design direction
 (colour only when a state needs an eye, the state system and `StateIcon`,
 Plex Sans for text and figures (no dotted zero) / Barlow, charts from 0, `*-ink` tokens at WCAG AA) and the
 process (mockup on a separate page first, implement on the user's go). Follow
@@ -51,7 +57,7 @@ look; a check that asserts is what proves a path works.
 
 ## Windows packaging
 
-**Exporting the installer: follow `docs/RELEASE.md`.** Every exported
+**Exporting the installer: follow `docs/FERMENTOOL.md` §14.** Every exported
 installer must install from scratch on a fresh Windows 10/11 PC with nothing
 else to install:
 - MSVC CRT linked statically (`.cargo/config.toml`, `+crt-static`). The Tauri
@@ -100,12 +106,10 @@ else to install:
   gate before any change here ships). Tray: Open / Shut down daemon & quit /
   Quit (leave daemon running). Installer: `./src-tauri/scripts/copy-sidecar.ps1`
   then `cargo tauri build` → NSIS `.exe` that also registers an at-logon
-  scheduled task (`Fermentool`, `RestartOnFailure` PT1M×3). Design + rationale:
-  `docs/superpowers/specs/2026-09-10-tauri-webview-shell-design.md`; build
-  steps: `docs/superpowers/plans/2026-09-10-tauri-desktop-shell.md`.
-  `docs/IMPLEMENTATION_PLAN.md` §9's "no core changes" is relaxed to exactly
-  one `CorsLayer` in `api.rs` + the `BASE` constant in `ui/src/lib/api.js`
-  (the bundled UI is now a separate origin from the API).
+  scheduled task (`Fermentool`, `RestartOnFailure` PT1M×3). The shell was
+  meant to need no core change; it took exactly one `CorsLayer` in `api.rs`
+  + the `BASE` constant in `ui/src/lib/api.js` (the bundled UI is a separate
+  origin from the API), then the daemon routes that open and save for it.
 - **The desktop window is not a browser** (checked in the real window,
   2026-11-17). WebView2 there opens no new tab (`target="_blank"`,
   `window.open`) and saves no blob download (`<a download>`): both do
@@ -193,10 +197,8 @@ else to install:
 
 ## Pump models (2026-10-23)
 
-LabQ, LabV and PDS II (Innofluid) share one cable and one daemon. Design:
-`docs/superpowers/specs/2026-10-23-pump-models-design.md`; protocols:
-`LabQ Series MODBUS protocol.md`, `LabV Series MODBUS protocol.md`,
-`PDS Series MODBUS protocol.md` (repo root).
+LabQ, LabV and PDS II (Innofluid) share one cable and one daemon. Protocols:
+`docs/protocoles/` (LabQ, LabV, PDS Series MODBUS protocol).
 - `fermentool-modbus`: `PumpKind` (a PDS II carries its head 1..8),
   `RegisterMap` (per model: speed, flow, start/stop, direction, optional mode
   register) and `PumpTarget` (address + map). The daemon builds pumps with
@@ -485,8 +487,6 @@ the pump at their duration (their weighing window). `HoldingStatus` /
 
 ## Rate change of a Constant run (2026-10-22)
 
-Spec `docs/superpowers/specs/2026-10-22-constant-rate-change-design.md`,
-plan `docs/superpowers/plans/2026-10-22-constant-rate-change.md`.
 - Constant dosing runs only (`CurveParams::Constant`). `POST
   /api/runs/active/rate {value}` → `Engine::set_constant_rate(value,
   elapsed_s, now)`, `elapsed_s` from the control loop's `run_now()` (the
@@ -591,8 +591,7 @@ template only targets group chats), which is why ntfy is the default.
   The VS 2022 Build Tools on this PC are a broken install that `cargo` picks
   by default (SQLite's C build then fails).
 - `rustc` occasionally dies with `STATUS_HEAP_CORRUPTION` here: retry once
-  before suspecting the code (and suspect the PC's RAM/disk, see
-  `docs/notes-de-session-2026-09-30.md`).
+  before suspecting the code (and suspect the PC's RAM/disk).
 - The running daemon is `target\release\fermentool-core.exe`, started by hand
   with `FERMENTOOL_NO_BROWSER=1`, windowless. **Never run the debug build for
   the user**: its console, once clicked into selection mode, blocks every
@@ -613,11 +612,9 @@ template only targets group chats), which is why ntfy is the default.
 - Rewriting a file through PowerShell `Get-Content`/`Set-Content` mangles its
   UTF-8 (`µ` became `Âµ` once): use Python with explicit `utf-8`, or the edit
   tools.
-- The session logs, findings on the hardware and the to-do list:
-  `docs/notes-de-session-*.md` (latest: `2026-11-18`, the 0.1.8 export,
-  the rate-change-reset merge left open and **the whole open list**, which
-  replaces section 5 of `2026-11-09` and section 4 of `2026-11-06`). User-facing changes:
-  `CHANGELOG.md`.
+- Findings on the hardware and the to-do list: `docs/FERMENTOOL.md` §16
+  (the rate-change-reset merge left open is described there). No more
+  session notes files. User-facing changes: `CHANGELOG.md`.
 
 ## RS-485 bus: one pump switched off silences the other (2026-10-23)
 
@@ -634,7 +631,7 @@ a run, switching off the refill pump stops the feed following its curve**
 
 - Cabling: FTDI USB-RS485-WE, orange (A) and yellow (B) only, daisy-chained
   USB → pump 1 → pump 2. No termination, no bias. The LabQ DB15 has no RS-485
-  ground (`docs/wiring.md`), so the black wire has nowhere to go: correct.
+  ground (`docs/FERMENTOOL.md` §10), so the black wire has nowhere to go: correct.
 - Likely cause (not measured): pump 2's unpowered transceiver loads A/B.
 - The user keeps the cabling as is for now. When it comes back:
   1. Confirm first: pump 2 off **and** its cable unplugged from pump 1; the
@@ -648,13 +645,11 @@ a run, switching off the refill pump stops the feed following its curve**
      (today it rides the feed pump's transport, `Pump::with_address`).
   3. Planned (user, 2026-10-23): move to an isolated RS-485 hub soon. Once
      there, a silent pump can be named again (the distinction in `link.js`).
-- `docs/wiring.md` lists the FTDI USB-RS485-WE as an isolated adapter; as far
-  as known it is not galvanically isolated. To check and correct.
+- The FTDI USB-RS485-WE was listed as an isolated adapter; as far as known it
+  is not galvanically isolated. To check (`docs/FERMENTOOL.md` §10 says so).
 
 ## Camera (2026-11-02)
 
-Spec `docs/superpowers/specs/2026-11-02-camera-timelapse-design.md`, plans
-`docs/superpowers/plans/2026-11-02-camera-*.md`.
 - The webcam is read by a helper process, `fermentool-camera.exe` (shipped
   next to the daemon, below-normal priority, JPEG frames over a pipe
   protocol on stdin/stdout). The daemon owns it: it starts and stops it, and
@@ -781,7 +776,7 @@ Verified correct (derivations + tests):
 
 ## Fed-batch F₀ calculator (`ui/src/routes/NewRun.svelte`)
 
-Shown only for Exponential + `Physio` mode. Reference: `docs/alimentation-exponentielle-mu.md`.
+Shown only for Exponential + `Physio` mode. Reference: `docs/FERMENTOOL.md` §11.
 
 ```
 F₀ [L/h]    = (µ / Y_x/s + m_s) · X₀ · V₀ / S_f

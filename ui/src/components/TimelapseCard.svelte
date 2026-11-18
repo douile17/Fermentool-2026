@@ -149,7 +149,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field input { width: 100%; box-sizing: border-box; }
   .rec { margin: 0; display: flex; flex-direction: column; gap: 2px; }
-  /* Recording is quiet green ink, never a red dot (DESIGN.md) */
+  /* Recording is quiet green ink, never a red dot (docs/FERMENTOOL.md §13) */
   .word { color: var(--green-ink); font-weight: 600; }
   .word.paused { color: var(--warn-ink); }
   .figs { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-1) var(--s-3); }

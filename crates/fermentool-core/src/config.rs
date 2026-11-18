@@ -1,4 +1,4 @@
-//! `config.toml`, machine-local settings (`docs/IMPLEMENTATION_PLAN.md` §4.9).
+//! `config.toml`, machine-local settings (`docs/FERMENTOOL.md` §12).
 //!
 //! Every field has a default, so a missing or partial file still loads. On first
 //! run the file is written out with the defaults.
@@ -412,7 +412,7 @@ pub struct ScaleConfig {
 
 /// The refill pump: a second LabQ on the pump's RS-485 line, at its own
 /// MODBUS address, that tops the weighed feed bottle up from the main
-/// reservoir (`docs/superpowers/specs/2026-10-02-auto-refill-design.md`).
+/// reservoir (`docs/FERMENTOOL.md` §5).
 /// Only its speed, direction and start/stop are ever written, and only for a
 /// run that chose automatic refill in New run (or a Test): otherwise nothing
 /// is sent to `pump_address`.

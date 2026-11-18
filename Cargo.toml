@@ -18,6 +18,6 @@ homepage = "https://www.delvigne-lab.com"
 
 # Shared dependency versions are added here as later milestones introduce them
 # (tokio, axum, tokio-serial, tokio-modbus, rusqlite, tracing, jiff, ...).
-# See docs/IMPLEMENTATION_PLAN.md §4.1.
+# See docs/FERMENTOOL.md §12.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

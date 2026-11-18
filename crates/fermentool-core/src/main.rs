@@ -4,7 +4,7 @@
 //! journal, build the engine (real serial port or the simulator), run it on the
 //! control thread, and serve the REST API on `127.0.0.1:<port>`.
 //!
-//! Still to come (see `docs/IMPLEMENTATION_PLAN.md` §8):
+//! Still to come (see `docs/FERMENTOOL.md` §16):
 //!   8. embedded Svelte UI + WebSocket push
 //!   9. per-OS single-binary packaging + service files
 

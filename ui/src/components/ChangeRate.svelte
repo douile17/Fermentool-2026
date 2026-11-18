@@ -22,7 +22,7 @@
   $effect(() => input?.focus());
 
   const problem = $derived(checkRate(value, bounds, current, run.control_var));
-  // Said once something is typed, not before (DESIGN.md, forms).
+  // Said once something is typed, not before (docs/FERMENTOOL.md §13).
   const typed = $derived(value != null && value !== '');
 
   async function apply() {

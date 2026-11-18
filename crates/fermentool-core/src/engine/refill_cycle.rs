@@ -1,5 +1,5 @@
 //! The automatic refill cycle (step 3 of
-//! `docs/superpowers/specs/2026-10-02-auto-refill-design.md`): below a low
+//! `docs/FERMENTOOL.md` §5): below a low
 //! level the refill pump tops the weighed bottle up to the weight it had when
 //! the run started, then stops.
 //!

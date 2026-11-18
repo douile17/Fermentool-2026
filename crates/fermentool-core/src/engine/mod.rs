@@ -4,7 +4,7 @@
 //! **real elapsed time** (`now - started_at`), write it to the pump, journal it,
 //! and finish the run when the curve is done. Time is injected, so a 100 h run
 //! is exercised in milliseconds by calling `tick` with synthetic timestamps
-//! (`docs/IMPLEMENTATION_PLAN.md` §4.5).
+//! (`docs/FERMENTOOL.md` §3, §12).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::VecDeque;
@@ -620,7 +620,7 @@ struct ActiveRun {
     /// (a `Rpm` run has no head/tubing calibration to turn speed into volume,
     /// see the rpm-only convention). This is what the daemon *told* the pump
     /// to do, not a measured flow, there is no flow meter in this loop, see
-    /// `docs/superpowers/specs/2026-09-11-gravimetric-feed-trim-design.md`.
+    /// `docs/FERMENTOOL.md` §4.
     volume_added_ml: Option<f64>,
     /// Copied from `RunConfig` at `start_run`/`resume` time. Persisted on the
     /// `runs` row (`gravimetric_trim` column) precisely so `resume()` can
@@ -862,7 +862,7 @@ struct PersistedTrim {
 }
 
 /// Cumulative feed accounting for the active trimmed run (see
-/// `docs/superpowers/plans/2026-09-29-cumulative-feed-tracking.md`). Masses in
+/// `docs/FERMENTOOL.md` §4). Masses in
 /// grams since run start. Persisted with the trim so a crash resume carries on.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -1911,7 +1911,7 @@ impl<T: Transport> Engine<T> {
 
         // The run takes the pump over from a line being primed.
         self.prime_end_for(std::time::Instant::now(), now, "a run started");
-        // Pump start sequence (docs/IMPLEMENTATION_PLAN.md §4.3). The pump's
+        // Pump start sequence (docs/FERMENTOOL.md §10). The pump's
         // head-type / tubing-size registers are deliberately left untouched, see
         // the note in migrations/0001_init.sql.
         // A LabV or PDS II head takes a speed only in transferring mode: set
@@ -3473,7 +3473,7 @@ impl<T: Transport> Engine<T> {
         Ok(())
     }
 
-    // ---- crash recovery (docs/IMPLEMENTATION_PLAN.md §4.7) ----
+    // ---- crash recovery (docs/FERMENTOOL.md §9) ----
 
     /// Inspect the journal for a run that was `running` when the process last
     /// stopped. Read-only, safe to call repeatedly (e.g. from a polling UI).
@@ -3969,7 +3969,7 @@ fn read_actual<T: Transport>(
 ///
 /// LabQ: 0.1 rpm, and 0.001 ml/min, its display resolution (its firmware then
 /// collapses that onto a motor step, since Fermentool does not own the tube
-/// calibration and cannot do that conversion itself, see `docs/DESIGN.md`).
+/// calibration and cannot do that conversion itself, see `docs/FERMENTOOL.md` §3).
 /// LabV and PDS II: 0.01 rpm and 0.01 ml/min.
 fn setpoint_grid(control_var: ControlVar, model: PumpModel) -> f64 {
     match control_var {
