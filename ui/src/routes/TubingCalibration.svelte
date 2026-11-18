@@ -889,7 +889,7 @@
   // never flips by itself when the balance drops (it used to, silently, and a
   // burst then started by hand with no starting weight).
   const weighMode = $derived(d.weigh_mode ?? 'auto');
-  // A click on the greyed zone shakes the banner again: the way out is there.
+  // A click on the greyed zone rings the banner again: the way out is there.
   let nudges = $state(0);
 
   // Automatic chosen but no balance: nothing starts until it is back or the
@@ -1885,23 +1885,15 @@
     padding: var(--s-3) var(--s-4); border-radius: var(--radius-ctl);
     background: var(--danger-bg); color: var(--danger-ink); font-size: 13.5px;
     border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--surface));
-    /* in with a slide and a short shake, then a slow glow while it lasts */
-    animation: blk-in 0.45s ease-out, blk-glow 2.2s ease-in-out 0.6s infinite;
+    /* in with a short slide; a click on the greyed zone rings it once. No
+       shake and no endless glow: the red already says it, motion that never
+       stops wears the eye. */
+    animation: blk-in 0.2s ease-out;
   }
-  .blocked.nudged { animation: blk-shake 0.4s ease-in-out, blk-glow 2.2s ease-in-out 0.6s infinite; }
+  .blocked.nudged { animation: blk-glow 0.7s ease-in-out; }
   @keyframes blk-in {
-    0% { opacity: 0; transform: translateY(-6px); }
-    40% { opacity: 1; transform: translateY(0); }
-    55% { transform: translateX(-6px); }
-    70% { transform: translateX(5px); }
-    85% { transform: translateX(-3px); }
-    100% { transform: none; }
-  }
-  @keyframes blk-shake {
-    20% { transform: translateX(-7px); }
-    40% { transform: translateX(6px); }
-    60% { transform: translateX(-4px); }
-    80% { transform: translateX(2px); }
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: none; }
   }
   @keyframes blk-glow {
     0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 0%, transparent); }

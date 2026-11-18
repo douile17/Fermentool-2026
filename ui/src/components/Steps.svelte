@@ -19,7 +19,7 @@
       <span class="step-n">{s.done ? '✓' : s.n}</span>
       <span class="step-t">
         <span class="step-l">{s.label}</span>
-        {#if s.sub}<span class="step-s">{s.sub}</span>{/if}
+        {#if s.sub}<span class="step-s" title={s.sub}>{s.sub}</span>{/if}
       </span>
     </button>
   {/each}

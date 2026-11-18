@@ -800,7 +800,9 @@
 
   .hd-actions { display: flex; align-items: flex-start; gap: var(--s-2); flex: none; }
   /* No top padding on the detail: the sticky head is the top edge itself. */
-  .modal.detail { padding-top: 0; max-width: 760px; }
+  /* The window's whole height: at its 600 px minimum, 85vh left a third of
+     it to the backdrop. */
+  .modal.detail { padding-top: 0; max-width: 760px; max-height: calc(100vh - 2 * var(--s-4)); }
   .detail-head { align-items: flex-start;
     position: sticky; top: 0; z-index: 2;
     margin: 0 calc(var(--s-7) * -1) var(--s-5);
@@ -962,6 +964,16 @@
   .act + .act { border-top: 1px solid var(--line-soft); }
   .act time { color: var(--muted); font-size: 12px; }
   .act .body { color: var(--muted); }
+
+  /* A short window (the desktop app goes down to 600 px): the sticky head
+     took 150 px of a 500 px detail. Tighter, and the layer's margin too. */
+  @media (max-height: 760px) {
+    .layer:has(.detail) { padding-block: var(--s-4); }
+    .detail-head { padding-top: var(--s-4); padding-bottom: var(--s-3); margin-bottom: var(--s-4); }
+    .detail-head h2 { font-size: 19px; margin: 2px 0 0; }
+    .chips { margin-top: 6px; }
+    .chips .chip { padding-block: 2px; }
+  }
 
   @media (max-width: 720px) {
     .detail-head { flex-wrap: wrap; }

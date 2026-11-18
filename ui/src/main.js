@@ -15,5 +15,9 @@ import '@fontsource/ibm-plex-sans/latin-ext-700.css';
 import '@fontsource/barlow/latin-600.css';
 import '@fontsource/barlow/latin-ext-600.css';
 import './app.css';
+import { desktopBehaviour } from './lib/desktop.js';
+
+// the desktop window: no browser menu, no reload key, no dragged image
+desktopBehaviour();
 
 export default mount(App, { target: document.getElementById('app') });

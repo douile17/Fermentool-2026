@@ -181,7 +181,7 @@
   <div class="opt {withSize ? tint(r.c) : ''}" class:older={r.older} class:active={i === active} class:sel={r.c.id === value}
     role="option" aria-selected={r.c.id === value} id="tube-opt-{r.c.id}" tabindex="-1"
     onclick={() => pick(r.c.id)} onmousemove={() => (active = i)}>
-    <span class="o1">
+    <span class="o1" title={r.older ? undefined : tubeName(r.c)}>
       {#if r.older}older calibration
       {:else}{#if withSize}<span class="sw"></span>{/if}{a}{#if m}<mark>{m}</mark>{/if}{b}{#if withSize}<span class="gap"></span>{@render sizeOf(r.c)}{/if}{/if}
     </span>
@@ -201,7 +201,7 @@
   <button type="button" class="trigger {chosen ? tint(chosen) : ''}" class:need={!chosen && !allowNone}
     aria-haspopup="listbox" aria-expanded={open} onclick={toggle}>
     {#if chosen}
-      <span class="t1"><span class="sw"></span>{tubeName(chosen)}, {@render sizeOf(chosen)}</span>
+      <span class="t1" title={tubeName(chosen)}><span class="sw"></span>{tubeName(chosen)}, {@render sizeOf(chosen)}</span>
       <span class="t2">{@render figures(chosen)}</span>
     {:else if allowNone}
       <span class="t1">No calibration</span>
@@ -349,7 +349,8 @@
   .opt.sel .o1::before { content: '✓ '; color: var(--teal-700); }
   .opt.older { padding-left: 32px; }
   .opt.older .o1 { font-weight: 500; color: var(--muted); }
-  .o1 { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* wraps, never cut: the lot at the end is what tells two tubes apart */
+  .o1 { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
   .o2 { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
   .o3 { grid-row: 1 / span 2; grid-column: 2; text-align: right; font-size: 12.5px; }
   .o3 small { display: block; font-family: var(--font); font-size: 11px; color: var(--muted); }

@@ -886,13 +886,12 @@
     background: color-mix(in srgb, var(--fill) 16%, transparent);
   }
   .fillbar span {
+    /* a steady fill read every second: linear over that second, no sheen
+       (an endless shine on a bar that already moves) */
     display: block; height: 100%; border-radius: 999px; background: var(--fill);
-    background-image: linear-gradient(90deg, transparent 0 40%, rgba(255, 255, 255, 0.35) 50%, transparent 60% 100%);
-    background-size: 200% 100%; animation: sheen 2.4s linear infinite;
-    transition: width 0.6s ease;
+    transition: width 1s linear;
   }
-  @keyframes sheen { from { background-position: 100% 0; } to { background-position: -100% 0; } }
-  @media (prefers-reduced-motion: reduce) { .fillbar span { animation: none; transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .fillbar span { transition: none; } }
   /* Each half stays whole: short of room, the right one goes under the
      left, never a lone "g" or "min" on a line of its own. */
   .fillcap {

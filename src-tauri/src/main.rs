@@ -36,6 +36,9 @@ fn main() {
                     daemon::wait_until_up(Duration::from_secs(15));
                 }
                 if let Some(w) = handle.get_webview_window("main") {
+                    // Opens maximized (the title bar and the taskbar stay):
+                    // the bench PC has nothing else on its screen.
+                    let _ = w.maximize();
                     let _ = w.show();
                     let _ = w.set_focus();
                 }

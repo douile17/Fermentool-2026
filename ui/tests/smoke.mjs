@@ -13,7 +13,7 @@
 //
 // Needs Edge or Chrome. Exits 1 on the first failed check, or on any page
 // error (an exception in the page fails the run even if every check passed).
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,6 +68,11 @@ const browser = CDP
 let ws;
 function finish(code) {
   try { ws?.close(); } catch { /* closing anyway */ }
+  // Edge's children (GPU, renderers) outlive a kill of the parent alone and
+  // held its profile and memory (run 256): the whole tree on Windows.
+  if (process.platform === 'win32' && browser.pid) {
+    try { spawnSync('taskkill', ['/F', '/T', '/PID', String(browser.pid)], { stdio: 'ignore' }); } catch { /* gone already */ }
+  }
   browser.kill();
   setTimeout(() => {
     try { if (profile) rmSync(profile, { recursive: true, force: true }); } catch { /* the browser may hold it a moment */ }
@@ -244,6 +249,14 @@ try {
       // the two stacked charts start their plot at the same x: their times line up
       const plotEdges = await js(`[...document.querySelectorAll('.modal.detail .block svg')].map((s) => s.querySelector('text.tick')?.getAttribute('x')).filter((x) => x != null).slice(0, 2)`);
       if (plotEdges.length >= 2) check('the feed rate and running total charts line up', new Set(plotEdges).size === 1, plotEdges);
+      // the desktop window's smallest size, 900 x 600 (2026-11-18): the
+      // detail takes the height, its sticky head a quarter of it at most
+      await cmd('Emulation.setDeviceMetricsOverride', { width: 900, height: 600, deviceScaleFactor: 1, mobile: false });
+      await sleep(500);
+      const short = await js(`(() => { const m = document.querySelector('.modal.detail').getBoundingClientRect(); const h = document.querySelector('.modal.detail .detail-head').getBoundingClientRect(); return { m: Math.round(m.height), h: Math.round(h.height) }; })()`);
+      check('at 900 x 600, the run detail uses the window and keeps its head small', short.m >= 560 && short.h <= short.m / 4, JSON.stringify(short));
+      await cmd('Emulation.clearDeviceMetricsOverride');
+      await sleep(300);
       if (await js(`!!document.querySelector('.modal.detail .jr')`)) {
         check('the journal is in words, not event kinds', await js(`![...document.querySelectorAll('.modal.detail .jr b')].some((b) => /_/.test(b.textContent))`));
       }

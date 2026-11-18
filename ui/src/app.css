@@ -321,17 +321,9 @@ pre {
   font-size: 13px;
 }
 
-/* Page change (tabs, Settings, its sections): the new view fades in and
-   settles a few px up. Enter only: the old view leaves at once, so two
-   pages never stack and the layout never jumps. Fill "backwards", never
-   "both": a transform animation still applied after its end makes this
-   wrapper the containing block of every position: fixed dialog inside. */
-.page-enter { animation: page-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
-@keyframes page-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
-}
-@media (prefers-reduced-motion: reduce) { .page-enter { animation: none; } }
+/* Page change (tabs, Settings, its sections): none, the new view is there
+   at once. A fade on every tab click (audit of 3 November) slowed a desktop
+   app used many times an hour; `.page-enter` stays as a hook. */
 
 /* A field reached from a checklist item: a ring that fades, so the eye
    lands on it. */
@@ -391,3 +383,10 @@ pre {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
+
+/* The desktop window (lib/desktop.js sets the class): its navigation and
+   buttons are an application's, not text to select by a stray drag. Figures,
+   names and the journal stay selectable to copy. */
+html.desktop nav, html.desktop aside, html.desktop button, html.desktop .tab, html.desktop summary,
+html.desktop label, html.desktop .pill { -webkit-user-select: none; user-select: none; }
+html.desktop img { -webkit-user-drag: none; }
