@@ -72,6 +72,10 @@ Sur le PC de développement (Rust, Node, `cargo tauri` installés).
    Le script construit `ui/dist`, compile le daemon et l'assistant caméra
    (`--features capture`) en release et les place dans `src-tauri/binaries/`.
    Il s'arrête si l'un des deux dépend encore de `VCRUNTIME140.dll`.
+   S'il échoue à son `npm ci` (« operation was rejected by your operating
+   system » sur `rolldown-binding.win32-x64-msvc.node`) : VS Code, ouvert sur
+   le dépôt, tient ce fichier. Fermer VS Code, ou faire les étapes du script à
+   la main avec `npm install` à la place de `npm ci` (0.1.8 a été fait ainsi).
 5. **Installateur** :
    ```sh
    cargo tauri build

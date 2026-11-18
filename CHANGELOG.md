@@ -7,6 +7,9 @@ depuis la branche `steps-raw-audit` (le 0.1.6 du 6 novembre venait de
 l'arbre de travail non commité et ne contenait pas la consigne brute ni les
 corrections de l'audit du 9).
 
+Installateur `Fermentool_0.1.8_x64-setup.exe` construit le 18 novembre
+depuis `main` (tag `v0.1.8`) : tout ce qui suit, jusqu'au profil Steps.
+
 ### Fenêtre d'application (18 novembre)
 
 - La fenêtre Fermentool s'ouvre agrandie (barre de titre et barre des
