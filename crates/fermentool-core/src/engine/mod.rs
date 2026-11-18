@@ -2060,7 +2060,8 @@ impl<T: Transport> Engine<T> {
         let trimmed = active.gravimetric_trim;
         let elapsed_s = now.duration_since(active.started_at).as_secs_f64().max(0.0);
         let c = if active.gravimetric_trim { self.trim_c } else { 1.0 };
-        let raw = active.spec.value_at(Duration::from_secs_f64(elapsed_s)) * c;
+        let curve_value = active.spec.value_at(Duration::from_secs_f64(elapsed_s));
+        let raw = curve_value * c;
         let target = quantize(raw, drive_grid(control_var, self.drive_ml_per_rpm, self.feed.kind.model()));
         let seq = active.next_seq;
         active.next_seq += 1;
@@ -2238,8 +2239,11 @@ impl<T: Transport> Engine<T> {
                     wall_time: now,
                     level: EventLevel::Info,
                     kind: "curve_done".into(),
+                    // The curve's value, as typed: the pump's (times c, in
+                    // rpm when driven so) read as the rate held (run 266:
+                    // "holding 11.363 ml/min" on a 12 ml/min run).
                     detail: Some(format!(
-                        "holding at {target:.3}, regulation and journal continue until Stop"
+                        "holding at {curve_value:.3}, regulation and journal continue until Stop"
                     )),
                 });
             }
@@ -7603,6 +7607,15 @@ mod tests {
         // A further change builds on the changes the resume read back.
         assert_eq!(b.set_constant_rate(4.0, 905.0, at(905)).unwrap(), (3.0, 4.0));
         assert_eq!(b.status().active.unwrap().rate_changes, 2);
+    }
+
+    #[test]
+    fn the_end_of_the_curve_says_the_rate_held_not_the_corrected_one() {
+        // a pump delivering 8 % short: c near 1.09, the pump told ~6.5
+        let (e, id, cs) = constant_trimmed_bench(6.0, 1800, (1900, 6.0), 0.92, 2000);
+        assert!(*cs.last().unwrap() > 1.05, "c {:?} is corrected", cs.last());
+        let ev = e.store().events(Some(id), 10_000).unwrap().into_iter().find(|x| x.kind == "curve_done").unwrap();
+        assert!(ev.detail.as_deref().unwrap_or("").starts_with("holding at 6.000,"), "{:?}", ev.detail);
     }
 
     /// A trimmed Constant run on a pump delivering `k` of its command: the
