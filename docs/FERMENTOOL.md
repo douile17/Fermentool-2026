@@ -724,9 +724,11 @@ npm run smoke    # parcourt l'application déployée dans Edge sans tête, ne ch
   rattrapage dans c que le retard de pesée de 3 min cache maintenant). Essayé
   sans succès : geler le ratio comme après un remplissage, écarter les 5 s
   après le changement. À trancher : comment la remise à zéro et le ratio de
-  référence appris se combinent. **En attente** (décidé le 18 novembre) : le
-  débit se change rarement à la main ; un accélérostat est une rampe, que la
-  courbe Linear fait déjà.
+  référence appris se combinent. **Pas nécessaire** (décidé le 18 novembre) : le
+  débit ne se change à la main que sur un run Constant, ce que « Change
+  rate » fait déjà (§3) ; un accélérostat est une rampe, que la courbe Linear
+  fait déjà. À reprendre seulement si un jour on veut changer le débit à la
+  fin d'une autre courbe.
 - Sur un vrai run à plus de 4 ml/min : pas de fausse alarme « Pump ratio moved
   too fast » sur plusieurs heures, le ratio suit l'usure, pas de pic de c au
   remplissage suivant.
