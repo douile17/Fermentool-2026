@@ -1468,7 +1468,7 @@
               <div class="d-head">
                 <div class="d-id">
                   <h4>Measurement {c.i + 1}</h4>
-                  {#if c.b}<span class="k mono">{runStarts[c.b.run_id] ? `${stamp(runStarts[c.b.run_id])} · ` : ''}run #{c.b.run_id}</span>{/if}
+                  {#if c.b}<span class="k mono">{runStarts[c.b.run_id] ? `${stamp(runStarts[c.b.run_id])} | ` : ''}run #{c.b.run_id}</span>{/if}
                 </div>
                 <span class="d-acts">
                   {#if c.weighed && c.b.start_g == null && !d.auto && editing !== c.i}

@@ -212,7 +212,7 @@
       </div>
       <div class="under">
         {#if cam.device}
-          <span class="name"><span class="nw">{cam.device}</span>{#if size} · <span class="nw">{size}</span>{/if}</span>
+          <span class="name"><span class="nw">{cam.device}</span>{#if size} | <span class="nw">{size}</span>{/if}</span>
         {/if}
         <span class="gap"></span>
         <button class="btn-ghost shot" type="button" onclick={takePicture} disabled={taking || cam.state !== 'connected'}>

@@ -683,7 +683,7 @@ Community) :
 2. **Pompe** : brancher l'adaptateur, choisir son port dans la barre en haut.
 3. **Balance** : Settings, Balance : son port (pas celui de la pompe), 9600
    bauds, densité, Save.
-4. Vérifier en bas du rail la pompe et « Balance · 0.0 g · stable ».
+4. Vérifier en bas du rail la pompe et « Balance 0.0 g, stable ».
 
 ### Dépannage
 

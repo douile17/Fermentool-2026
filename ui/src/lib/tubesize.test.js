@@ -56,7 +56,7 @@ describe('typing a size', () => {
 describe('a tube by its name', () => {
   it('brand and reference, then the lot, then the lab reference', () => {
     expect(tubeLabel({ brand: 'Masterflex', product_ref: '06409-14', tubing_lot_id: '2409', internal_ref: 'bench 2' }))
-      .toBe('Masterflex 06409-14 · lot 2409 (bench 2)');
+      .toBe('Masterflex 06409-14 | lot 2409 (bench 2)');
   });
   it('a calibration from before brands and references: its lot alone', () => {
     expect(tubeLabel({ tubing_lot_id: 'baguette' })).toBe('baguette');

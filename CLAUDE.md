@@ -513,7 +513,7 @@ the pump at their duration (their weighing window). `HoldingStatus` /
 ## History run detail (`History.svelte`, `lib/rundetail.js`)
 
 Redesigned 2026-10-20 (UX audit, mockup on run 194). Order: name and
-`when · ran · person` with a close cross, then the **verdict** (On / Off
+`when | ran | person` with a close cross, then the **verdict** (On / Off
 target at ±2 %, worst gap after the first 15 min, 4 figures said once),
 Feed rate (axis in the experiment's time: every chart, table and journal
 counts from the run's start, `elapsedTicks` / `atRun`, never the time of

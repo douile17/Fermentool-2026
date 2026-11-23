@@ -494,8 +494,8 @@
           <h2 id="ft-run-detail">{sel.run.name}</h2>
           <div class="when">
             <span class="nw">{whenLine(sel.run.started_at, sel.run.ended_at)}</span>
-            <span class="sep">·</span><span class="nw">ran {rf.ran}{rf.of ? ` ${rf.of}` : ''}</span>
-            {#if sel.run.responsible}<span class="sep">·</span><span class="nw">{sel.run.responsible}</span>{/if}
+            <span class="sep">|</span><span class="nw">ran {rf.ran}{rf.of ? ` ${rf.of}` : ''}</span>
+            {#if sel.run.responsible}<span class="sep">|</span><span class="nw">{sel.run.responsible}</span>{/if}
           </div>
           <!-- the curve said up front: its start and end were hard to find behind Settings -->
           <div class="chips" aria-label="Curve">
@@ -654,7 +654,7 @@
           <details class="fold">
             <summary>
               <Icon name="chevron-right" size={16} /><span class="lbl">Regulation</span>
-              <span class="peek">{[reg.ratio && `pump ratio ${reg.ratio}`, reg.correction && `correction ×${reg.correction}`].filter(Boolean).join(' · ')}</span>
+              <span class="peek">{[reg.ratio && `pump ratio ${reg.ratio}`, reg.correction && `correction ×${reg.correction}`].filter(Boolean).join(' | ')}</span>
             </summary>
             <dl>
               {#if trimStartS != null}
@@ -674,7 +674,7 @@
             <summary>
               <Icon name="chevron-right" size={16} /><span class="lbl">Journal</span>
               <span class="peek">
-                {journal.length} moment{journal.length === 1 ? '' : 's'} ·
+                {journal.length} moment{journal.length === 1 ? '' : 's'} |
                 {#if warnCount}<b class="off">{warnCount} warning{warnCount === 1 ? '' : 's'}</b>{:else}no warning{/if}
               </span>
             </summary>

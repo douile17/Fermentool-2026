@@ -317,7 +317,7 @@
     <button class="iconbtn" type="button" title="Rescan the ports" aria-label="Rescan the ports" onclick={rescan}>
       <Icon name="refresh-cw" size={16} />
     </button>
-    <span class="bus" title="Set every pump on this cable to {saved?.baud ?? baud} baud">{saved?.baud ?? baud} baud · 8E1</span>
+    <span class="bus" title="Set every pump on this cable to {saved?.baud ?? baud} baud">{saved?.baud ?? baud} baud | 8E1</span>
   </div>
 
   <h3 class="eyebrow sub">On this cable</h3>

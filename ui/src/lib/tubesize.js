@@ -4,11 +4,11 @@
 export const MM_PER_IN = 25.4;
 
 /** A tube's name: brand and reference, then its lot, then the lab's own
- *  reference. "Masterflex 06409-14 · lot 2409 (bench 2)"; a calibration
+ *  reference. "Masterflex 06409-14 | lot 2409 (bench 2)"; a calibration
  *  from before brands and references reads by its lot alone. */
 export function tubeLabel(c) {
   const head = [c.brand, c.product_ref].filter(Boolean).join(' ');
-  const lot = head ? `${head} · lot ${c.tubing_lot_id}` : c.tubing_lot_id;
+  const lot = head ? `${head} | lot ${c.tubing_lot_id}` : c.tubing_lot_id;
   return `${lot}${c.internal_ref ? ` (${c.internal_ref})` : ''}`;
 }
 

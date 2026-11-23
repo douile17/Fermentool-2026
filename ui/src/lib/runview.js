@@ -291,7 +291,7 @@ export function refillProgress(cycle) {
 }
 
 /** The window's title for a run in state `rs`: the state first, so it
- *  reads in the taskbar or among other tabs ("Refilling 42 % · Fermentool").
+ *  reads in the taskbar or among other tabs ("Refilling 42 % | Fermentool").
  *  `value` is what the pump is set to, already formatted with its unit. */
 export function stateTitle(rs, value = null) {
   if (!rs || rs.tone === 'idle') return 'Fermentool';
@@ -299,7 +299,7 @@ export function stateTitle(rs, value = null) {
   if (rs.tone === 'ok') what = value ? `${rs.word} ${value}` : rs.word;
   else if (rs.progress) what = `${rs.word} ${Math.round(rs.progress.frac * 100)} %`;
   else if (rs.tone === 'fill') what = rs.word;
-  return `${what} · Fermentool`;
+  return `${what} | Fermentool`;
 }
 
 /** "in about 35 min" under an hour, "in 2 h 05" past it. */

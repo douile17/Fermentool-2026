@@ -134,9 +134,9 @@ describe('refillProgress', () => {
 
 describe('stateTitle', () => {
   it('puts the state first in the window title', () => {
-    expect(stateTitle({ tone: 'ok', word: 'Feeding', title: 'Running normally' }, '8.33 ml/min')).toBe('Feeding 8.33 ml/min · Fermentool');
-    expect(stateTitle({ tone: 'fill', word: 'Refilling', progress: { frac: 0.42 } })).toBe('Refilling 42 % · Fermentool');
-    expect(stateTitle({ tone: 'bad', word: 'Alarm', title: 'Feed stopped' })).toBe('Feed stopped · Fermentool');
+    expect(stateTitle({ tone: 'ok', word: 'Feeding', title: 'Running normally' }, '8.33 ml/min')).toBe('Feeding 8.33 ml/min | Fermentool');
+    expect(stateTitle({ tone: 'fill', word: 'Refilling', progress: { frac: 0.42 } })).toBe('Refilling 42 % | Fermentool');
+    expect(stateTitle({ tone: 'bad', word: 'Alarm', title: 'Feed stopped' })).toBe('Feed stopped | Fermentool');
     expect(stateTitle(null)).toBe('Fermentool');
   });
 });

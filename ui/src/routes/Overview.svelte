@@ -518,7 +518,7 @@
             </div>
             <div class="fillcap mono">
               <span>{Math.round(p.weightG)} g → {Math.round(p.toG)} g</span>
-              <span>{Math.round(p.frac * 100)} %{p.riseGMin != null ? ` · ${p.riseGMin >= 0 ? '+' : '−'}${Math.abs(Math.round(p.riseGMin))} g/min` : ''}{p.leftMin != null ? ` · about ${Math.max(1, Math.round(p.leftMin))} min` : ''}</span>
+              <span>{Math.round(p.frac * 100)} %{p.riseGMin != null ? ` | ${p.riseGMin >= 0 ? '+' : '−'}${Math.abs(Math.round(p.riseGMin))} g/min` : ''}{p.leftMin != null ? ` | about ${Math.max(1, Math.round(p.leftMin))} min` : ''}</span>
             </div>
           {/if}
         </div>
@@ -653,7 +653,7 @@
                   {:else}
                     <span class="mid mono-num">{num(delivered.deliveredPct, 1)} %</span>
                     <span class="mid-u">delivered</span>
-                    <span class="k gap-line">{delivered.gapPct <= -0.05 ? '−' : '+'}{num(Math.abs(delivered.gapPct), 1)} % vs asked · limit ±{TOL * 100} %</span>
+                    <span class="k gap-line">{delivered.gapPct <= -0.05 ? '−' : '+'}{num(Math.abs(delivered.gapPct), 1)} % vs asked | limit ±{TOL * 100} %</span>
                   {/if}
                 </div>
                 <dl class="stats">
