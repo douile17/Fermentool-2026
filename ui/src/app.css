@@ -72,13 +72,14 @@
   --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px;
   --s-5: 24px; --s-6: 32px; --s-7: 48px; --s-8: 64px;
 
-  --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font: "Red Hat Text", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   /* The run state's titles: Barlow, a DIN-like face read from across the lab. */
-  --font-title: "Barlow", "IBM Plex Sans", system-ui, "Segoe UI", Arial, sans-serif;
-  /* Figures, units, state words: IBM Plex Sans with figures of equal width
-     (body, below), since 2026-10-28. Plex Mono's dotted zero was disliked;
-     the name stays, 28 rules use it. */
-  --mono: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-title: "Barlow", "Red Hat Text", system-ui, "Segoe UI", Arial, sans-serif;
+  /* Figures, units, state words: the text face with figures of equal width
+     (body, below): IBM Plex Sans from 2026-10-28 (Plex Mono's dotted zero
+     was disliked), Red Hat Text since 2026-11-23, a humanist face with open
+     shapes, quicker to read at a glance. The name stays, 28 rules use it. */
+  --mono: "Red Hat Text", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {

@@ -31,7 +31,7 @@ this without being asked.
 
 **Before any UI change, read `docs/FERMENTOOL.md` §13**: the settled design direction
 (colour only when a state needs an eye, the state system and `StateIcon`,
-Plex Sans for text and figures (no dotted zero) / Barlow, charts from 0, `*-ink` tokens at WCAG AA) and the
+Red Hat Text for text and figures (no dotted zero) / Barlow, charts from 0, `*-ink` tokens at WCAG AA) and the
 process (mockup on a separate page first, implement on the user's go). Follow
 it instead of re-proposing it; the user should not have to explain it again.
 

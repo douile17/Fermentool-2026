@@ -573,8 +573,12 @@ fond jaune pâle (`.btn-folder`).
 
 ### Typographie et pictogrammes
 
-- **IBM Plex Sans** pour tout, chiffres compris (largeur égale,
-  `tabular-nums`) ; pas de zéro pointé ni barré. **Barlow 600** pour les titres
+- **Red Hat Text** pour tout, chiffres compris (largeur égale,
+  `tabular-nums`) ; pas de zéro pointé ni barré. Choisie le 23 novembre à la
+  place d'IBM Plex Sans (vue dans trop d'applications générées) : une
+  humaniste aux formes ouvertes, que les études de lecture d'un coup d'œil
+  (MIT AgeLab, Reimer 2014, Dobres 2016) donnent plus rapide qu'une
+  grotesque serrée, et libre (OFL), donc embarquable. **Barlow 600** pour les titres
   d'état seulement. Polices embarquées (le PC peut être hors ligne).
 - Pictogrammes **Solar, style linear** (CC BY 4.0, crédit dans About), copiés
   dans `components/Icon.svelte` ; jamais une autre bibliothèque. Pompe,
