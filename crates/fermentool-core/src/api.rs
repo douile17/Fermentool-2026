@@ -373,8 +373,8 @@ fn about_page(which: &str) -> Option<String> {
     }
     match which {
         "homepage" => Some(env!("CARGO_PKG_HOMEPAGE")),
-        "icons" => Some("https://www.figma.com/community/file/1166831539721848736"),
-        "icons_license" => Some("https://creativecommons.org/licenses/by/4.0/"),
+        "icons" => Some("https://phosphoricons.com"),
+        "icons_license" => Some("https://github.com/phosphor-icons/core/blob/main/LICENSE"),
         _ => None,
     }
     .map(str::to_string)
@@ -2225,8 +2225,8 @@ mod tests {
     #[test]
     fn about_pages_are_named_never_given() {
         assert_eq!(about_page("homepage").as_deref(), Some("https://www.delvigne-lab.com"));
-        assert!(about_page("icons").is_some_and(|u| u.starts_with("https://www.figma.com/")));
-        assert!(about_page("icons_license").is_some_and(|u| u.starts_with("https://creativecommons.org/")));
+        assert!(about_page("icons").is_some_and(|u| u == "https://phosphoricons.com"));
+        assert!(about_page("icons_license").is_some_and(|u| u.ends_with("/phosphor-icons/core/blob/main/LICENSE")));
         assert!(about_page("mail:0").is_some_and(|u| u.starts_with("mailto:") && u.contains('@') && !u.contains('>')));
         assert_eq!(about_page("mail:9"), None, "no tenth author");
         assert_eq!(about_page("mail:x"), None);

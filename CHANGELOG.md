@@ -10,11 +10,14 @@ corrections de l'audit du 9).
 Installateur `Fermentool_0.1.8_x64-setup.exe` construit le 18 novembre
 depuis `main` (tag `v0.1.8`) : tout ce qui suit, jusqu'au profil Steps.
 
-### Police (23 novembre)
+### Police et pictogrammes (23 novembre)
 
 - Toute l'interface passe d'IBM Plex Sans à **Red Hat Text**, chiffres
   compris. Barlow reste pour les titres d'état.
 - Les séparateurs « · » entre deux informations deviennent « | ».
+- Les pictogrammes passent de Solar (trait) à **Phosphor**, pleins. About
+  crédite Phosphor (MIT).
+- La pastille « completed » de History ressort davantage.
 
 ### Images des runs (18 novembre, après 0.1.8)
 

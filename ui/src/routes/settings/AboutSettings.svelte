@@ -107,11 +107,11 @@
       <dt>Licence</dt>
       <dd>{about.license}</dd>
 
-      <!-- CC BY 4.0 asks for this credit -->
+      <!-- the MIT licence asks for its notice to travel with the icons -->
       <dt>Icons</dt>
       <dd>
-        <a href="https://www.figma.com/community/file/1166831539721848736" onclick={(e) => page(e, 'icons')}>Solar</a>
-        by 480 Design, <a href="https://creativecommons.org/licenses/by/4.0/" onclick={(e) => page(e, 'icons_license')}>CC BY 4.0</a>
+        <a href="https://phosphoricons.com" onclick={(e) => page(e, 'icons')}>Phosphor</a>
+        by Phosphor Icons, <a href="https://github.com/phosphor-icons/core/blob/main/LICENSE" onclick={(e) => page(e, 'icons_license')}>MIT</a>
       </dd>
 
       <dt>Daemon running for</dt>

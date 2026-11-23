@@ -580,7 +580,8 @@ fond jaune pâle (`.btn-folder`).
   (MIT AgeLab, Reimer 2014, Dobres 2016) donnent plus rapide qu'une
   grotesque serrée, et libre (OFL), donc embarquable. **Barlow 600** pour les titres
   d'état seulement. Polices embarquées (le PC peut être hors ligne).
-- Pictogrammes **Solar, style linear** (CC BY 4.0, crédit dans About), copiés
+- Pictogrammes **Phosphor, graisse fill** (MIT, crédit dans About ; Solar en
+  trait jusqu'au 23 novembre), copiés
   dans `components/Icon.svelte` ; jamais une autre bibliothèque. Pompe,
   flacon, triangle et roue dentée sont nos dessins.
 
