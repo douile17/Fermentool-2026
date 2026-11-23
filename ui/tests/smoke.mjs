@@ -232,6 +232,13 @@ try {
     if (await js(`/^every/.test([...document.querySelectorAll('.recap dt')].find((d) => d.textContent.trim() === 'Timelapse')?.nextElementSibling?.textContent.trim() ?? '')`)) {
       check('Check and start says the folder the images go in', await js(`/_\\d{4} /.test(document.querySelector('.recap .tl-dest')?.textContent ?? '')`));
     }
+    // a visit to Settings keeps the form (2026-11-23: it came back empty), the direction to choose again
+    await click('.nav-item', 'Settings');
+    await sleep(700);
+    await click('.nav-item', 'Feeding profile');
+    await sleep(900);
+    check('New run keeps what was typed across a visit to Settings', (await js(`/^smoke\\b/.test(document.querySelector('.recap dd')?.textContent.trim() ?? '')`)) &&(await stepOn()) === 'Check and start', await stepOn());
+    check('the kept form asks the direction again', (await greens())[1] === '-', await greens());
 
     // --- History: Run again opens New run on its check (broke once)
     check('History opens', await click('.tab', 'History'));

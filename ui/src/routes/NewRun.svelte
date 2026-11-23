@@ -23,6 +23,7 @@
   import { bytesText, countText, estimate, INTERVAL_CHOICES, intervalChoice, intervalWords, tlSummary } from '../lib/timelapse.js';
   import { liveShown } from '../lib/camera.js';
   import { folderPreview, folderToSend, sameFolder } from '../lib/tlplayer.js';
+  import { dropDraft, keepDraft, takeDraft } from '../lib/newrundraft.js';
   import LiveImg from '../components/LiveImg.svelte';
 
   let f = $state({
@@ -113,7 +114,8 @@
 
   // "Run again" from History drops a seed here; apply it once, then clear.
   // A run already set up opens on its check: only the direction is left.
-  if (app.prefill) {
+  const seeded = !!app.prefill;
+  if (seeded) {
     Object.assign(f, app.prefill);
     app.prefill = null;
     // The mounting may have changed since that run: chosen again, never copied.
@@ -122,6 +124,17 @@
     tubeTouched = true;
     tlSeen = true;
     step = 5;
+  }
+  // Back from another page (Settings, Camera, History): the form as it was
+  // left, on its step, the direction to choose again (lib/newrundraft.js).
+  // "Run again" above takes its place.
+  const draft = seeded ? null : takeDraft();
+  if (draft) {
+    Object.assign(f, draft.f);
+    step = draft.step;
+    tlSeen = draft.tlSeen;
+    trimFromSeed = draft.trimFromSeed;
+    tubeTouched = draft.tubeTouched;
   }
 
   // Settings file: export the form as it stands, or fill it from a file
@@ -188,7 +201,7 @@
   const tlMin = $derived(f.timelapse_min ?? tlDefaultMin);
   // The interval buttons: one of INTERVAL_CHOICES, or Custom with its field
   // (a value from Run again that is none of them lights Custom).
-  let tlCustom = $state(false);
+  let tlCustom = $state(draft?.tlCustom ?? false);
   const tlPick = $derived(tlCustom ? 'custom' : intervalChoice(tlMin));
   let customInput = $state(null);
   function pickTlChoice(c) {
@@ -242,8 +255,12 @@
   // Settings > Camera), Browse... for another one for this run on (kept
   // once the run starts), or the default one. The run's own folder goes in it.
   let capInfo = $state(null);
-  let tlFolder = $state(null); // picked here, or null: the folder saved
-  let tlFree = $state(null); // free space on the picked folder's disk
+  let tlFolder = $state(draft?.tlFolder ?? null); // picked here, or null: the folder saved
+  let tlFree = $state(draft?.tlFree ?? null); // free space on the picked folder's disk
+  // Keep the form for a return from another page (lib/newrundraft.js).
+  $effect(() => {
+    keepDraft({ f: $state.snapshot(f), step, tlSeen, trimFromSeed, tubeTouched, tlCustom, tlFolder, tlFree });
+  });
   let picking = $state(false);
   let pickErr = $state(null);
   $effect(() => {
@@ -608,6 +625,7 @@
       });
       // the run started; a timelapse that could not is said on the Overview
       app.timelapseNote = res?.timelapse_error ?? null;
+      dropDraft();
       try {
         if (f.responsible) localStorage.setItem(LAST_RESPONSIBLE, f.responsible);
       } catch {

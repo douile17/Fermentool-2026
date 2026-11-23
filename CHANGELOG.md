@@ -18,6 +18,11 @@ depuis `main` (tag `v0.1.8`) : tout ce qui suit, jusqu'au profil Steps.
 - Les pictogrammes passent de Solar (trait) à **Phosphor**, pleins. About
   crédite Phosphor (MIT).
 - La pastille « completed » de History ressort davantage.
+- New run garde le formulaire en cours quand on passe par Settings,
+  Camera ou History, et le rouvre à la même étape. Seul le sens de la
+  pompe est à rechoisir. Le brouillon reste en mémoire : il disparaît à
+  la fermeture de la fenêtre ou au rechargement de la page, au démarrage
+  du run, et « Run again » le remplace.
 
 ### Images des runs (18 novembre, après 0.1.8)
 
