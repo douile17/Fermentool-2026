@@ -31,6 +31,9 @@
   --danger-ink: #a32f2f;
   --green-ink: #0b6b4e;
   --teal-ink: #00616e;
+  /* A completed run's pill: teal-600 at 32 % on the surface, its word at
+     6.1:1 there (light) and 5.0:1 (dark). */
+  --done-ink: #004d57;
   --warn-ink: #9a5a12;
   --fill-ink: #13677f;
   --on-primary: #ffffff;
@@ -111,6 +114,7 @@
     --danger-ink: #f88a84;
     --green-ink: #57e3b4;
     --teal-ink: #7fd3dd;
+    --done-ink: #b5eef4;
     --warn-ink: #ffad42;
     --fill-ink: #8fd8ee;
     /* the dark theme's teal is light: dark ink on it (white gave 2.4:1) */
@@ -159,6 +163,7 @@
   --danger-ink: #f88a84;
   --green-ink: #57e3b4;
   --teal-ink: #7fd3dd;
+  --done-ink: #b5eef4;
   --warn-ink: #ffad42;
   --fill-ink: #8fd8ee;
   /* the dark theme's teal is light: dark ink on it (white gave 2.4:1) */
@@ -332,7 +337,7 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   background: var(--surface-sunken); color: var(--muted);
 }
 .pill.running { background: color-mix(in srgb, var(--green-500) 16%, var(--surface)); color: var(--green-ink); }
-.pill.completed { background: color-mix(in srgb, var(--teal-400) 18%, var(--surface)); color: var(--teal-ink); }
+.pill.completed { background: color-mix(in srgb, var(--teal-600) 32%, var(--surface)); color: var(--done-ink); }
 /* Stopping is a normal end: neutral. Red is for a run cut short (aborted). */
 .pill.stopped { background: var(--surface-sunken); color: var(--muted); }
 .pill.aborted { background: var(--danger-bg); color: var(--danger-ink); }
