@@ -257,7 +257,7 @@
     try {
       await sendFolder(folder);
       folderErr = null;
-      done(folder ? 'Images kept in the new folder' : 'Images kept in the default folder', () => sendFolder(before));
+      done(folder ? 'Images saved in the new folder' : 'Images saved in the default folder', () => sendFolder(before));
     } catch (e) {
       folderErr = e.message;
     }
@@ -506,9 +506,9 @@
           <input type="number" min="1" max="1440" step="1" value={intervalMin} disabled={busy}
             aria-label="Timelapse every (minutes)" onchange={(e) => pickInterval(e.currentTarget)} />
         </label>
-        <label class="field folder"><span>Images kept in</span>
+        <label class="field folder"><span>Images saved in</span>
           <input type="text" value={captures} placeholder={capInfo?.folder ?? ''} disabled={busy} class:bad={folderErr}
-            aria-label="Images kept in" aria-invalid={folderErr ? 'true' : undefined}
+            aria-label="Images saved in" aria-invalid={folderErr ? 'true' : undefined}
             onchange={(e) => pickFolder(e.currentTarget)} />
         </label>
       </div>

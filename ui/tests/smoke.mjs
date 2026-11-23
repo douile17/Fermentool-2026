@@ -221,10 +221,17 @@ try {
       await sleep(300);
       check('a preset closes the Custom field', await js(`!document.querySelector('.tl-custom input')`));
     }
+    // where the images go, said before Start (2026-11-18): the folder, Browse… (never clicked: it opens Windows' picker), the run's own folder
+    if (await js(`!!document.querySelector('.tl-switch input:checked')`)) {
+      check('the Timelapse step says where the images go, with Browse', await js(`(() => { const w = document.querySelector('.tl-where'); return !!w && /\\S/.test(w.querySelector('.path')?.textContent ?? '') && [...w.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Browse…') && /a folder of their own: \\d{4}-\\d{2}-\\d{2}_\\d{4} /.test(w.textContent); })()`));
+    }
     await click('.step', 'Check and start');
     await sleep(600);
     check('Check and start shows the curve and a Start button', await js(`!!document.querySelector('.go .preview svg') && [...document.querySelectorAll('button')].some((b) => b.textContent.includes('Start run'))`));
     check('Check and start sums the timelapse up in one line', await js(`(() => { const dt = [...document.querySelectorAll('.recap dt')].find((d) => d.textContent.trim() === 'Timelapse'); const t = dt?.nextElementSibling?.textContent.trim() ?? ''; return /^(every \\d|off$|no camera$)/.test(t); })()`));
+    if (await js(`/^every/.test([...document.querySelectorAll('.recap dt')].find((d) => d.textContent.trim() === 'Timelapse')?.nextElementSibling?.textContent.trim() ?? '')`)) {
+      check('Check and start says the folder the images go in', await js(`/_\\d{4} /.test(document.querySelector('.recap .tl-dest')?.textContent ?? '')`));
+    }
 
     // --- History: Run again opens New run on its check (broke once)
     check('History opens', await click('.tab', 'History'));
@@ -281,6 +288,50 @@ try {
       }
     } else {
       console.log('skip  Run again: no run in History');
+    }
+
+    // --- History: a run's images, Play and Open folder (2026-11-18)
+    const runsList = await (await fetch(`${URL}/api/runs?limit=40`)).json();
+    let withImages = null;
+    for (const r of runsList.filter((x) => x.kind !== 'calibration' && x.status !== 'running')) {
+      const d = await (await fetch(`${URL}/api/runs/${r.id}`)).json();
+      if (d.timelapse?.images > 1 && d.timelapse.folder_exists) {
+        withImages = d;
+        break;
+      }
+    }
+    if (withImages) {
+      await click('.tab', 'History');
+      await sleep(1500);
+      const rowOpened = await js(`(() => { const b = [...document.querySelectorAll('button.tr')].find((x) => x.querySelector('.rid')?.textContent.trim() === '#${withImages.id}'); if (!b) return false; b.click(); return true; })()`);
+      if (rowOpened) {
+        await sleep(2500);
+        check('a run with a timelapse shows its Images, Play and Open folder', await js(`(() => { const s = document.querySelector('.modal.detail section.images'); const b = s ? [...s.querySelectorAll('button')].map((x) => x.textContent.trim()) : []; return b.includes('Play') && b.includes('Open folder'); })()`));
+        check('its pictures are spread over the run, the first at its start', await js(`(() => { const t = [...document.querySelectorAll('.modal.detail .images .thumb span')].map((e) => e.textContent.trim()); return t.length >= 2 && t.length <= 6 && t[0] === '0 min'; })()`));
+        await js(`[...document.querySelectorAll('.modal.detail .images button')].find((b) => b.textContent.trim() === 'Play').click()`);
+        await sleep(800);
+        check('Play opens the player on the first image', await js(`(() => { const p = document.querySelector('.player'); return !!p && /Image 1 of \\d+/.test(p.textContent) && !!p.querySelector('.stage img'); })()`));
+        // the whole picture in the player, never cropped (2026-11-19: a max-height in the grid never applied, top and bottom cut)
+        check('the player shows the whole picture, not cropped', await js(`(() => { const st = document.querySelector('.player .stage'); const im = st?.querySelector('img'); if (!im) return false; const a = st.getBoundingClientRect(); const b = im.getBoundingClientRect(); return b.height <= a.height + 1 && b.width <= a.width + 1 && getComputedStyle(im).objectFit === 'contain'; })()`));
+        check('each image says when it was taken', await js(`/ \\d{4}, \\d{2}:\\d{2}:\\d{2}$/.test(document.querySelector('.player .when')?.textContent.trim() ?? '')`));
+        await js(`document.querySelector('.player button[aria-label="Next image"]').click()`);
+        await sleep(300);
+        check('the next image button steps one image', await js(`/Image 2 of/.test(document.querySelector('.player').textContent)`));
+        await js(`[...document.querySelectorAll('.player .speeds button')].find((b) => b.textContent.trim() === '50/s').click()`);
+        await sleep(200);
+        check('a speed says how long the whole run plays', await js(`/the whole run in \\d+ (s|min)/.test(document.querySelector('.player .whole')?.textContent ?? '')`));
+        await js(`document.querySelector('.player .play').click()`);
+        await sleep(1500);
+        const at = await js(`Number(/Image (\\d+) of/.exec(document.querySelector('.player').textContent)?.[1])`);
+        check('Play moves through the images', at > 2, String(at));
+        await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await sleep(400);
+        check('Escape closes the player, the run detail stays', await js(`!document.querySelector('.player') && !!document.querySelector('.modal.detail')`));
+      } else {
+        console.log(`skip  Images: run ${withImages.id} is not in the list`);
+      }
+    } else {
+      console.log('skip  Images: no run with a timelapse in History');
     }
   }
 
@@ -413,7 +464,7 @@ try {
   }
   {
     const saved = JSON.parse(camBefore) ?? {};
-    const shown = await js(`[document.querySelector('.settings-pane input[aria-label="Timelapse every (minutes)"]')?.value, document.querySelector('.settings-pane input[aria-label="Images kept in"]')?.value]`);
+    const shown = await js(`[document.querySelector('.settings-pane input[aria-label="Timelapse every (minutes)"]')?.value, document.querySelector('.settings-pane input[aria-label="Images saved in"]')?.value]`);
     check('Timelapse shows its interval and folder as saved', shown?.[0] === String(saved.interval_min ?? 5) && shown?.[1] === (saved.captures_dir ?? ''), JSON.stringify(shown));
   }
   check('nothing about the camera saved', (await camCfg()) === camBefore);
@@ -437,6 +488,19 @@ try {
   // The desktop window's webview opens no new tab: an image or a web page
   // is opened by the daemon (2026-11-17), never by a target=_blank link.
   check('the Camera page has no link opening a new tab', await js(`!document.querySelector('main a[target="_blank"]')`));
+  // Play on the images taken so far, during a run too (2026-11-19); Open folder is never clicked
+  const curTl = (await (await fetch(`${URL}/api/timelapses/current`)).json()).timelapse;
+  if (curTl?.images > 1) {
+    const playBtn = await js(`(() => { const b = [...document.querySelectorAll('.strip-head button')].find((x) => x.textContent.trim() === 'Play'); if (!b) return false; b.click(); return true; })()`);
+    check('Camera: Latest images has Play and Open folder', playBtn && await js(`[...document.querySelectorAll('.strip-head button')].some((x) => x.textContent.trim() === 'Open folder')`));
+    await sleep(1200);
+    check('Camera: Play opens the player on the images so far', await js(`/Image 1 of \\d+/.test(document.querySelector('.player')?.textContent ?? '')`));
+    await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(400);
+    check('Camera: Escape closes the player', await js(`!document.querySelector('.player')`));
+  } else {
+    console.log('skip  Camera Play: no timelapse with images going');
+  }
   await cmd('Page.navigate', { url: 'about:blank' });
   await sleep(300);
   await cmd('Page.navigate', { url: `${APP}/#settings/about` });

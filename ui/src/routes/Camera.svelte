@@ -5,11 +5,12 @@
   import Icon from '../components/Icon.svelte';
   import LiveImg from '../components/LiveImg.svelte';
   import TimelapseCard from '../components/TimelapseCard.svelte';
+  import TimelapsePlayer from '../components/TimelapsePlayer.svelte';
 
   // The camera's live view, Take a picture, the latest images and the
-  // Timelapse card (mockup of 2026-11-02; the player and the Timelapses tab
-  // come with plan D). The run's state bar is App's, above every page but
-  // the Overview.
+  // Timelapse card (mockup of 2026-11-02), Play on the images so far (the
+  // player of History; a Timelapses tab is still to come). The run's state
+  // bar is App's, above every page but the Overview.
 
   // GET /api/camera every 2 s while the page is open: the status frame does
   // not carry the camera. A failed poll keeps the last answer but marks the
@@ -111,6 +112,31 @@
       .catch(() => {});
   });
 
+  // Play: the images taken so far, in the player History uses; the ones
+  // taken while it is open are not added (Play again to see them).
+  let playerFrames = $state(null);
+  let playerTitle = $state('');
+  let playing = $state(false);
+  async function play() {
+    playing = true;
+    picErr = null;
+    try {
+      playerTitle = tl.kind === 'run' ? `Run ${tl.run_id}` : tl.name;
+      playerFrames = await get(`/api/timelapses/${tl.id}/frames`);
+    } catch (e) {
+      picErr = e.message;
+    }
+    playing = false;
+  }
+  async function openFolder() {
+    picErr = null;
+    try {
+      await post(`/api/timelapses/${tl.id}/open`);
+    } catch (e) {
+      picErr = e.message;
+    }
+  }
+
   // Take a picture: into the timelapse recording, or today's pictures.
   let taking = $state(false);
   let picMsg = $state(null);
@@ -207,7 +233,15 @@
 
     {#if latest.length}
       <section class="card strip" aria-label="Latest images">
-        <h2>Latest images</h2>
+        <div class="strip-head">
+          <h2>Latest images</h2>
+          {#if tl?.images > 1}
+            <button class="btn-play" type="button" onclick={play} disabled={playing}><Icon name="play" size={16} />Play</button>
+          {/if}
+          {#if tl}
+            <button class="btn-folder" type="button" onclick={openFolder}><Icon name="folder" size={16} />Open folder</button>
+          {/if}
+        </div>
         <ul>
           {#each latest as img (img.id)}
             <li class:flash={img.id === flashId}>
@@ -225,6 +259,9 @@
       <TimelapseCard cur={tl} {warnFree} {cam} {defaultMin} onchanged={loadTimelapse} />
     </aside>
     </div>
+    {#if playerFrames}
+      <TimelapsePlayer title={playerTitle} frames={playerFrames} onclose={() => (playerFrames = null)} />
+    {/if}
   {:else}
     <p class="muted">Loading…</p>
   {/if}
@@ -240,7 +277,9 @@
   .said { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--muted); margin-right: var(--s-2); }
   /* the picture's two ways out, ghost buttons like Take a picture, smaller */
   .act { height: 32px; padding: 0 var(--s-3); display: inline-flex; align-items: center; gap: var(--s-2); font-size: 13px; color: var(--ink); text-decoration: none; }
-  .strip h2 { margin: 0 0 var(--s-3); font-size: 16px; }
+  .strip-head { display: flex; align-items: center; gap: var(--s-2); margin: 0 0 var(--s-3); }
+  .strip-head h2 { margin: 0 auto 0 0; font-size: 16px; }
+  .strip-head button { display: inline-flex; align-items: center; gap: var(--s-2); }
   .strip ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--s-3); }
   .strip li { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
   .strip img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--video-bg); display: block; }

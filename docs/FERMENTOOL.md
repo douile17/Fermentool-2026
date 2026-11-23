@@ -85,7 +85,11 @@ Un assistant en cinq étapes, résumées dans la colonne de gauche :
    ou non, tuyau (calibration), remplissage automatique.
 3. **Feed profile** : forme de la courbe, durée, aperçu.
 4. **Timelapse** : une image toutes les N minutes pendant le run, si une caméra
-   est connectée.
+   est connectée, et **Images saved in** : le dossier où le run crée le sien
+   (`<date>_<heure> <nom> (<n°>)`), Browse… pour un autre (le sélecteur de
+   Windows, ouvert par le daemon), « Use the default folder ». Le dossier
+   choisi est gardé au Start (`[camera] captures_dir`) : le run suivant part
+   de là. Check and start redit le chemin complet.
 5. **Check and start** : la liste de ce qui est prêt, puis Start.
 
 ### History
@@ -99,6 +103,14 @@ nom, dates, durée, responsable, la courbe en pastilles, puis :
 - **Running total vs requested** : l'écart cumulé, moyenne sur 5 min ;
 - **Feed bottle** : poids avant et après chaque remplissage, versé, et
   l'estimation de ce qui a été donné pendant le remplissage (≈) ;
+- **Images** (run avec timelapse) : nombre, intervalle, taille, six images
+  réparties sur le run (un clic l'ouvre), **Play** et **Open folder**
+  (l'Explorateur, ouvert par le daemon), le chemin. Un dossier déplacé ou
+  supprimé est dit à la place. **Play** ouvre le lecteur : les images l'une
+  après l'autre, Play/Pause (Espace), image par image (flèches), une barre
+  sur tout le run, 5 à 50 images/s, sur l'image le temps du run et le
+  volume délivré alors, sous l'image la date et l'heure de la prise (heure
+  locale, `taken_at` de `frames`). Échap ferme ;
 - repliés : **Settings** (pompe, tuyau, calibration, balance, version),
   **Regulation** (correction, ratio de la pompe, plus grand écart, R²),
   **Journal** en phrases (le brut derrière « Show all N entries »).
@@ -118,7 +130,10 @@ restauration, l'amorçage de la ligne.
 
 La vue en direct, **Take a picture** (enregistre l'image, dit dans quel dossier,
 avec **Open** et **Show in folder**), le timelapse en cours et ses images, et
-le lancement d'un timelapse sans run (§7).
+le lancement d'un timelapse sans run (§7). Sur les dernières images, **Play**
+ouvre le lecteur de History sur les images prises jusque-là, pendant le run
+(celles prises le lecteur ouvert n'y entrent pas : Play à nouveau), et
+**Open folder** le dossier du timelapse.
 
 ### Settings
 
@@ -477,7 +492,7 @@ jamais la pompe : l'interface alerte.
 | Balance et remplissage | `POST /api/scale/connect`, `…/disconnect`, `…/refill_mode`, `…/refill_done`, `POST /api/refill/test`, `…/ping`, `…/now`, `…/stop` |
 | Calibrations | `GET/POST /api/calibrations`, `POST …/{id}/archive`, `…/restore` |
 | Caméra | `/api/camera` (état, devices, connect, disconnect, controls, fps, picture, captures, interval, frame.jpg, live) |
-| Timelapses | `/api/timelapses` (start, current, stop, pause, resume, interval, images, fichiers, show, open) |
+| Timelapses | `/api/timelapses` (start, current, stop, pause, resume, interval, images, frames, open du dossier, fichiers, show, open) ; `POST /api/folders/pick` (sélecteur de dossier de Windows) |
 | Notifications | `POST /api/notify/test`, `GET /api/notify/pages`, `POST /api/notify/ack` |
 | Fenêtre de bureau | `POST /api/files/save`, `POST /api/about/open`, `GET /api/about` |
 
@@ -550,7 +565,11 @@ demandée, `--lime-300` remplissage sous la courbe (jamais du texte),
 `--green-500` le vivant (trace pesée), `--fill` le remplissage, `--measured`
 pesé et avertissements, `--danger` arrêt et alarmes. **Le texte sur une teinte
 utilise son jeton `*-ink`** ; chaque paire de texte est WCAG AA (4.5:1) dans les
-deux thèmes. Aucune couleur en dur dans un composant.
+deux thèmes. Aucune couleur en dur dans un composant. Deux exceptions
+demandées (2026-11-19) : **Play** des images en vert (`.btn-play`, `--play` /
+`--on-play`, AA) et les pictogrammes de dossier en jaune (`--folder`, réglé
+une fois dans `app.css` sur `svg.icon[data-icon="folder"]`), Open folder sur un
+fond jaune pâle (`.btn-folder`).
 
 ### Typographie et pictogrammes
 
@@ -599,7 +618,8 @@ s'ouvre agrandie.
 
 **WebView2 n'ouvre aucun onglet et n'enregistre aucun téléchargement par lien
 blob**, sans rien dire. Tout ce qui ouvre ou enregistre passe par le daemon
-(`/api/files/save`, `/api/about/open`, `/api/timelapses/images/{id}/open|show`)
+(`/api/files/save`, `/api/about/open`, `/api/timelapses/images/{id}/open|show`,
+`/api/timelapses/{id}/open`, `/api/folders/pick`)
 ; le smoke test échoue sur un `target="_blank"`. **L'interface de la fenêtre
 est compilée dans `fermentool.exe`** : déployer le daemon ne la change pas, il
 faut un nouvel installateur.
@@ -745,8 +765,9 @@ npm run smoke    # parcourt l'application déployée dans Edge sans tête, ne ch
   perturbation pendant un remplissage peut l'arrêter trop tôt ; le cycle compte
   en heure murale.
 - Hub RS-485 isolé (§10), puis nommer de nouveau la pompe muette.
-- Caméra, suite : lecteur de timelapse, onglet Timelapses, section dans
-  History, exports, renommer et supprimer, Browse….
+- Caméra, suite : onglet Timelapses (les timelapses seuls), export vidéo ou
+  GIF d'un timelapse, renommer et supprimer. Fait le 18 novembre : dossier
+  choisi au lancement, section Images et lecteur dans History.
 
 ### Idées
 

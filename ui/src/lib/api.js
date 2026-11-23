@@ -22,14 +22,14 @@ async function body(res) {
 // device) must not leave a button on "Stopping…" for good.
 const TIMEOUT_MS = 15000;
 
-async function req(method, path, payload) {
+async function req(method, path, payload, timeoutMs = TIMEOUT_MS) {
   let res;
   try {
     res = await fetch(BASE + path, {
       method,
       headers: payload !== undefined ? { 'content-type': 'application/json' } : undefined,
       body: payload !== undefined ? JSON.stringify(payload) : undefined,
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
     const err = new Error(
@@ -55,6 +55,8 @@ async function req(method, path, payload) {
 
 export const get = (path) => req('GET', path);
 export const post = (path, payload) => req('POST', path, payload ?? {});
+// A request that waits on someone at the PC (Windows' folder picker): no time limit worth giving.
+export const postWaiting = (path, payload) => req('POST', path, payload ?? {}, 30 * 60 * 1000);
 export const put = (path, payload) => req('PUT', path, payload);
 export const del = (path) => req('DELETE', path);
 

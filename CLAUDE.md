@@ -603,6 +603,12 @@ template only targets group chats), which is why ntfy is the default.
   daemon in `target\release`), start the exe, check `/api/status` and that
   the served bundle contains the change; tell the user to Ctrl+F5 (an open
   tab keeps the old UI in memory).
+- **Start the deployed daemon outside the agent's shell**: a
+  `Start-Process` from the agent's PowerShell died with that session
+  (2026-11-19, no shutdown nor crash in the log). Start it through WMI:
+  `Invoke-CimMethod Win32_Process Create` with `cmd /c "set
+  FERMENTOOL_NO_BROWSER=1&& start "" /d <repo> <repo>\target\release\fermentool-core.exe"`,
+  then check `/api/status` again from a new call.
 - **During an active run, run heavy work at low priority**, so Windows
   serves the daemon first: `cmd /c '"...vcvars64.bat" >nul 2>&1 && start "" /b
   /low /wait cargo test ...'` (same for `cargo build`, `npm run build`, Vite,

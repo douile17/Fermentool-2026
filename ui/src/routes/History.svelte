@@ -6,6 +6,8 @@
   import { num, shortTime, stampY, unitFor, digitsFor, ranFor } from '../lib/fmt.js';
   import Chart from '../components/Chart.svelte';
   import GapChart from '../components/GapChart.svelte';
+  import RunImages from '../components/RunImages.svelte';
+  import TimelapsePlayer from '../components/TimelapsePlayer.svelte';
   import Icon from '../components/Icon.svelte';
   import { bottleWeights } from '../lib/balance.js';
   import { downloadSettings } from '../lib/runfile.js';
@@ -33,6 +35,8 @@
   let feedGutter = $state(0);
   let gapGutter = $state(0);
   let rawJournal = $state(false);
+  // the run's images played (History > Images > Play), or null
+  let playerFrames = $state(null);
   let q = $state('');
 
   let confirmClear = $state(false);
@@ -289,6 +293,7 @@
 
   function closeSel() {
     sel = null;
+    playerFrames = null;
     confirmDelete = false;
     pickRate = false;
   }
@@ -495,7 +500,7 @@
           <!-- the curve said up front: its start and end were hard to find behind Settings -->
           <div class="chips" aria-label="Curve">
             {#each curveChips(sel.run) as c}
-              <span class="chip">{#if c.value}<b class="mono">{c.value}</b> {c.unit}{:else}{c.text}{/if}</span>
+              <span class="chip" class:long={!!c.value} title={c.value ? `${c.value} ${c.unit}` : c.text}>{#if c.value}<b class="mono">{c.value}</b> {c.unit}{:else}{c.text}{/if}</span>
             {/each}
           </div>
         </div>
@@ -577,6 +582,10 @@
           </div>
           <GapChart points={sel.report.points} {spans} spanS={reportSpanS} minGutter={feedGutter} bind:gutter={gapGutter} />
         </div>
+      {/if}
+
+      {#if sel.run.timelapse}
+        <RunImages tl={sel.run.timelapse} onplay={(f) => (playerFrames = f)} />
       {/if}
 
       <!-- Settings open, in view; the rest, to look closer, folded. -->
@@ -745,7 +754,7 @@
         <div class="eyebrow">Delete run</div>
         <h2 id="ft-del-one">Delete “{sel.run.name}”?</h2>
         <p class="lede">
-          Run #{sel.run.id}, its journal and its events are permanently removed. This can't be undone.
+          Run #{sel.run.id}, its journal{sel.run.timelapse ? ', its events and its images' : ' and its events'} are permanently removed. This can't be undone.
         </p>
         {#if deleteErr}<div class="err">{deleteErr}</div>{/if}
         <div class="modal-foot">
@@ -756,6 +765,10 @@
         </div>
       </div>
     </div>
+  {/if}
+
+  {#if playerFrames}
+    <TimelapsePlayer title={sel.run.name} frames={playerFrames} onclose={() => (playerFrames = null)} />
   {/if}
 {/if}
 
@@ -973,6 +986,11 @@
     .detail-head h2 { font-size: 19px; margin: 2px 0 0; }
     .chips { margin-top: 6px; }
     .chips .chip { padding-block: 2px; }
+    /* one line: a rate changed twice wrapped them to two (run 271); the
+       value chip gives way, cut, its whole text on hover */
+    .chips { flex-wrap: nowrap; min-width: 0; }
+    .chips .chip { white-space: nowrap; flex: none; }
+    .chips .chip.long { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   }
 
   @media (max-width: 720px) {

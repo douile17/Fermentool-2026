@@ -488,10 +488,7 @@
     <button class="btn-primary" onclick={() => (app.tab = 'calibration')}>Tubing calibration</button>
   </div>
 {:else if !active}
-  <div class="card empty">
-    <div class="eyebrow">No active run</div>
-    <h2>The pump is idle.</h2>
-    <p>Build a time profile and start a run.</p>
+  <div class="card empty none">
     <button class="btn-primary" onclick={() => (app.tab = 'new')}>New run</button>
   </div>
 {:else}

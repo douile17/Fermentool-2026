@@ -171,6 +171,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/timelapses/current/resume", post(timelapse_resume))
         .route("/api/timelapses/current/interval", post(timelapse_interval))
         .route("/api/timelapses/{id}/images", get(timelapse_images))
+        .route("/api/timelapses/{id}/frames", get(timelapse_frames))
+        .route("/api/timelapses/{id}/open", post(timelapse_open))
+        .route("/api/folders/pick", post(pick_folder))
         .route("/api/timelapses/images/{id}/{which}", get(timelapse_image_file))
         .route("/api/timelapses/images/{id}/show", post(timelapse_image_show))
         .route("/api/timelapses/images/{id}/open", post(timelapse_image_open))
@@ -654,11 +657,17 @@ async fn notify_ack(State(s): State<AppState>, Json(a): Json<NotifyAck>) -> ApiR
 #[derive(Deserialize)]
 struct RunTimelapseReq {
     interval_min: u32,
+    /// The folder its own folder goes in (New run's "Images saved in"),
+    /// kept as `[camera] captures_dir` once the run starts: the next run
+    /// starts there. Absent: the folder saved. Empty: the default one.
+    #[serde(default)]
+    folder: Option<String>,
 }
 
-/// `POST /api/runs`: the run config, plus `timelapse: {interval_min}` to
-/// record one with it. A timelapse that cannot start never fails the run:
-/// the answer carries `timelapse_error`.
+/// `POST /api/runs`: the run config, plus `timelapse: {interval_min,
+/// folder?}` to record one with it. A folder that cannot be written to
+/// refuses the run (nothing started); a timelapse that cannot start never
+/// fails the run: the answer carries `timelapse_error`.
 async fn create_run(State(s): State<AppState>, Json(mut body): Json<serde_json::Value>) -> ApiResult<Response> {
     let timelapse = body.as_object_mut().and_then(|o| o.remove("timelapse")).filter(|t| !t.is_null());
     let timelapse: Option<RunTimelapseReq> = timelapse
@@ -672,9 +681,27 @@ async fn create_run(State(s): State<AppState>, Json(mut body): Json<serde_json::
     }
     let cfg: RunConfig = serde_json::from_value(body).map_err(|e| ApiError::Bad(e.to_string()))?;
     let (kind, name) = (cfg.kind, cfg.name.clone());
+    // the folder asked for, checked before anything starts
+    let folder = match timelapse.as_ref().and_then(|t| t.folder.clone()).filter(|_| kind == RunKind::Dosing) {
+        Some(f) => {
+            let f = f.trim().to_string();
+            let root = captures_root(&s, &f);
+            tokio::task::spawn_blocking(move || crate::timelapse::files::ensure_writable(&root))
+                .await
+                .map_err(|e| ApiError::Conflict(e.to_string()))?
+                .map_err(|e| ApiError::Bad(format!("Images saved in: {e}")))?;
+            Some(f)
+        }
+        None => None,
+    };
     let (status, mut answer) = start_run(&s, cfg).await?;
     // calibration runs never have one
     if let (Some(t), RunKind::Dosing) = (timelapse, kind) {
+        if let Some(f) = folder {
+            if save_camera(&s, move |c| c.captures_dir = f).await.is_err() {
+                tracing::warn!("the images folder was not saved in config.toml");
+            }
+        }
         let id = answer["run_id"].as_i64().unwrap_or_default();
         let tl = s.timelapses.clone();
         let started = tokio::task::spawn_blocking(move || tl.start_with_run(id, name, i64::from(t.interval_min) * 60))
@@ -794,7 +821,15 @@ async fn get_run(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Re
     body["effective_curve"] = serde_json::to_value(effective).map_err(|e| ApiError::Conflict(e.to_string()))?;
     // its timelapse, for Run again and the run detail
     let tl = s.db.call(move |db| db.timelapse_of_run(id)).await?.map_err(|e| ApiError::Conflict(e.to_string()))?;
-    body["timelapse"] = json!(tl.map(|t| json!({ "id": t.id, "interval_s": t.interval_s, "images": t.images })));
+    body["timelapse"] = match tl {
+        None => json!(null),
+        Some(t) => {
+            let path = PathBuf::from(&t.folder);
+            let exists = tokio::task::spawn_blocking(move || path.is_dir()).await.unwrap_or(false);
+            json!({ "id": t.id, "interval_s": t.interval_s, "images": t.images, "bytes": t.bytes,
+                    "folder": t.folder, "folder_exists": exists })
+        }
+    };
     Ok(Json(body).into_response())
 }
 
@@ -1743,6 +1778,77 @@ async fn timelapse_images(
     Ok(Json(list).into_response())
 }
 
+/// `GET /api/timelapses/{id}/frames`: every image, oldest first, with what
+/// the run was doing then (the player's frames; files fetched by id).
+async fn timelapse_frames(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let rows = s
+        .db
+        .call(move |db| db.frames(id))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    let list: Vec<_> = rows
+        .iter()
+        .map(|i| {
+            json!({ "id": i.id, "taken_at": i.taken_at, "elapsed_s": i.elapsed_s, "setpoint": i.setpoint, "unit": i.unit,
+                    "delivered_ml": i.delivered_ml })
+        })
+        .collect();
+    Ok(Json(list).into_response())
+}
+
+/// `POST /api/timelapses/{id}/open`: Explorer opens the timelapse's folder
+/// (History's "Open folder"); a folder gone is a 404.
+async fn timelapse_open(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let t = s
+        .db
+        .call(move |db| db.timelapse(id))
+        .await?
+        .map_err(|e| ApiError::Conflict(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+    let folder = PathBuf::from(t.folder);
+    if !folder.is_dir() {
+        return Err(ApiError::NotFound);
+    }
+    open_in_file_manager(&folder, false)
+        .map_err(|e| ApiError::Conflict(format!("could not open the file manager: {e}")))?;
+    Ok(Json(json!({ "opened": true })).into_response())
+}
+
+#[derive(Deserialize)]
+struct PickFolderReq {
+    #[serde(default)]
+    start: Option<String>,
+}
+
+/// `POST /api/folders/pick {start?}`: Windows' folder picker, opened by the
+/// daemon on this PC (the desktop window has none), from `start` if it
+/// exists. `{folder, free_bytes}`: the folder picked (`null` when
+/// cancelled) and the free space on its disk.
+async fn pick_folder(Json(req): Json<PickFolderReq>) -> ApiResult<Response> {
+    let (picked, free) = tokio::task::spawn_blocking(move || {
+        pick_folder_dialog(req.start.as_deref())
+            .map(|p| (p.clone(), p.as_deref().and_then(crate::timelapse::files::free_bytes)))
+    })
+    .await
+    .map_err(|e| ApiError::Conflict(e.to_string()))?
+    .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "folder": picked.map(|p| p.to_string_lossy().into_owned()), "free_bytes": free })).into_response())
+}
+
+#[cfg(windows)]
+fn pick_folder_dialog(start: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let mut d = rfd::FileDialog::new().set_title("Images saved in");
+    if let Some(dir) = start.map(PathBuf::from).filter(|d| d.is_dir()) {
+        d = d.set_directory(dir);
+    }
+    Ok(d.pick_folder())
+}
+
+#[cfg(not(windows))]
+fn pick_folder_dialog(_start: Option<&str>) -> Result<Option<PathBuf>, String> {
+    Err("no folder picker here: type the folder".into())
+}
+
 /// `GET /api/timelapses/images/{id}/full.jpg` or `/thumb.jpg`: the file,
 /// found from the image's row only.
 async fn timelapse_image_file(State(s): State<AppState>, Path((id, which)): Path<(i64, String)>) -> ApiResult<Response> {
@@ -1887,7 +1993,10 @@ async fn captures_info(State(s): State<AppState>) -> ApiResult<Response> {
         .sum();
     let probe = root.clone();
     let free = tokio::task::spawn_blocking(move || crate::timelapse::files::free_bytes(&probe)).await.ok().flatten();
-    Ok(Json(json!({ "folder": root.to_string_lossy(), "used_bytes": used, "free_bytes": free })).into_response())
+    let default = captures_root(&s, "");
+    Ok(Json(json!({ "folder": root.to_string_lossy(), "default_folder": default.to_string_lossy(),
+                    "used_bytes": used, "free_bytes": free }))
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -3450,6 +3559,10 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "show: an unknown image opens nothing");
         let res = app.clone().oneshot(post_json("/api/timelapses/images/999/open", json!({}))).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "open: an unknown image opens nothing");
+        let res = app.clone().oneshot(post_json("/api/timelapses/999/open", json!({}))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "an unknown timelapse opens no folder");
+        let res = app.clone().oneshot(get("/api/timelapses/999/frames")).await.unwrap();
+        assert_eq!(body_json(res).await, json!([]));
         let res = app.oneshot(get("/api/timelapses/images/..%2F..%2Fconfig.toml/full.jpg")).await.unwrap();
         assert!(matches!(res.status(), StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND), "{}", res.status());
     }
@@ -3476,11 +3589,51 @@ mod tests {
         assert!(folder.is_dir());
         let run = body_json(app.clone().oneshot(get(&format!("/api/runs/{id}"))).await.unwrap()).await;
         assert_eq!(run["timelapse"]["interval_s"], 300, "{run}");
+        // History's Images section: where they are, and whether that folder is still there
+        assert_eq!(run["timelapse"]["folder"], json!(cur.folder), "{run}");
+        assert_eq!(run["timelapse"]["folder_exists"], true, "{run}");
+        assert!(run["timelapse"]["bytes"].is_i64(), "{run}");
+        // the player's frames: every image, oldest first, no file path
+        assert!(wait_async(Duration::from_secs(8), || tl.current().is_some_and(|c| c.images >= 1)).await);
+        let tl_id = cur.id;
+        let frames = body_json(app.clone().oneshot(get(&format!("/api/timelapses/{tl_id}/frames"))).await.unwrap()).await;
+        let frames = frames.as_array().unwrap().clone();
+        assert!(!frames.is_empty());
+        assert!(frames[0]["elapsed_s"].is_number() && frames[0].get("file").is_none(), "{frames:?}");
+        assert!(frames[0]["taken_at"].is_string(), "the player says when each image was taken: {frames:?}");
+        assert!(frames.windows(2).all(|w| w[0]["id"].as_i64() < w[1]["id"].as_i64()), "oldest first");
         app.clone().oneshot(post_json(&format!("/api/runs/{id}/stop"), json!({}))).await.unwrap();
         assert!(wait_async(Duration::from_secs(8), || tl.current().is_none()).await, "{:?}", tl.current());
         let res = app.clone().oneshot(Request::delete(format!("/api/runs/{id}")).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(!folder.exists(), "the run's images go with it");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_s_images_folder_is_checked_before_the_start_and_kept_after() {
+        let root = scratch_dir("tlfolder");
+        let mut st = timelapse_state(root.join("captures")).await;
+        st.config_path = Arc::new(root.join("config.toml"));
+        let cfg = Arc::clone(&st.config);
+        let app = router(st);
+        // a file where the folder should be: refused, nothing started
+        std::fs::write(root.join("afile"), b"x").unwrap();
+        let mut bad = timelapse_run(5);
+        bad["timelapse"]["folder"] = json!(root.join("afile").to_string_lossy());
+        let res = app.clone().oneshot(post_json("/api/runs", bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(res).await["error"].as_str().unwrap().starts_with("Images saved in:"));
+        let st = body_json(app.clone().oneshot(get("/api/status")).await.unwrap()).await;
+        assert!(st["active"].is_null(), "no run started: {st}");
+        assert!(cfg.read().await.camera.as_ref().is_none_or(|c| c.captures_dir.is_empty()));
+        // a good one: the run starts and the next run starts there
+        let good = root.join("Manips").join("Project A").to_string_lossy().into_owned();
+        let mut ok = timelapse_run(5);
+        ok["timelapse"]["folder"] = json!(good);
+        let res = app.clone().oneshot(post_json("/api/runs", ok)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert!(std::path::Path::new(&good).is_dir());
+        assert_eq!(cfg.read().await.camera.as_ref().unwrap().captures_dir, good);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3513,6 +3666,7 @@ mod tests {
         assert_eq!(cfg.read().await.camera.as_ref().unwrap().captures_dir, good);
         let info = body_json(app.clone().oneshot(get("/api/camera/captures")).await.unwrap()).await;
         assert_eq!(info["folder"], json!(good));
+        assert!(info["default_folder"].as_str().unwrap().ends_with("captures"), "{info}");
         assert_eq!(info["used_bytes"], 0);
         let res = app.clone().oneshot(post_json("/api/camera/interval", json!({ "interval_min": 2000 }))).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);

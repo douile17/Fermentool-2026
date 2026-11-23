@@ -1,7 +1,7 @@
 <script>
   import { saveOrSay } from '../lib/savefile.js';
   import { app } from '../lib/state.svelte.js';
-  import { get, post } from '../lib/api.js';
+  import { get, post, postWaiting } from '../lib/api.js';
   import { num, dur, vol, unitFor, digitsFor, RPM_LIMITS, FLOW_LIMITS } from '../lib/fmt.js';
   import { mlPerRpmOf, tubeRange, curveFit, rpmCurveProblem } from '../lib/tuberange.js';
   import { canStartRun } from '../lib/link.js';
@@ -22,6 +22,7 @@
   import { newestOnly, previewWanted, profileReady } from '../lib/preview.js';
   import { bytesText, countText, estimate, INTERVAL_CHOICES, intervalChoice, intervalWords, tlSummary } from '../lib/timelapse.js';
   import { liveShown } from '../lib/camera.js';
+  import { folderPreview, folderToSend, sameFolder } from '../lib/tlplayer.js';
   import LiveImg from '../components/LiveImg.svelte';
 
   let f = $state({
@@ -236,6 +237,52 @@
     };
   });
   let camLive = $state('starting');
+
+  // Where the run's images go: the folder saved (the last one a run used,
+  // Settings > Camera), Browse... for another one for this run on (kept
+  // once the run starts), or the default one. The run's own folder goes in it.
+  let capInfo = $state(null);
+  let tlFolder = $state(null); // picked here, or null: the folder saved
+  let tlFree = $state(null); // free space on the picked folder's disk
+  let picking = $state(false);
+  let pickErr = $state(null);
+  $effect(() => {
+    if (!cameraReady) return;
+    get('/api/camera/captures')
+      .then((c) => (capInfo = c))
+      .catch(() => {});
+  });
+  const shownFolder = $derived(tlFolder ?? capInfo?.folder ?? null);
+  const atDefault = $derived(sameFolder(shownFolder, capInfo?.default_folder));
+  const shownFree = $derived(tlFolder != null ? tlFree : freeBytes);
+  // the run's own folder, named as the daemon will (at Start's minute)
+  let previewNow = $state(new Date());
+  $effect(() => {
+    if (step < 4) return;
+    previewNow = new Date();
+    const t = setInterval(() => (previewNow = new Date()), 30_000);
+    return () => clearInterval(t);
+  });
+  const runFolder = $derived(folderPreview(previewNow, f.name.trim() || '<run name>'));
+  async function browseFolder() {
+    picking = true;
+    pickErr = null;
+    try {
+      const r = await postWaiting('/api/folders/pick', { start: shownFolder });
+      if (r?.folder) {
+        tlFolder = r.folder;
+        tlFree = r.free_bytes ?? null;
+      }
+    } catch (e) {
+      pickErr = e.message;
+    }
+    picking = false;
+  }
+  function useDefaultFolder() {
+    tlFolder = capInfo?.default_folder ?? null;
+    tlFree = null;
+    pickErr = null;
+  }
 
   // Required once anyone is set up for notifications (the daemon checks too).
   const needsResponsible = $derived(people.length > 0 && !f.responsible);
@@ -557,7 +604,7 @@
         refill_draw_g: autoRefill && f.refill_draw_kg > 0 ? f.refill_draw_kg * 1000 : null,
         tubing_calibration_id: trimOn ? f.tubing_calibration_id : null,
         responsible: f.responsible || null,
-        timelapse: tlOn ? { interval_min: tlMin } : null,
+        timelapse: tlOn ? { interval_min: tlMin, folder: folderToSend(shownFolder, capInfo?.folder, capInfo?.default_folder) } : null,
       });
       // the run started; a timelapse that could not is said on the Overview
       app.timelapseNote = res?.timelapse_error ?? null;
@@ -1057,10 +1104,24 @@
                   {/if}
                 </div>
               </div>
+              {#if shownFolder}
+                <div class="field tl-where"><span id="nr-tl-folder">Images saved in</span>
+                  <div class="tl-folder">
+                    <span class="path" aria-labelledby="nr-tl-folder" title={shownFolder}><Icon name="folder" size={18} /><span class="p">{shownFolder}</span></span>
+                    <button class="btn-ghost" type="button" disabled={picking} onclick={browseFolder}>{picking ? 'Choosing…' : 'Browse…'}</button>
+                  </div>
+                  <small class="k">This run's images go into a folder of their own: <b class="own">{runFolder}</b></small>
+                  {#if picking}<small class="k">Choose the folder in the window Windows opened.</small>{/if}
+                  {#if pickErr}<small class="err-t">{pickErr}</small>{/if}
+                  {#if !atDefault && capInfo?.default_folder}
+                    <button class="linkish" type="button" onclick={useDefaultFolder}>Use the default folder</button>
+                  {/if}
+                </div>
+              {/if}
               {#if tlEst}
                 <ul class="tl-figs">
                   <li><Icon name="gallery" size={18} /><span>about <b>{countText(tlEst.images)}</b> images over {dur(durationS)}</span></li>
-                  <li><Icon name="database" size={18} /><span>about <b>{bytesText(tlEst.bytes)}</b>{#if freeBytes != null}, {bytesText(freeBytes)} free{/if}</span></li>
+                  <li><Icon name="database" size={18} /><span>about <b>{bytesText(tlEst.bytes)}</b>{#if shownFree != null}, {bytesText(shownFree)} free on this disk{/if}</span></li>
                 </ul>
               {/if}
               {#if standalone}<p class="k warn-t">Starting the run ends the timelapse “{standalone.name}” ({standalone.images} images).</p>{/if}
@@ -1098,7 +1159,10 @@
           <dd class="edit"><button class="linkish" onclick={() => goTo(3)}>Change</button></dd>
 
           <dt>Timelapse</dt>
-          <dd>{cameraReady ? tlSummary(tlOn, tlMin, tlEst) : 'no camera'}</dd>
+          <dd>
+            {cameraReady ? tlSummary(tlOn, tlMin, tlEst) : 'no camera'}
+            {#if cameraReady && tlOn && shownFolder}<span class="tl-dest"><Icon name="folder" size={16} />{shownFolder}\{runFolder}</span>{/if}
+          </dd>
           <dd class="edit"><button class="linkish" onclick={() => goTo(4)}>Change</button></dd>
 
           <dt>Feed</dt>
@@ -1382,6 +1446,22 @@
   .tl-every { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }
   .tl-custom { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
   .tl-custom input { width: 80px; }
+  .tl-where { gap: var(--s-1); }
+  .tl-folder { display: flex; gap: var(--s-2); align-items: stretch; }
+  .tl-folder .path {
+    flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: var(--s-2);
+    padding: var(--s-2) var(--s-3); border: 1px solid var(--line); border-radius: 9px;
+    color: var(--muted);
+  }
+  .tl-folder .path :global(svg) { flex: none; }
+  .tl-folder .path .p { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-where .k { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .tl-where .k b { color: var(--ink); font-weight: 500; }
+  .tl-where .k .own { display: block; }
+  .tl-where .linkish { align-self: flex-start; font-size: 12.5px; }
+  .tl-where .err-t { font-size: 12.5px; color: var(--danger-ink); }
+  .tl-dest { display: flex; align-items: flex-start; gap: var(--s-1); margin-top: 2px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .tl-dest :global(svg) { flex: none; margin-top: 1px; }
   .tl-figs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); color: var(--muted); }
   .tl-figs li { display: flex; align-items: center; gap: var(--s-2); }
   .tl-figs b { color: var(--ink); font-weight: 600; }

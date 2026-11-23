@@ -14,6 +14,12 @@
   --surface-sunken: #eef2f1;
   /* behind a product photo (shot on white): white in every theme */
   --photo-bg: #ffffff;
+  /* the timelapse player: dark in every theme, the pictures come first */
+  --player-bg: #141c1e;
+  --player-panel: #222d2f;
+  --player-ink: #eef5f3;
+  --player-muted: #a9bdbc;
+  --player-line: #405152;
   --line: #e9efee;
   --line-soft: #f0f4f3;
   --ink: #12292e;
@@ -28,6 +34,14 @@
   --warn-ink: #9a5a12;
   --fill-ink: #13677f;
   --on-primary: #ffffff;
+  /* Play (the run's images) green, white words at 4.5:1; folder icons yellow. */
+  --play: #0b8460;
+  --play-hover: #0b6b4e;
+  --on-play: #ffffff;
+  --folder: #c98a0b;
+  --folder-bg: #fdf4dc;
+  --folder-bg-hover: #f9e9bd;
+  --folder-line: #efd89a;
   /* Filled destructive buttons: white text stays readable on it. */
   --danger-solid: #c93a3a;
   --danger-solid-hover: #b23030;
@@ -73,6 +87,13 @@
     --teal-700: #46b6c4;
     --teal-600: #5cc2cf;
     --teal-400: #6fbecb;
+    --play: #37d39b;
+    --play-hover: #57e3b4;
+    --on-play: #0d1a16;
+    --folder: #f2c14e;
+    --folder-bg: #3a3220;
+    --folder-bg-hover: #4a3f27;
+    --folder-line: #5e4f2c;
     --lime-300: #2b6652;
     --green-500: #37d39b;
     --green-600: #57e3b4;
@@ -114,6 +135,13 @@
   --teal-700: #46b6c4;
   --teal-600: #5cc2cf;
   --teal-400: #6fbecb;
+  --play: #37d39b;
+  --play-hover: #57e3b4;
+  --on-play: #0d1a16;
+  --folder: #f2c14e;
+  --folder-bg: #3a3220;
+  --folder-bg-hover: #4a3f27;
+  --folder-line: #5e4f2c;
   --lime-300: #2b6652;
   --green-500: #37d39b;
   --green-600: #57e3b4;
@@ -190,6 +218,11 @@ button, .btn {
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary { background: var(--teal-700); color: var(--on-primary); }
 .btn-primary:not(:disabled):hover { background: var(--teal-600); }
+.btn-play { background: var(--play); color: var(--on-play); }
+.btn-play:not(:disabled):hover { background: var(--play-hover); }
+svg.icon[data-icon="folder"] { color: var(--folder); }
+.btn-folder { background: var(--folder-bg); border-color: var(--folder-line); color: var(--ink); }
+.btn-folder:not(:disabled):hover { background: var(--folder-bg-hover); }
 .btn-ghost { background: transparent; border-color: var(--line); color: var(--ink); }
 .btn-ghost:not(:disabled):hover { background: var(--surface-sunken); }
 .btn-danger { background: var(--danger-solid); color: #fff; }

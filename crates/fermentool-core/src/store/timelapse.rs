@@ -323,6 +323,15 @@ impl Store {
         Ok(rows)
     }
 
+    /// All of a timelapse's images, oldest first (the player's frames).
+    pub fn frames(&self, timelapse_id: i64) -> Result<Vec<ImageRow>> {
+        let mut st = self
+            .conn
+            .prepare(&format!("SELECT {IMG_COLS} FROM timelapse_images WHERE timelapse_id = ?1 ORDER BY id"))?;
+        let rows = st.query_map([timelapse_id], image_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn image(&self, id: i64) -> Result<Option<ImageRow>> {
         Ok(self
             .conn

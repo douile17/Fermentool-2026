@@ -10,6 +10,28 @@ corrections de l'audit du 9).
 Installateur `Fermentool_0.1.8_x64-setup.exe` construit le 18 novembre
 depuis `main` (tag `v0.1.8`) : tout ce qui suit, jusqu'au profil Steps.
 
+### Images des runs (18 novembre, après 0.1.8)
+
+- New run, étape Timelapse : « Images saved in » montre le dossier où le
+  run crée le sien, et le nom de ce dossier. Browse… ouvre le sélecteur de
+  dossiers de Windows ; « Use the default folder » revient au dossier par
+  défaut. Le dossier choisi est retenu pour les runs suivants. Check and
+  start redit le chemin complet.
+- History : une section Images dans le détail d'un run avec timelapse
+  (nombre, intervalle, taille, six images réparties sur le run), avec
+  **Play** et **Open folder**.
+- Le lecteur : les images l'une après l'autre comme une animation, Play et
+  Pause, image par image, une barre sur tout le run, 5 à 50 images par
+  seconde, sur l'image le temps du run et le volume délivré, sous l'image
+  la date et l'heure de la prise.
+- Camera : **Play** et **Open folder** sur les dernières images, pour revoir
+  pendant le run les images déjà prises.
+- Overview sans run : le bouton New run, rien d'autre.
+- Play des images en vert, les icônes de dossier en jaune, Open folder sur
+  un fond jaune pâle.
+- Settings, Camera : le champ s'appelle « Images saved in », comme dans New
+  run.
+
 ### Fenêtre d'application (18 novembre)
 
 - La fenêtre Fermentool s'ouvre agrandie (barre de titre et barre des
